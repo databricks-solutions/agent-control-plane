@@ -12,7 +12,7 @@ from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from backend.config import settings, get_databricks_host
-from backend.api import agents, requests, kpis, analytics, health, websocket, gateway, mlflow, billing, tools, access, playground, workspaces, user_analytics, topology, operations
+from backend.api import agents, requests, kpis, analytics, health, websocket, gateway, mlflow, billing, tools, access, playground, workspaces, user_analytics, topology, operations, vector_search
 from backend.utils.auth import get_current_user
 
 
@@ -120,6 +120,13 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Observability startup init skipped: %s", exc)
 
+    def _init_vector_search():
+        try:
+            from backend.services.vector_search_service import ensure_vector_search_tables
+            ensure_vector_search_tables()
+        except Exception as exc:
+            logger.warning("Vector search startup init skipped: %s", exc)
+
     # Run all init in a background thread with a timeout so a hanging
     # DB connection doesn't prevent the server from starting.
     def _run_all_inits():
@@ -130,6 +137,7 @@ async def lifespan(app: FastAPI):
         _init_request_logs()
         _init_gateway()
         _init_observability()
+        _init_vector_search()
 
     t = threading.Thread(target=_run_all_inits, daemon=True)
     t.start()
@@ -270,6 +278,7 @@ app.include_router(workspaces.router, prefix=settings.api_prefix)
 app.include_router(user_analytics.router, prefix=settings.api_prefix)
 app.include_router(topology.router, prefix=settings.api_prefix)
 app.include_router(operations.router, prefix=settings.api_prefix)
+app.include_router(vector_search.router, prefix=settings.api_prefix)
 app.include_router(websocket.router)
 
 # ── Serve React SPA from the built dist/ folder ──────────────────

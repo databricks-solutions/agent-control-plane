@@ -16,6 +16,7 @@ import ToolsPage from './pages/Tools'
 import PlaygroundPage from './pages/Playground'
 import WorkspacesPage from './pages/Workspaces'
 import TopologyView from './pages/TopologyView'
+import VectorSearchPage from './pages/VectorSearch'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -44,6 +45,7 @@ ReactDOM.createRoot(rootElement).render(
             <Route path="/agents" element={<AgentsPage />} />
             <Route path="/agents/detail/:agentId" element={<AgentDetailPage />} />
             <Route path="/tools" element={<ToolsPage />} />
+            <Route path="/vector-search" element={<VectorSearchPage />} />
             <Route path="/ai-gateway" element={<AIGatewayPage />} />
             <Route path="/observability" element={<ObservabilityPage />} />
             <Route path="/playground" element={<PlaygroundPage />} />

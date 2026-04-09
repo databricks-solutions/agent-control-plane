@@ -1230,3 +1230,76 @@ export function useRefreshGateway() {
     },
   })
 }
+
+// ── Vector Search ──────────────────────────────────────────────
+export function useVectorSearchOverview() {
+  return useQuery({
+    queryKey: ['vector-search', 'overview'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/overview')
+      return data as { total_endpoints: number; online_endpoints: number; offline_endpoints: number; total_indexes: number; by_status: Record<string, number>; by_index_type: Record<string, number> }
+    },
+  })
+}
+
+export function useVectorSearchEndpoints() {
+  return useQuery({
+    queryKey: ['vector-search', 'endpoints'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/endpoints')
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
+
+export function useVectorSearchIndexes(endpointName?: string) {
+  return useQuery({
+    queryKey: ['vector-search', 'indexes', endpointName],
+    queryFn: async () => {
+      const params: any = {}
+      if (endpointName) params.endpoint_name = endpointName
+      const { data } = await apiClient.get('/vector-search/indexes', { params })
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
+
+export function useVectorSearchCostSummary(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'cost-summary', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/cost/summary', { params: { days } })
+      return data as { total_dbus: number; total_cost_usd: number; endpoint_count: number; workspace_count: number; days: number }
+    },
+  })
+}
+
+export function useVectorSearchCostTrend(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'cost-trend', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/cost/trend', { params: { days } })
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
+
+export function useVectorSearchCostByEndpoint(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'cost-by-endpoint', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/cost/by-endpoint', { params: { days } })
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
+
+export function useVectorSearchCostByWorkload(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'cost-by-workload', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/cost/by-workload', { params: { days } })
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
