@@ -8,13 +8,13 @@ command:
 
 env:
   - name: LAKEBASE_DNS
-    value: "<generated-by-deploy-script>"
+    value: "instance-xxxx.database.cloud.databricks.com"
   - name: LAKEBASE_DATABASE
     value: "control_plane"
   - name: LAKEBASE_INSTANCE
-    value: "<generated-by-deploy-script>"
+    value: "ai-control-plane-db"
   - name: DATABRICKS_ACCOUNT_ID
-    value: "<generated-by-deploy-script>"
+    value: "0d26daa6-5e44-4c97-a497-ef015f91254a"
 
 resources:
   - name: obo-auth
