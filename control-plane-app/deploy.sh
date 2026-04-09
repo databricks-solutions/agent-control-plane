@@ -93,6 +93,11 @@ echo "Building frontend..."
 (cd frontend && npm run build)
 echo "  Built dist/"
 
+# ── Clean build artifacts before upload ────────────────────────
+find backend/ -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+rm -rf backend/.databricks 2>/dev/null || true
+echo "  Cleaned __pycache__ and .databricks from backend/"
+
 # ── Upload only runtime files ─────────────────────────────────
 echo "Uploading dist/ ..."
 $DB workspace import-dir dist "$WORKSPACE_PATH/dist" --overwrite $PROFILE_FLAG 2>/dev/null \
