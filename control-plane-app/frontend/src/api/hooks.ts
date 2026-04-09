@@ -458,7 +458,7 @@ export function useGatewayUsageSummary(days = 7) {
     queryKey: ['gateway', 'usage-summary', days],
     queryFn: async () => {
       const { data } = await apiClient.get('/gateway/usage/summary', { params: { days } })
-      return data
+      return Array.isArray(data) ? data : []
     },
     staleTime: GW_STALE,
   })
@@ -471,7 +471,7 @@ export function useGatewayUsageTimeseries(days = 7, endpointName?: string) {
       const { data } = await apiClient.get('/gateway/usage/timeseries', {
         params: { days, ...(endpointName ? { endpoint_name: endpointName } : {}) },
       })
-      return data
+      return Array.isArray(data) ? data : []
     },
     staleTime: GW_STALE,
   })
@@ -482,7 +482,7 @@ export function useGatewayUsageByUser(days = 7) {
     queryKey: ['gateway', 'usage-by-user', days],
     queryFn: async () => {
       const { data } = await apiClient.get('/gateway/usage/by-user', { params: { days } })
-      return data
+      return Array.isArray(data) ? data : []
     },
     staleTime: GW_STALE,
   })
@@ -533,7 +533,7 @@ export function useAllAgentsMerged(workspaceId?: string | null) {
       const params: any = {}
       if (workspaceId) params.workspace_id = workspaceId
       const { data } = await apiClient.get('/agents/all', { params })
-      return data as any[]
+      return Array.isArray(data) ? data : []
     },
   })
 }
