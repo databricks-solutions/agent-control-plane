@@ -204,6 +204,29 @@ except Exception as exc:
     _host_resolution_log.append(f"lakebase: {type(exc).__name__}: {str(exc)[:200]}")
     print(f"  ⚠️  Lakebase workspace_registry read failed: {exc}")
 
+# Always include the current workspace — the workflow runs as the user
+# who has full access to their own MLflow experiments and traces
+try:
+    _local_w = WorkspaceClient()
+    _local_host = _local_w.config.host.rstrip("/")
+    _local_ws_id = spark.conf.get("spark.databricks.workspaceUrl", "").replace("https://", "").split(".")[0]
+    # Get workspace ID from the org ID in spark conf
+    try:
+        _local_ws_id = spark.conf.get("spark.databricks.clusterUsageTags.orgId", "")
+    except Exception:
+        pass
+    if _local_host and _local_ws_id:
+        workspace_hosts[_local_ws_id] = _local_host
+        _host_resolution_log.append(f"current workspace: {_local_ws_id} → {_local_host}")
+        print(f"  ✅ Added current workspace: {_local_ws_id} → {_local_host}")
+    elif _local_host:
+        # Use host as a fallback key if we can't get the workspace ID
+        workspace_hosts["local"] = _local_host
+        _host_resolution_log.append(f"current workspace: local → {_local_host}")
+        print(f"  ✅ Added current workspace: local → {_local_host}")
+except Exception as exc:
+    print(f"  ⚠️  Could not add current workspace: {exc}")
+
 # COMMAND ----------
 
 # MAGIC %md

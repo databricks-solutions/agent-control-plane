@@ -111,13 +111,15 @@ targets:
       warehouse_id: <your-warehouse-id> # SQL warehouse ID for system table queries
       account_id: <your-account-id>     # Databricks account ID
 
-  # Example production target with tighter schedule:
-  # prod:
-  #   mode: development
-  #   variables:
-  #     catalog: my_prod_catalog
-  #     schema: control_plane
-  #     lakebase_dns: "instance-xxxx.database.cloud.databricks.com"
+  prod:
+    mode: development
+    variables:
+      catalog: your_catalog
+      schema: control_plane
+      lakebase_dns: "instance-xxxx.database.cloud.databricks.com"
+      lakebase_instance: "ai-control-plane-db"
+      warehouse_id: "4b858148f7c56d1f"
+      account_id: "0d26daa6-5e44-4c97-a497-ef015f91254a"
   #     lakebase_instance: "my-lakebase-instance"
   #     warehouse_id: "xxxx"
   #     account_id: "xxxx"
