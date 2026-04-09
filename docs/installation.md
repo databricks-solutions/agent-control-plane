@@ -61,9 +61,23 @@ DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
 DATABRICKS_ACCOUNT_ID=your-account-id
 ```
 
-## Step 5: Deploy the App
+## Step 5: Initialize Lakebase Tables
 
-> **Note**: Lakebase tables are created automatically when the app starts. No manual setup needed.
+```bash
+# Make sure you're authenticated
+databricks auth login --host https://your-workspace.cloud.databricks.com
+
+# Set env vars and run setup
+export LAKEBASE_DNS=instance-xxxx.database.cloud.databricks.com
+export LAKEBASE_DATABASE=control_plane
+export LAKEBASE_INSTANCE=ai-control-plane-db
+
+cd ..  # back to repo root
+pip install psycopg2-binary databricks-sdk requests
+python setup_lakebase_tables.py
+```
+
+## Step 6: Deploy the App
 
 ```bash
 cd control-plane-app
@@ -84,7 +98,7 @@ The deploy script will:
 3. Upload `dist/` and `backend/` to the workspace
 4. Deploy the Databricks App
 
-## Step 6: Deploy the Discovery Workflows
+## Step 7: Deploy the Discovery Workflows
 
 The workflows periodically discover agents and sync observability data.
 
@@ -123,7 +137,7 @@ databricks bundle run agent_discovery --target dev
 # The workflow will then run on schedule (every 30 min by default)
 ```
 
-## Step 7: Grant System Table Access (Optional)
+## Step 8: Grant System Table Access (Optional)
 
 For cross-workspace observability, the app's service principal needs access to `system.mlflow` tables:
 
@@ -138,7 +152,7 @@ GRANT SELECT ON TABLE system.mlflow.runs_latest TO `<sp-application-id>`;
 GRANT SELECT ON TABLE system.mlflow.run_metrics_history TO `<sp-application-id>`;
 ```
 
-## Step 8: Verify
+## Step 9: Verify
 
 1. Open your app URL (shown in the deploy output)
 2. **Agents page**: Should show discovered agents across the workspace

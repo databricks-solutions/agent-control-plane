@@ -60,6 +60,11 @@ check: ## Run all checks (Python compile + TypeScript type check + lint)
 	@cd control-plane-app/frontend && npx tsc --noEmit
 	@echo "All checks passed"
 
+# ── Lakebase ──────────────────────────────────────────────────
+
+setup-tables: ## Initialize Lakebase tables
+	cd control-plane-app && python3 ../setup_lakebase_tables.py
+
 # ── Cleanup ───────────────────────────────────────────────────
 
 clean: ## Remove build artifacts

@@ -71,47 +71,10 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Playground startup init skipped: %s", exc)
 
-    def _init_core_tables():
+    def _init_request_logs():
         try:
             from backend.database import execute_update
             ddl_statements = [
-                """
-                CREATE TABLE IF NOT EXISTS agent_registry (
-                    agent_id VARCHAR(255) PRIMARY KEY,
-                    name VARCHAR(255) NOT NULL,
-                    type VARCHAR(50),
-                    description TEXT,
-                    endpoint_name VARCHAR(255),
-                    endpoint_type VARCHAR(50),
-                    endpoint_status VARCHAR(50),
-                    app_id VARCHAR(255),
-                    app_url VARCHAR(500),
-                    version VARCHAR(50),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    created_by VARCHAR(255),
-                    tags JSONB,
-                    config JSONB,
-                    is_active BOOLEAN DEFAULT TRUE
-                )
-                """,
-                "CREATE INDEX IF NOT EXISTS idx_agent_registry_type ON agent_registry(type)",
-                "CREATE INDEX IF NOT EXISTS idx_agent_registry_status ON agent_registry(endpoint_status)",
-                """
-                CREATE TABLE IF NOT EXISTS model_registry (
-                    model_id VARCHAR(255) PRIMARY KEY,
-                    name VARCHAR(255) NOT NULL,
-                    version VARCHAR(50) NOT NULL,
-                    model_uri VARCHAR(500),
-                    model_type VARCHAR(50),
-                    endpoint_name VARCHAR(255),
-                    endpoint_type VARCHAR(50),
-                    status VARCHAR(50),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    metrics JSONB,
-                    tags JSONB
-                )
-                """,
                 """
                 CREATE TABLE IF NOT EXISTS request_logs (
                     request_id      TEXT PRIMARY KEY,
@@ -139,9 +102,9 @@ async def lifespan(app: FastAPI):
                     execute_update(stmt)
                 except Exception as exc:
                     logger.warning("request_logs DDL warning: %s", exc)
-            logger.info("Core tables ensured (agent_registry, model_registry, request_logs)")
+            logger.info("Request logs table ensured")
         except Exception as exc:
-            logger.warning("Core tables startup init skipped: %s", exc)
+            logger.warning("Request logs startup init skipped: %s", exc)
 
     def _init_gateway():
         try:
@@ -164,7 +127,7 @@ async def lifespan(app: FastAPI):
         _init_discovery()
         _init_tools()
         _init_playground()
-        _init_core_tables()
+        _init_request_logs()
         _init_gateway()
         _init_observability()
 
