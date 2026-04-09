@@ -1,0 +1,2 @@
+# Databricks bundle state (contains workspace-specific paths and credentials)
+.databricks/

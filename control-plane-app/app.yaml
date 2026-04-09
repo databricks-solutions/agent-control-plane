@@ -1,0 +1,22 @@
+command:
+  - "uvicorn"
+  - "backend.main:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+
+env:
+  - name: LAKEBASE_DNS
+    value: "<generated-by-deploy-script>"
+  - name: LAKEBASE_DATABASE
+    value: "control_plane"
+  - name: LAKEBASE_INSTANCE
+    value: "<generated-by-deploy-script>"
+  - name: DATABRICKS_ACCOUNT_ID
+    value: "<generated-by-deploy-script>"
+
+resources:
+  - name: obo-auth
+    description: "User authorization for OBO identity"
+    permission: "all-apis"

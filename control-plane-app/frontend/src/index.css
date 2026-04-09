@@ -1,0 +1,81 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --db-red: #FF3621;
+  --db-navy: #1B3139;
+  font-family: 'DM Sans', Inter, system-ui, -apple-system, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color-scheme: light;
+}
+
+.dark {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+/* Smooth sidebar transition */
+.sidebar-transition {
+  transition: width 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Tooltip for collapsed sidebar icons */
+.sidebar-tooltip {
+  @apply invisible absolute left-full ml-3 px-2 py-1 bg-gray-900 text-white text-xs rounded-md whitespace-nowrap z-50;
+}
+.dark .sidebar-tooltip {
+  @apply bg-gray-700 text-gray-100;
+}
+.group:hover .sidebar-tooltip {
+  @apply visible;
+}
+
+/* ── Theme toggle switch ──────────────────────────── */
+.theme-toggle {
+  @apply relative inline-flex items-center h-6 w-11 rounded-full cursor-pointer transition-colors duration-200;
+  background-color: #d1d5db;
+}
+.dark .theme-toggle {
+  background-color: #4b5563;
+}
+.theme-toggle .toggle-dot {
+  @apply inline-block h-4 w-4 rounded-full bg-white transition-transform duration-200 shadow-sm;
+  transform: translateX(4px);
+}
+.theme-toggle.active .toggle-dot {
+  transform: translateX(24px);
+}
+
+/* ── Recharts dark overrides (labels, grid, tooltip) ── */
+.dark .recharts-cartesian-grid line {
+  stroke: #374151;
+}
+.dark .recharts-text {
+  fill: #9ca3af;
+}
+.dark .recharts-default-tooltip {
+  background-color: #1f2937 !important;
+  border-color: #374151 !important;
+  color: #f3f4f6 !important;
+}
+.dark .recharts-tooltip-label {
+  color: #d1d5db !important;
+}
+
+/* Chart tooltip CSS variables */
+:root {
+  --tooltip-bg: #fff;
+  --tooltip-text: #1f2937;
+}
+.dark {
+  --tooltip-bg: #1f2937;
+  --tooltip-text: #f3f4f6;
+}

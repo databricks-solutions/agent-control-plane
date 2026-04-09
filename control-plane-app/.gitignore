@@ -1,0 +1,72 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Generated deploy configs (contain workspace-specific values)
+app-sandbox.yaml
+
+# Databricks sync state
+.databricks/
+backend/.databricks/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+dist/
+.turbo/
+*.tsbuildinfo
+
+# Playwright / tests
+test-results/
+playwright-report/
+playwright/.cache/
+.auth/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Auto-generated setup / troubleshooting docs
+AUTO_SETUP_COMPLETE.md
+BACKEND_RUNNING.md
+DEBUG_UI.md
+DEPLOYMENT.md
+GETTING_STARTED.md
+INSTALL_NODEJS.md
+NEXT_STEPS.md
+QUICK_START.md
+ROUTETREE_FIX.md
+SETUP_COMPLETE.md
+SETUP_STATUS.md
+START_HERE.md
+STEP_BY_STEP_SETUP.md
+SUMMARY.md
+UI_TROUBLESHOOTING.md
+complete_setup.sh
+
+# Logs
+*.log
+npm-debug.log*

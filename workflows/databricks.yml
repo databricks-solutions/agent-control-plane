@@ -1,0 +1,128 @@
+bundle:
+  name: agent_discovery_workflow
+
+variables:
+  catalog:
+    default: your_catalog
+    description: Unity Catalog name for Delta tables
+  schema:
+    default: control_plane
+    description: Schema name for Delta tables
+  lakebase_dns:
+    description: Lakebase PostgreSQL DNS hostname
+  lakebase_database:
+    default: control_plane
+    description: Lakebase database name
+  lakebase_instance:
+    default: your-lakebase-instance
+    description: Lakebase instance name for credential generation
+  account_id:
+    description: Databricks account ID for cross-workspace operations (find in your workspace URL or account console)
+  warehouse_id:
+    description: SQL warehouse ID for system table queries
+
+resources:
+  jobs:
+    agent_discovery:
+      name: "control-plane-agent-discovery"
+      description: >
+        Scheduled job that discovers all AI agents and MLflow observability
+        data across workspaces, then syncs everything to Lakebase for the
+        Control Plane dashboard.
+
+      schedule:
+        quartz_cron_expression: "0 0/30 * * * ?"
+        timezone_id: "UTC"
+        pause_status: UNPAUSED
+
+      tasks:
+        - task_key: discover_agents
+          description: "Discover agents from APIs + system tables → Delta table"
+          notebook_task:
+            notebook_path: ./01_discover_agents.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              delta_table: discovered_agents
+          environment_key: default
+
+        - task_key: discover_observability
+          description: "Discover MLflow traces cross-workspace via SDK → Delta table"
+          notebook_task:
+            notebook_path: ./04_discover_observability.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              warehouse_id: ${var.warehouse_id}
+              account_id: ${var.account_id}
+              lakebase_dns: ${var.lakebase_dns}
+              lakebase_database: ${var.lakebase_database}
+              lakebase_instance: ${var.lakebase_instance}
+          environment_key: default
+
+        - task_key: sync_to_lakebase
+          description: "Sync agents + observability (Delta → Lakebase) + system table experiments/runs"
+          depends_on:
+            - task_key: discover_agents
+            - task_key: discover_observability
+          notebook_task:
+            notebook_path: ./02_sync_to_lakebase.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              delta_table: discovered_agents
+              lakebase_dns: ${var.lakebase_dns}
+              lakebase_database: ${var.lakebase_database}
+              lakebase_instance: ${var.lakebase_instance}
+              account_id: ${var.account_id}
+              warehouse_id: ${var.warehouse_id}
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+            dependencies:
+              - databricks-sdk
+              - psycopg2-binary
+              - requests
+
+      email_notifications:
+        on_failure:
+          - ${workspace.current_user.userName}
+
+      max_concurrent_runs: 1
+
+      tags:
+        project: ai-control-plane
+        component: discovery
+
+targets:
+  # Copy and customize a target for your workspace.
+  # See docs/installation.md for configuration details.
+  dev:
+    mode: development
+    default: true
+    variables:
+      catalog: <your-catalog>           # e.g. main, my_catalog
+      schema: control_plane
+      lakebase_dns: <your-lakebase-dns> # e.g. instance-xxxx.database.cloud.databricks.com
+      lakebase_instance: <your-lakebase-instance-name>
+      warehouse_id: <your-warehouse-id> # SQL warehouse ID for system table queries
+      account_id: <your-account-id>     # Databricks account ID
+
+  # Example production target with tighter schedule:
+  # prod:
+  #   mode: development
+  #   variables:
+  #     catalog: my_prod_catalog
+  #     schema: control_plane
+  #     lakebase_dns: "instance-xxxx.database.cloud.databricks.com"
+  #     lakebase_instance: "my-lakebase-instance"
+  #     warehouse_id: "xxxx"
+  #     account_id: "xxxx"
+  #   resources:
+  #     jobs:
+  #       agent_discovery:
+  #         schedule:
+  #           quartz_cron_expression: "0 0/15 * * * ?"

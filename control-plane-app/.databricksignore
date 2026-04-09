@@ -1,0 +1,35 @@
+# Node / frontend build artifacts — never needed in workspace
+node_modules/
+frontend/
+.next/
+
+# Local tooling and caches
+.databricks/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# Source configs not needed at runtime
+tsconfig.json
+tsconfig.node.json
+vite.config.ts
+tailwind.config.js
+postcss.config.js
+package.json
+package-lock.json
+
+# Documentation (not needed at runtime)
+*.md
+
+# Git
+.git/
+.gitignore
