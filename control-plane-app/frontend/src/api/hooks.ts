@@ -309,7 +309,12 @@ export function useGatewayPageData() {
     queryKey: ['gateway', 'page-data'],
     queryFn: async () => {
       const { data } = await apiClient.get('/gateway/page-data')
-      return data as { overview: any; endpoints: any[]; last_refreshed: string | null }
+      return {
+        overview: {},
+        endpoints: [],
+        last_refreshed: null,
+        ...data,
+      } as { overview: any; endpoints: any[]; last_refreshed: string | null }
     },
     staleTime: GW_STALE,
   })
@@ -744,7 +749,21 @@ export function useBillingPageData(days = 30, workspaceId?: string | null) {
       const params: any = { days }
       if (workspaceId) params.workspace_id = workspaceId
       const { data } = await apiClient.get('/billing/page-data', { params })
-      return data as BillingPageData
+      // Ensure all array fields have defaults to prevent .map() crashes
+      return {
+        current_workspace_id: null,
+        cache_status: { is_refreshing: false, caches: {} },
+        workspaces: [],
+        summary: {},
+        trend: [],
+        by_sku: [],
+        tokens: [],
+        daily_tokens: [],
+        products: [],
+        cost_by_user: [],
+        tokens_by_user: [],
+        ...data,
+      } as BillingPageData
     },
   })
 }
