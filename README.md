@@ -129,7 +129,6 @@ agent-control-plane/
 ├── docs/                       # Documentation
 │   ├── installation.md         # Setup guide
 │   └── configuration.md        # Config reference
-├── setup_lakebase_tables.py    # One-time Lakebase schema setup
 └── Makefile                    # Common operations
 ```
 
