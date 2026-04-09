@@ -114,42 +114,14 @@ async def list_traces(
     max_results: int = Query(10000, le=100000),
     workspace_id: Optional[str] = Query(None, description="Workspace ID, 'all' for all workspaces"),
 ):
-    """Search MLflow traces, optionally cross-workspace."""
+    """Search MLflow traces. All data comes from Lakebase cache (populated by scheduled workflow)."""
     try:
-        token = _obo_token(request)
-        if workspace_id == "all":
-            # Combine: current workspace (live) + cross-workspace (cache)
-            current_ws_traces = mlflow_service.search_traces(
-                None, max_results, filter_string, user_token=token,
-            )
-            cached = mlflow_service.get_cached_traces(None, max_results)
-            # Merge, deduplicate by request_id, sort by timestamp
-            seen = set()
-            merged = []
-            for t in current_ws_traces + cached:
-                rid = t.get("request_id") or t.get("info", {}).get("request_id", "")
-                if rid and rid not in seen:
-                    seen.add(rid)
-                    merged.append(t)
-            merged.sort(
-                key=lambda t: t.get("timestamp_ms") or t.get("request_time") or t.get("info", {}).get("timestamp_ms", 0),
-                reverse=True,
-            )
-            return merged
-        elif workspace_id:
-            # Specific remote workspace: cache first, live fallback
-            cached = mlflow_service.get_cached_traces(workspace_id, max_results)
-            if cached:
-                return cached
-            if token:
-                return mlflow_service.search_traces_for_workspace(workspace_id, max_results, filter_string, user_token=token)
-            return []
+        if workspace_id == "all" or not workspace_id:
+            # All workspaces (including current) — read everything from cache
+            return mlflow_service.get_cached_traces(None, max_results)
         else:
-            exp_list = experiment_ids.split(",") if experiment_ids else None
-            return mlflow_service.search_traces(
-                exp_list, max_results, filter_string,
-                user_token=token,
-            )
+            # Specific workspace
+            return mlflow_service.get_cached_traces(workspace_id, max_results)
     except HTTPException:
         raise
     except Exception as e:

@@ -157,13 +157,12 @@ export default function ObservabilityPage() {
         <div className="flex items-center gap-3">
           {/* Workspace selector */}
           <select
-            value={selectedWs ?? ''}
-            onChange={(e) => setSelectedWs(e.target.value || null)}
+            value={selectedWs ?? 'all'}
+            onChange={(e) => setSelectedWs(e.target.value || 'all')}
             className="text-xs border border-gray-300 dark:border-gray-600 rounded-md px-2.5 py-1.5 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:ring-1 focus:ring-red-500 focus:border-red-500"
           >
-            <option value="">Current Workspace</option>
             <option value="all">All Workspaces</option>
-            {(obsWorkspaces || []).map((ws) => (
+            {(obsWorkspaces || []).filter(ws => ws.trace_count > 0).map((ws) => (
               <option key={ws.workspace_id} value={ws.workspace_id}>
                 Workspace {ws.workspace_id} ({ws.trace_count} traces)
               </option>
