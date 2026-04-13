@@ -37,6 +37,9 @@ Cross-workspace MLflow experiments, evaluation runs, and traces. Queries `system
 ### AI Gateway
 Usage analytics, request logs, permissions, and rate limits for all model serving endpoints. Manage Unity Catalog grants directly from the UI.
 
+### Knowledge Bases
+Unified monitoring for Vector Search and Lakebase. Overview with combined cost trends, per-workspace drill-down. Vector Search tab shows endpoint/index inventory, sync status, health history, and cost by workload type (ingest/serving/storage). Lakebase tab shows instance inventory, compute vs storage cost, and per-workspace breakdown.
+
 ### Workspaces
 Multi-workspace federation dashboard. Agent inventory, cost breakdown, and health status per workspace.
 
@@ -62,7 +65,7 @@ User analytics with activity heatmap, RBAC matrix, and access management. See wh
                        │  Sub-100ms reads
                        ▼
 ┌─────────────────────────────────────────────────────┐
-│  FastAPI Backend (18 routers, 15+ services)          │
+│  FastAPI Backend (17 routers, 16 services)          │
 │  → React Frontend (TanStack Query + Tailwind)        │
 │  → Databricks App (OBO authentication)               │
 └─────────────────────────────────────────────────────┘
@@ -112,7 +115,7 @@ See the full **[Installation Guide](docs/installation.md)** for detailed setup i
 agent-control-plane/
 ├── control-plane-app/          # The Databricks App
 │   ├── backend/                # FastAPI (Python)
-│   │   ├── api/                # 18 route modules
+│   │   ├── api/                # 17 route modules
 │   │   ├── services/           # Business logic
 │   │   ├── models/             # Pydantic schemas
 │   │   └── utils/auth.py       # OBO authentication
@@ -122,10 +125,13 @@ agent-control-plane/
 │   ├── grant_sp_permissions.py # SP workspace permission setup
 │   └── propagate-sp.sh         # Cross-workspace SP propagation
 ├── workflows/                  # Databricks Asset Bundles
-│   ├── 01_discover_agents.py   # Agent discovery → Delta
-│   ├── 02_sync_to_lakebase.py  # Delta + system tables → Lakebase
-│   ├── 04_discover_observability.py  # Cross-workspace traces → Delta
-│   └── databricks.yml          # Bundle configuration
+│   ├── 01_discover_agents.py          # Agent discovery → Delta
+│   ├── 02_sync_to_lakebase.py         # All Delta → Lakebase + billing cache
+│   ├── 03_discover_knowledge_bases.py # Vector Search + Lakebase → Delta
+│   ├── 04_discover_observability.py   # Cross-workspace traces → Delta
+│   ├── 05_discover_user_analytics.py  # User activity → Delta
+│   ├── 06_discover_gateway_usage.py   # Gateway usage → Delta
+│   └── databricks.yml                 # Bundle configuration
 ├── docs/                       # Documentation
 │   ├── installation.md         # Setup guide
 │   └── configuration.md        # Config reference

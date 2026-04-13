@@ -6,7 +6,7 @@ See the **[root README](../README.md)** for project overview and **[Installation
 
 ## Backend
 
-FastAPI server with 18 API routers and 15+ service modules.
+FastAPI server with 17 API routers and 16 service modules.
 
 ```
 backend/
