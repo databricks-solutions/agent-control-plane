@@ -1303,3 +1303,122 @@ export function useVectorSearchCostByWorkload(days = 30) {
     },
   })
 }
+
+export function useVectorSearchPageData(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'page-data', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/page-data', { params: { days } })
+      return {
+        cost_summary: { total_dbus: 0, total_cost_usd: 0, endpoint_count: 0, workspace_count: 0, days },
+        cost_trend_by_workload: [],
+        cost_by_workspace: [],
+        cost_by_endpoint: [],
+        cost_by_workload: [],
+        overview: { total_endpoints: 0, online_endpoints: 0, offline_endpoints: 0, total_indexes: 0, by_status: {}, by_index_type: {} },
+        ...data,
+      }
+    },
+  })
+}
+
+export function useVectorSearchIndexDetails() {
+  return useQuery({
+    queryKey: ['vector-search', 'index-details'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/indexes/details')
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
+
+export function useVectorSearchHealthHistory(days = 7) {
+  return useQuery({
+    queryKey: ['vector-search', 'health-history', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/health/history', { params: { days } })
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
+
+export function useVectorSearchCostTrendByWorkload(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'cost-trend-workload', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/cost/trend-by-workload', { params: { days } })
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
+
+export function useKnowledgeBasesOverview(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'combined-overview', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/combined/overview', { params: { days } })
+      return { vector_search: { total_dbus: 0, total_cost_usd: 0, endpoint_count: 0, workspace_count: 0 },
+               lakebase: { total_dbus: 0, total_cost_usd: 0, workspace_count: 0 }, ...data }
+    },
+  })
+}
+
+export function useKnowledgeBasesCostTrend(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'combined-cost-trend', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/combined/cost-trend', { params: { days } })
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
+
+export function useLakebaseInstances() {
+  return useQuery({
+    queryKey: ['vector-search', 'lakebase-instances'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/lakebase/instances')
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
+
+export function useLakebaseCostSummary(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'lakebase-cost-summary', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/lakebase/cost/summary', { params: { days } })
+      return { total_dbus: 0, total_cost_usd: 0, workspace_count: 0, days, ...data }
+    },
+  })
+}
+
+export function useLakebaseCostTrend(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'lakebase-cost-trend', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/lakebase/cost/trend', { params: { days } })
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
+
+export function useLakebaseCostByWorkspace(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'lakebase-cost-by-workspace', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/lakebase/cost/by-workspace', { params: { days } })
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
+
+export function useLakebaseCostByType(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'lakebase-cost-by-type', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/lakebase/cost/by-type', { params: { days } })
+      return Array.isArray(data) ? data : []
+    },
+  })
+}

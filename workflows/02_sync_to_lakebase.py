@@ -713,6 +713,146 @@ obs_conn.close()
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Phase 3: Sync Knowledge Bases (Delta → Lakebase)
+
+# COMMAND ----------
+
+VS_EP_TABLE = f"{CATALOG}.{SCHEMA}.vector_search_endpoints"
+VS_IDX_TABLE = f"{CATALOG}.{SCHEMA}.vector_search_indexes"
+LB_INST_TABLE = f"{CATALOG}.{SCHEMA}.lakebase_instances"
+
+kb_conn = get_lakebase_connection()
+vs_ep_count = 0
+vs_idx_count = 0
+lb_inst_count = 0
+
+# Ensure tables
+with kb_conn.cursor() as cur:
+    for ddl in [
+        """CREATE TABLE IF NOT EXISTS vector_search_endpoints (
+            endpoint_name TEXT PRIMARY KEY, endpoint_id TEXT, status TEXT,
+            endpoint_type TEXT, num_indexes INT DEFAULT 0, creator TEXT,
+            workspace_id TEXT, created_at TIMESTAMP,
+            last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW())""",
+        """CREATE TABLE IF NOT EXISTS vector_search_indexes (
+            index_name TEXT NOT NULL, endpoint_name TEXT NOT NULL,
+            index_type TEXT, primary_key TEXT, creator TEXT, workspace_id TEXT,
+            detailed_state TEXT, indexed_row_count INT DEFAULT 0,
+            ready BOOLEAN DEFAULT FALSE, status_message TEXT,
+            source_table TEXT, embedding_model TEXT, pipeline_type TEXT,
+            last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (endpoint_name, index_name))""",
+        """CREATE TABLE IF NOT EXISTS vector_search_health_history (
+            endpoint_name TEXT NOT NULL, status TEXT NOT NULL,
+            num_indexes INT DEFAULT 0,
+            recorded_at TIMESTAMP WITH TIME ZONE DEFAULT NOW())""",
+        """CREATE TABLE IF NOT EXISTS lakebase_instances (
+            instance_name TEXT PRIMARY KEY, instance_id TEXT, state TEXT,
+            capacity TEXT, pg_version TEXT, read_write_dns TEXT, read_only_dns TEXT,
+            creator TEXT, created_at TEXT,
+            last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW())""",
+    ]:
+        try:
+            cur.execute(ddl)
+        except Exception as e:
+            print(f"  DDL warning: {e}")
+    kb_conn.commit()
+print("✅ Knowledge bases tables ensured")
+
+# COMMAND ----------
+
+# Sync VS endpoints
+print(f"▸ Syncing Vector Search endpoints from Delta: {VS_EP_TABLE} ...")
+try:
+    ep_df = spark.read.table(VS_EP_TABLE)
+    ep_rows = ep_df.collect()
+    if ep_rows:
+        with kb_conn.cursor() as cur:
+            for r in ep_rows:
+                cur.execute(
+                    """INSERT INTO vector_search_endpoints
+                       (endpoint_name, endpoint_id, status, endpoint_type, num_indexes, creator, created_at, last_synced)
+                       VALUES (%s, %s, %s, %s, %s, %s, NULL, NOW())
+                       ON CONFLICT (endpoint_name) DO UPDATE SET
+                           status = EXCLUDED.status, endpoint_type = EXCLUDED.endpoint_type,
+                           num_indexes = EXCLUDED.num_indexes, last_synced = NOW()""",
+                    (r.endpoint_name, r.endpoint_id, r.status, r.endpoint_type,
+                     r.num_indexes, r.creator))
+                # Record health history
+                cur.execute(
+                    "INSERT INTO vector_search_health_history (endpoint_name, status, num_indexes) VALUES (%s, %s, %s)",
+                    (r.endpoint_name, r.status, r.num_indexes))
+                vs_ep_count += 1
+            kb_conn.commit()
+    print(f"  ✅ {vs_ep_count} endpoints synced")
+except Exception as exc:
+    print(f"  ⚠️  VS endpoints sync failed: {exc}")
+
+# COMMAND ----------
+
+# Sync VS indexes
+print(f"▸ Syncing Vector Search indexes from Delta: {VS_IDX_TABLE} ...")
+try:
+    idx_df = spark.read.table(VS_IDX_TABLE)
+    idx_rows = idx_df.collect()
+    if idx_rows:
+        with kb_conn.cursor() as cur:
+            for r in idx_rows:
+                cur.execute(
+                    """INSERT INTO vector_search_indexes
+                       (index_name, endpoint_name, index_type, primary_key, creator,
+                        detailed_state, indexed_row_count, ready, status_message,
+                        source_table, embedding_model, pipeline_type, last_synced)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                       ON CONFLICT (endpoint_name, index_name) DO UPDATE SET
+                           index_type = EXCLUDED.index_type, detailed_state = EXCLUDED.detailed_state,
+                           indexed_row_count = EXCLUDED.indexed_row_count, ready = EXCLUDED.ready,
+                           status_message = EXCLUDED.status_message, source_table = EXCLUDED.source_table,
+                           embedding_model = EXCLUDED.embedding_model, pipeline_type = EXCLUDED.pipeline_type,
+                           last_synced = NOW()""",
+                    (r.index_name, r.endpoint_name, r.index_type, r.primary_key,
+                     r.creator, r.detailed_state, r.indexed_row_count, r.ready,
+                     r.status_message, r.source_table, r.embedding_model, r.pipeline_type))
+                vs_idx_count += 1
+            kb_conn.commit()
+    print(f"  ✅ {vs_idx_count} indexes synced")
+except Exception as exc:
+    print(f"  ⚠️  VS indexes sync failed: {exc}")
+
+# COMMAND ----------
+
+# Sync Lakebase instances
+print(f"▸ Syncing Lakebase instances from Delta: {LB_INST_TABLE} ...")
+try:
+    lb_df = spark.read.table(LB_INST_TABLE)
+    lb_rows = lb_df.collect()
+    if lb_rows:
+        with kb_conn.cursor() as cur:
+            for r in lb_rows:
+                cur.execute(
+                    """INSERT INTO lakebase_instances
+                       (instance_name, instance_id, state, capacity, pg_version,
+                        read_write_dns, read_only_dns, creator, created_at, last_synced)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                       ON CONFLICT (instance_name) DO UPDATE SET
+                           state = EXCLUDED.state, capacity = EXCLUDED.capacity,
+                           pg_version = EXCLUDED.pg_version, last_synced = NOW()""",
+                    (r.instance_name, r.instance_id, r.state, r.capacity,
+                     r.pg_version, r.read_write_dns, r.read_only_dns,
+                     r.creator, r.created_at))
+                lb_inst_count += 1
+            kb_conn.commit()
+    print(f"  ✅ {lb_inst_count} instances synced")
+except Exception as exc:
+    print(f"  ⚠️  Lakebase instances sync failed: {exc}")
+
+# COMMAND ----------
+
+kb_conn.close()
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Final Summary
 
 # COMMAND ----------
@@ -724,6 +864,9 @@ result = {
     "observability_runs": run_count,
     "observability_traces": trace_count,
     "traces_from_delta": delta_trace_count,
+    "vs_endpoints": vs_ep_count,
+    "vs_indexes": vs_idx_count,
+    "lakebase_instances": lb_inst_count,
     "synced_at": datetime.now(timezone.utc).isoformat(),
 }
 print(json.dumps(result, indent=2))

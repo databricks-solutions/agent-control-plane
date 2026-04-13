@@ -1,13 +1,19 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useQueryClient, useIsFetching } from '@tanstack/react-query'
 import {
   useVectorSearchOverview,
   useVectorSearchEndpoints,
   useVectorSearchIndexes,
-  useVectorSearchCostSummary,
-  useVectorSearchCostTrend,
-  useVectorSearchCostByEndpoint,
-  useVectorSearchCostByWorkload,
+  useVectorSearchIndexDetails,
+  useVectorSearchHealthHistory,
+  useVectorSearchPageData,
+  useKnowledgeBasesOverview,
+  useKnowledgeBasesCostTrend,
+  useLakebaseInstances,
+  useLakebaseCostSummary,
+  useLakebaseCostTrend,
+  useLakebaseCostByWorkspace,
+  useLakebaseCostByType,
 } from '@/api/hooks'
 import { apiClient } from '@/api/client'
 import { RefreshButton } from '@/components/RefreshButton'
@@ -15,16 +21,30 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { KpiCard } from '@/components/KpiCard'
 import { TablePagination } from '@/components/TablePagination'
+import { LazyChart } from '@/components/charts/LazyChart'
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+} from 'recharts'
 import {
   Search,
   Database,
   DollarSign,
   Server,
-  Activity,
   CheckCircle2,
   XCircle,
   Loader2,
+  ChevronUp,
+  ChevronDown,
+  Layers,
 } from 'lucide-react'
+import { DB_GRID, DB_AXIS_TEXT } from '@/lib/brand'
 
 /* ── helpers ─────────────────────────────────────────────────── */
 
@@ -43,17 +63,19 @@ function fmtNumber(v: number): string {
 /* ── tabs ─────────────────────────────────────────────────────── */
 
 const TABS = [
-  { key: 'indexes', label: 'Indexes', icon: Database },
-  { key: 'performance', label: 'Performance', icon: Activity },
-  { key: 'cost', label: 'Cost', icon: DollarSign },
+  { id: 'overview', label: 'Overview', icon: DollarSign },
+  { id: 'vector-search', label: 'Vector Search', icon: Search },
+  { id: 'lakebase', label: 'Lakebase', icon: Database },
 ] as const
 
-type TabKey = (typeof TABS)[number]['key']
+type TabId = (typeof TABS)[number]['id']
 
 /* ── main component ──────────────────────────────────────────── */
 
 export default function VectorSearchPage() {
-  const [tab, setTab] = useState<TabKey>('indexes')
+  const [tab, setTab] = useState<TabId>('overview')
+  const [days, setDays] = useState(30)
+
   const queryClient = useQueryClient()
   const isFetching = useIsFetching({ queryKey: ['vector-search'] }) > 0
   const updatedAt = queryClient.getQueryState(['vector-search', 'overview'])?.dataUpdatedAt
@@ -73,9 +95,9 @@ export default function VectorSearchPage() {
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Vector Search</h2>
+          <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Knowledge Bases</h2>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Endpoints, indexes, performance & cost monitoring
+            Vector Search, Lakebase &mdash; performance &amp; cost monitoring
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -83,7 +105,7 @@ export default function VectorSearchPage() {
             onRefresh={handleRefresh}
             isRefreshing={isFetching}
             lastSynced={lastSynced}
-            title="Refresh Vector Search data"
+            title="Refresh Knowledge Bases data"
           />
         </div>
       </div>
@@ -92,11 +114,11 @@ export default function VectorSearchPage() {
       <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700">
         {TABS.map((t) => {
           const Icon = t.icon
-          const active = tab === t.key
+          const active = tab === t.id
           return (
             <button
-              key={t.key}
-              onClick={() => setTab(t.key)}
+              key={t.id}
+              onClick={() => setTab(t.id)}
               className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
                 active
                   ? 'border-db-red text-db-red'
@@ -111,209 +133,116 @@ export default function VectorSearchPage() {
       </div>
 
       {/* Tab content */}
-      {tab === 'indexes' && <IndexesTab />}
-      {tab === 'performance' && <PerformanceTab />}
-      {tab === 'cost' && <CostTab />}
+      {tab === 'overview' && <OverviewTab days={days} setDays={setDays} />}
+      {tab === 'vector-search' && <VectorSearchTab days={days} setDays={setDays} />}
+      {tab === 'lakebase' && <LakebaseTab days={days} setDays={setDays} />}
     </div>
   )
 }
 
-/* ── Indexes Tab ─────────────────────────────────────────────── */
+/* ── tooltip style helper ───────────────────────────────────── */
 
-function IndexesTab() {
-  const { data: overview, isLoading: overviewLoading } = useVectorSearchOverview()
-  const { data: endpoints } = useVectorSearchEndpoints()
-  const { data: indexes, isLoading: indexesLoading } = useVectorSearchIndexes()
+const TOOLTIP_STYLE = {
+  borderRadius: 8,
+  border: `1px solid ${DB_GRID}`,
+  fontSize: 13,
+  backgroundColor: 'var(--tooltip-bg, #fff)',
+  color: 'var(--tooltip-text, #1f2937)',
+}
 
-  const [page, setPage] = useState(0)
-  const [pageSize, setPageSize] = useState(10)
-  const [filterEndpoint, setFilterEndpoint] = useState<string>('')
+/* ── Sort helpers ────────────────────────────────────────────── */
 
-  // Join indexes with endpoint info
-  const enrichedIndexes = (indexes || []).map((idx: any) => {
-    const ep = (endpoints || []).find((e: any) => e.name === idx.endpoint_name)
-    return { ...idx, endpoint_status: ep?.endpoint_status || ep?.status || 'UNKNOWN' }
-  })
+function SortIcon({ sortCol, sortDir, col }: { sortCol: string; sortDir: 'asc' | 'desc'; col: string }) {
+  if (sortCol !== col) return null
+  return sortDir === 'asc' ? <ChevronUp className="w-3 h-3 inline ml-0.5" /> : <ChevronDown className="w-3 h-3 inline ml-0.5" />
+}
 
-  const filtered = filterEndpoint
-    ? enrichedIndexes.filter((idx: any) => idx.endpoint_name === filterEndpoint)
-    : enrichedIndexes
+/* ── Overview Tab ────────────────────────────────────────────── */
 
-  const paged = filtered.slice(page * pageSize, (page + 1) * pageSize)
+function OverviewTab({ days, setDays }: { days: number; setDays: (d: number) => void }) {
+  const { data: overview, isLoading: overviewLoading } = useKnowledgeBasesOverview(days)
+  const { data: costTrend, isLoading: trendLoading } = useKnowledgeBasesCostTrend(days)
 
-  const isLoading = overviewLoading || indexesLoading
+  const isLoading = overviewLoading || trendLoading
+
+  const vs = overview?.vector_search ?? { total_dbus: 0, total_cost_usd: 0, endpoint_count: 0, workspace_count: 0 }
+  const lb = overview?.lakebase ?? { total_dbus: 0, total_cost_usd: 0, workspace_count: 0 }
+  const totalCost = Number(vs.total_cost_usd || 0) + Number(lb.total_cost_usd || 0)
+
+  // Collect unique workspaces from overview data
+  const vsWsCount = Number(vs.workspace_count || 0)
+  const lbWsCount = Number(lb.workspace_count || 0)
+  const totalWorkspaces = Math.max(vsWsCount, lbWsCount, vsWsCount + lbWsCount > 0 ? vsWsCount + lbWsCount : 0)
+
+  // Pivot combined cost trend by date with one key per product
+  const pivotedTrend = useMemo(() => {
+    const safeTrend = Array.isArray(costTrend) ? costTrend : []
+    const map: Record<string, Record<string, number> & { date: string }> = {}
+    for (const row of safeTrend) {
+      const date = row.usage_date || row.date || ''
+      if (!map[date]) map[date] = { date } as any
+      const product = (row.product || row.billing_origin_product || 'UNKNOWN').toUpperCase()
+      const cost = Number(row.total_cost_usd || row.cost || 0)
+      if (product.includes('VECTOR_SEARCH') || product.includes('VECTOR SEARCH')) {
+        map[date]['VECTOR_SEARCH'] = (map[date]['VECTOR_SEARCH'] || 0) + cost
+      } else if (product.includes('LAKEBASE') || product.includes('DATABASE')) {
+        // Keep DATABASE as separate if present
+        const key = product.includes('DATABASE') ? 'DATABASE' : 'LAKEBASE'
+        map[date][key] = (map[date][key] || 0) + cost
+      } else {
+        map[date][product] = (map[date][product] || 0) + cost
+      }
+    }
+    return Object.values(map).sort((a, b) => a.date.localeCompare(b.date))
+  }, [costTrend])
+
+  // Determine which product keys exist in the data
+  const productKeys = useMemo(() => {
+    const keys = new Set<string>()
+    for (const row of pivotedTrend) {
+      for (const k of Object.keys(row)) {
+        if (k !== 'date') keys.add(k)
+      }
+    }
+    return keys
+  }, [pivotedTrend])
+
+  // Top workspaces: combine VS + Lakebase workspace costs
+  const topWorkspaces = useMemo(() => {
+    const vsWorkspaces = Array.isArray(overview?.vector_search?.workspaces) ? overview.vector_search.workspaces : []
+    const lbWorkspaces = Array.isArray(overview?.lakebase?.workspaces) ? overview.lakebase.workspaces : []
+    const map: Record<string, { workspace_id: string; vs_cost: number; lb_cost: number; total_cost: number }> = {}
+    for (const ws of vsWorkspaces) {
+      const id = String(ws.workspace_id || '')
+      if (!map[id]) map[id] = { workspace_id: id, vs_cost: 0, lb_cost: 0, total_cost: 0 }
+      const cost = Number(ws.total_cost_usd || 0)
+      map[id].vs_cost += cost
+      map[id].total_cost += cost
+    }
+    for (const ws of lbWorkspaces) {
+      const id = String(ws.workspace_id || '')
+      if (!map[id]) map[id] = { workspace_id: id, vs_cost: 0, lb_cost: 0, total_cost: 0 }
+      const cost = Number(ws.total_cost_usd || 0)
+      map[id].lb_cost += cost
+      map[id].total_cost += cost
+    }
+    return Object.values(map)
+      .sort((a, b) => b.total_cost - a.total_cost)
+      .slice(0, 20)
+  }, [overview])
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-12 text-gray-400">
+        <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading overview data...
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-4">
-      {/* KPIs */}
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-        <KpiCard title="Total Endpoints" value={overview?.total_endpoints ?? 0} format="number" />
-        <KpiCard title="Online Endpoints" value={overview?.online_endpoints ?? 0} format="number" />
-        <KpiCard title="Total Indexes" value={overview?.total_indexes ?? 0} format="number" />
-        <KpiCard
-          title="Index Types"
-          value={
-            overview?.by_index_type
-              ? Object.entries(overview.by_index_type)
-                  .map(([k, v]) => `${k}: ${v}`)
-                  .join(', ')
-              : '—'
-          }
-        />
-      </div>
-
-      {/* Filter */}
-      <div className="flex items-center gap-3">
-        <Search className="w-4 h-4 text-gray-400 dark:text-gray-500" />
-        <select
-          value={filterEndpoint}
-          onChange={(e) => { setFilterEndpoint(e.target.value); setPage(0) }}
-          className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-200"
-        >
-          <option value="">All Endpoints</option>
-          {(endpoints || []).map((ep: any) => (
-            <option key={ep.name} value={ep.name}>{ep.name}</option>
-          ))}
-        </select>
-      </div>
-
-      {/* Table */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base">Vector Search Indexes</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {isLoading ? (
-            <div className="flex items-center justify-center py-12 text-gray-400">
-              <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading indexes…
-            </div>
-          ) : filtered.length === 0 ? (
-            <div className="text-center py-12 text-gray-400 dark:text-gray-500">
-              No indexes found.
-            </div>
-          ) : (
-            <>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
-                      <th className="pb-2 pr-4 font-medium">Endpoint</th>
-                      <th className="pb-2 pr-4 font-medium">Status</th>
-                      <th className="pb-2 pr-4 font-medium">Index Name</th>
-                      <th className="pb-2 pr-4 font-medium">Type</th>
-                      <th className="pb-2 font-medium">Creator</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                    {paged.map((idx: any, i: number) => (
-                      <tr key={`${idx.endpoint_name}-${idx.name}-${i}`} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
-                        <td className="py-2.5 pr-4">
-                          <div className="flex items-center gap-2">
-                            <Server className="w-3.5 h-3.5 text-gray-400" />
-                            <span className="font-medium text-gray-900 dark:text-gray-100">{idx.endpoint_name || '—'}</span>
-                          </div>
-                        </td>
-                        <td className="py-2.5 pr-4">
-                          <EndpointStatusBadge status={idx.endpoint_status} />
-                        </td>
-                        <td className="py-2.5 pr-4">
-                          <span className="text-gray-700 dark:text-gray-300">{idx.name || '—'}</span>
-                        </td>
-                        <td className="py-2.5 pr-4">
-                          <IndexTypeBadge type={idx.index_type} />
-                        </td>
-                        <td className="py-2.5 text-gray-600 dark:text-gray-400">
-                          {idx.creator || '—'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <TablePagination
-                page={page}
-                totalItems={filtered.length}
-                pageSize={pageSize}
-                onPageChange={setPage}
-                onPageSizeChange={setPageSize}
-              />
-            </>
-          )}
-        </CardContent>
-      </Card>
-    </div>
-  )
-}
-
-function EndpointStatusBadge({ status }: { status: string }) {
-  const s = (status || '').toUpperCase()
-  if (s === 'ONLINE') {
-    return (
-      <Badge variant="default" className="text-xs bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 hover:bg-green-100 dark:hover:bg-green-900/30">
-        <CheckCircle2 className="w-3 h-3 mr-1" /> ONLINE
-      </Badge>
-    )
-  }
-  if (s === 'OFFLINE' || s === 'PROVISIONING_FAILED') {
-    return (
-      <Badge variant="error" className="text-xs">
-        <XCircle className="w-3 h-3 mr-1" /> {s}
-      </Badge>
-    )
-  }
-  return (
-    <Badge variant="default" className="text-xs">
-      {status || 'UNKNOWN'}
-    </Badge>
-  )
-}
-
-function IndexTypeBadge({ type }: { type: string }) {
-  const t = (type || '').toUpperCase()
-  if (t === 'DELTA_SYNC') {
-    return (
-      <Badge variant="default" className="text-xs bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/30">
-        DELTA_SYNC
-      </Badge>
-    )
-  }
-  if (t === 'DIRECT_ACCESS') {
-    return (
-      <Badge variant="default" className="text-xs bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/30">
-        DIRECT_ACCESS
-      </Badge>
-    )
-  }
-  return <Badge variant="default" className="text-xs">{type || '—'}</Badge>
-}
-
-/* ── Performance Tab ─────────────────────────────────────────── */
-
-function PerformanceTab() {
-  const [days, setDays] = useState(30)
-  const { data: trend, isLoading } = useVectorSearchCostTrend(days)
-
-  return (
-    <div className="space-y-4">
-      {/* Note */}
-      <Card>
-        <CardContent className="py-4">
-          <div className="flex items-start gap-3">
-            <Activity className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                Performance metrics derived from billing data
-              </p>
-              <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                Per-query metrics are not yet available via the Vector Search API. The table below shows daily DBU consumption as a proxy for usage intensity.
-              </p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
       {/* Days selector */}
-      <div className="flex items-center gap-3 justify-end">
+      <div className="flex justify-end">
         <select
           value={days}
           onChange={(e) => setDays(Number(e.target.value))}
@@ -326,36 +255,78 @@ function PerformanceTab() {
         </select>
       </div>
 
-      {/* Usage trend table */}
+      {/* KPI row */}
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+        <KpiCard title="Total Cost (USD)" value={totalCost} format="currency" />
+        <KpiCard title="Vector Search Cost" value={Number(vs.total_cost_usd || 0)} format="currency" />
+        <KpiCard title="Lakebase Cost" value={Number(lb.total_cost_usd || 0)} format="currency" />
+        <KpiCard title="Total Workspaces" value={totalWorkspaces} format="number" />
+      </div>
+
+      {/* Combined Daily Cost Trend */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">Daily Usage Trend</CardTitle>
+          <CardTitle className="text-base">Combined Daily Cost Trend</CardTitle>
         </CardHeader>
         <CardContent>
-          {isLoading ? (
-            <div className="flex items-center justify-center py-12 text-gray-400">
-              <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading trend data…
-            </div>
-          ) : !trend || trend.length === 0 ? (
+          {pivotedTrend.length === 0 ? (
             <div className="text-center py-12 text-gray-400 dark:text-gray-500">
-              No usage data available for the selected period.
+              No billing data for the selected period.
             </div>
+          ) : (
+            <LazyChart height={300}>
+              <ResponsiveContainer width="100%" height={300}>
+                <LineChart data={pivotedTrend}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={DB_GRID} />
+                  <XAxis dataKey="date" tick={{ fontSize: 12, fill: DB_AXIS_TEXT }} />
+                  <YAxis tick={{ fontSize: 12, fill: DB_AXIS_TEXT }} tickFormatter={(v: number) => `$${v.toFixed(0)}`} />
+                  <Tooltip
+                    formatter={(v: number, name: string) => [`$${v.toFixed(2)}`, name]}
+                    contentStyle={TOOLTIP_STYLE}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 13 }} />
+                  {productKeys.has('VECTOR_SEARCH') && (
+                    <Line type="monotone" dataKey="VECTOR_SEARCH" stroke="#E53935" strokeWidth={2} dot={false} name="Vector Search" />
+                  )}
+                  {productKeys.has('LAKEBASE') && (
+                    <Line type="monotone" dataKey="LAKEBASE" stroke="#3B82F6" strokeWidth={2} dot={false} name="Lakebase" />
+                  )}
+                  {productKeys.has('DATABASE') && (
+                    <Line type="monotone" dataKey="DATABASE" stroke="#8B5CF6" strokeWidth={2} dot={false} name="Database" />
+                  )}
+                </LineChart>
+              </ResponsiveContainer>
+            </LazyChart>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Top Workspaces table */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Top Workspaces by Spend</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {topWorkspaces.length === 0 ? (
+            <div className="text-center py-8 text-gray-400 dark:text-gray-500">No workspace cost data.</div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
-                    <th className="pb-2 pr-4 font-medium">Date</th>
-                    <th className="pb-2 pr-4 font-medium text-right">DBUs</th>
-                    <th className="pb-2 font-medium text-right">Cost (USD)</th>
+                    <th className="pb-2 pr-4 font-medium">Workspace ID</th>
+                    <th className="pb-2 pr-4 font-medium text-right">Vector Search</th>
+                    <th className="pb-2 pr-4 font-medium text-right">Lakebase</th>
+                    <th className="pb-2 font-medium text-right">Total Cost</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                  {trend.map((row: any, i: number) => (
-                    <tr key={row.day || i} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
-                      <td className="py-2 pr-4 text-gray-900 dark:text-gray-100">{row.day || '—'}</td>
-                      <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtNumber(Number(row.total_dbus || 0))}</td>
-                      <td className="py-2 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtCost(Number(row.total_cost_usd || 0))}</td>
+                  {topWorkspaces.map((ws, i) => (
+                    <tr key={ws.workspace_id || i} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                      <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100">{ws.workspace_id || '\u2014'}</td>
+                      <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtCost(ws.vs_cost)}</td>
+                      <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtCost(ws.lb_cost)}</td>
+                      <td className="py-2 text-right tabular-nums font-medium text-gray-900 dark:text-gray-100">{fmtCost(ws.total_cost)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -368,36 +339,414 @@ function PerformanceTab() {
   )
 }
 
-/* ── Cost Tab ────────────────────────────────────────────────── */
+/* ── Vector Search Tab ──────────────────────────────────────── */
 
-function CostTab() {
-  const [days, setDays] = useState(30)
-  const { data: summary, isLoading: summaryLoading } = useVectorSearchCostSummary(days)
-  const { data: trend, isLoading: trendLoading } = useVectorSearchCostTrend(days)
-  const { data: byEndpoint, isLoading: epLoading } = useVectorSearchCostByEndpoint(days)
-  const { data: byWorkload, isLoading: wlLoading } = useVectorSearchCostByWorkload(days)
+function VectorSearchTab({ days, setDays }: { days: number; setDays: (d: number) => void }) {
+  const { data, isLoading: pageLoading } = useVectorSearchPageData(days)
+  const { data: indexDetails, isLoading: idxLoading } = useVectorSearchIndexDetails()
+  const { data: healthHistory } = useVectorSearchHealthHistory(days)
 
-  const [trendPage, setTrendPage] = useState(0)
-  const [trendPageSize, setTrendPageSize] = useState(10)
-  const [epPage, setEpPage] = useState(0)
-  const [epPageSize, setEpPageSize] = useState(10)
+  const [sortCol, setSortCol] = useState<string>('total_cost_usd')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  const [wsPage, setWsPage] = useState(0)
+  const [wsPageSize, setWsPageSize] = useState(10)
+  const [healthPage, setHealthPage] = useState(0)
+  const [healthPageSize, setHealthPageSize] = useState(10)
 
-  const isLoading = summaryLoading || trendLoading || epLoading || wlLoading
+  const costSummary = data?.cost_summary
+  const costByWorkspace = Array.isArray(data?.cost_by_workspace) ? data.cost_by_workspace : []
+  const costTrendByWorkload = Array.isArray(data?.cost_trend_by_workload) ? data.cost_trend_by_workload : []
 
-  const trendList = trend || []
-  const epList = byEndpoint || []
-  const wlList = byWorkload || []
+  // Pivot cost_trend_by_workload by date
+  const trendByDate = useMemo(() => {
+    const map: Record<string, { date: string; ingest: number; serving: number; storage: number }> = {}
+    for (const row of costTrendByWorkload) {
+      const date = row.usage_date || ''
+      if (!map[date]) map[date] = { date, ingest: 0, serving: 0, storage: 0 }
+      const wt = (row.workload_type || 'ingest').toLowerCase() as 'ingest' | 'serving' | 'storage'
+      const cost = Number(row.total_cost_usd || 0)
+      map[date][wt] = cost
+    }
+    return Object.values(map).sort((a, b) => a.date.localeCompare(b.date))
+  }, [costTrendByWorkload])
 
-  const pagedTrend = trendList.slice(trendPage * trendPageSize, (trendPage + 1) * trendPageSize)
-  const pagedEp = epList.slice(epPage * epPageSize, (epPage + 1) * epPageSize)
+  // Sorted workspaces
+  const sortedWorkspaces = useMemo(() => {
+    const rows = costByWorkspace.map((r: any) => ({
+      workspace_id: String(r.workspace_id || ''),
+      total_dbus: Number(r.total_dbus || 0),
+      total_cost_usd: Number(r.total_cost_usd || 0),
+      endpoint_count: Number(r.endpoint_count || 0),
+    }))
+    rows.sort((a: any, b: any) => {
+      const av = a[sortCol] ?? 0
+      const bv = b[sortCol] ?? 0
+      if (typeof av === 'string') return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av)
+      return sortDir === 'asc' ? av - bv : bv - av
+    })
+    return rows
+  }, [costByWorkspace, sortCol, sortDir])
+
+  const pagedWorkspaces = sortedWorkspaces.slice(wsPage * wsPageSize, (wsPage + 1) * wsPageSize)
+
+  const handleSort = (col: string) => {
+    if (sortCol === col) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortCol(col)
+      setSortDir('desc')
+    }
+    setWsPage(0)
+  }
+
+  // Health KPIs
+  const safeIndexDetails = Array.isArray(indexDetails) ? indexDetails : []
+  const safeHealthHistory = Array.isArray(healthHistory) ? healthHistory : []
+  const totalRows = safeIndexDetails.reduce((s: number, i: any) => s + (Number(i.indexed_row_count) || 0), 0)
+  const readyCount = safeIndexDetails.filter((i: any) => i.ready).length
+  const totalSnapshots = safeHealthHistory.length
+  const onlineSnapshots = safeHealthHistory.filter((h: any) => h.status === 'ONLINE').length
+  const uptimePct = totalSnapshots > 0 ? Math.round((onlineSnapshots / totalSnapshots) * 100) : 100
+
+  const pagedHealth = safeHealthHistory.slice(healthPage * healthPageSize, (healthPage + 1) * healthPageSize)
+
+  if (pageLoading) {
+    return (
+      <div className="flex items-center justify-center py-12 text-gray-400">
+        <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading Vector Search data...
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-4">
       {/* Days selector */}
-      <div className="flex items-center gap-3 justify-end">
+      <div className="flex justify-end">
         <select
           value={days}
-          onChange={(e) => { setDays(Number(e.target.value)); setTrendPage(0); setEpPage(0) }}
+          onChange={(e) => setDays(Number(e.target.value))}
+          className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-200"
+        >
+          <option value={7}>Last 7 days</option>
+          <option value={14}>Last 14 days</option>
+          <option value={30}>Last 30 days</option>
+          <option value={90}>Last 90 days</option>
+        </select>
+      </div>
+
+      {/* Cost KPIs */}
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+        <KpiCard title="Total VS Cost (USD)" value={costSummary?.total_cost_usd ?? 0} format="currency" />
+        <KpiCard title="Total DBUs" value={costSummary?.total_dbus ?? 0} format="number" />
+        <KpiCard title="Endpoints" value={costSummary?.endpoint_count ?? 0} format="number" />
+        <KpiCard title="Workspaces" value={costSummary?.workspace_count ?? 0} format="number" />
+      </div>
+
+      {/* Daily Cost by Workload Type */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Daily Cost by Workload Type</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {trendByDate.length === 0 ? (
+            <div className="text-center py-12 text-gray-400 dark:text-gray-500">
+              No billing data for the selected period.
+            </div>
+          ) : (
+            <LazyChart height={300}>
+              <ResponsiveContainer width="100%" height={300}>
+                <LineChart data={trendByDate}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={DB_GRID} />
+                  <XAxis dataKey="date" tick={{ fontSize: 12, fill: DB_AXIS_TEXT }} />
+                  <YAxis tick={{ fontSize: 12, fill: DB_AXIS_TEXT }} tickFormatter={(v: number) => `$${v.toFixed(0)}`} />
+                  <Tooltip
+                    formatter={(v: number, name: string) => [`$${v.toFixed(2)}`, name]}
+                    contentStyle={TOOLTIP_STYLE}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 13 }} />
+                  <Line type="monotone" dataKey="ingest" stroke="#3B82F6" strokeWidth={2} dot={false} name="Ingest" />
+                  <Line type="monotone" dataKey="serving" stroke="#10B981" strokeWidth={2} dot={false} name="Serving" />
+                  <Line type="monotone" dataKey="storage" stroke="#F59E0B" strokeWidth={2} dot={false} name="Storage" />
+                </LineChart>
+              </ResponsiveContainer>
+            </LazyChart>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* All Workspaces table */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">All Workspaces</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {sortedWorkspaces.length === 0 ? (
+            <div className="text-center py-8 text-gray-400 dark:text-gray-500">No workspace data.</div>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                      <th
+                        className="pb-2 pr-4 font-medium cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-200"
+                        onClick={() => handleSort('workspace_id')}
+                      >
+                        Workspace ID <SortIcon sortCol={sortCol} sortDir={sortDir} col="workspace_id" />
+                      </th>
+                      <th
+                        className="pb-2 pr-4 font-medium text-right cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-200"
+                        onClick={() => handleSort('total_dbus')}
+                      >
+                        Total DBUs <SortIcon sortCol={sortCol} sortDir={sortDir} col="total_dbus" />
+                      </th>
+                      <th
+                        className="pb-2 pr-4 font-medium text-right cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-200"
+                        onClick={() => handleSort('total_cost_usd')}
+                      >
+                        Total Cost (USD) <SortIcon sortCol={sortCol} sortDir={sortDir} col="total_cost_usd" />
+                      </th>
+                      <th
+                        className="pb-2 font-medium text-right cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-200"
+                        onClick={() => handleSort('endpoint_count')}
+                      >
+                        Endpoint Count <SortIcon sortCol={sortCol} sortDir={sortDir} col="endpoint_count" />
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                    {pagedWorkspaces.map((row: any, i: number) => (
+                      <tr key={row.workspace_id || i} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                        <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100">{row.workspace_id || '\u2014'}</td>
+                        <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtNumber(row.total_dbus)}</td>
+                        <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtCost(row.total_cost_usd)}</td>
+                        <td className="py-2 text-right tabular-nums text-gray-700 dark:text-gray-300">{row.endpoint_count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <TablePagination
+                page={wsPage}
+                totalItems={sortedWorkspaces.length}
+                pageSize={wsPageSize}
+                onPageChange={setWsPage}
+                onPageSizeChange={setWsPageSize}
+              />
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Section divider */}
+      <div className="flex items-center gap-3 pt-4">
+        <Layers className="w-5 h-5 text-gray-400" />
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Index Inventory &amp; Health</h3>
+        <div className="flex-1 border-t border-gray-200 dark:border-gray-700" />
+      </div>
+
+      {/* Health KPIs */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <KpiCard title="Total Indexed Rows" value={totalRows} format="number" />
+        <KpiCard title="Ready Indexes" value={readyCount} format="number" />
+        <KpiCard title="Endpoint Uptime" value={uptimePct} format="percentage" />
+        <KpiCard title="Health Snapshots" value={totalSnapshots} format="number" />
+      </div>
+
+      {/* Index Sync Status table */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Index Sync Status</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {idxLoading ? (
+            <div className="flex items-center justify-center py-12 text-gray-400">
+              <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading...
+            </div>
+          ) : safeIndexDetails.length === 0 ? (
+            <div className="text-center py-12 text-gray-400 dark:text-gray-500">
+              No index data. Click refresh to discover indexes.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                    <th className="pb-2 pr-4 font-medium">Index</th>
+                    <th className="pb-2 pr-4 font-medium">State</th>
+                    <th className="pb-2 pr-4 font-medium text-right">Rows</th>
+                    <th className="pb-2 pr-4 font-medium">Source Table</th>
+                    <th className="pb-2 pr-4 font-medium">Embedding Model</th>
+                    <th className="pb-2 font-medium">Pipeline</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                  {safeIndexDetails.map((idx: any) => (
+                    <tr key={`${idx.endpoint_name}-${idx.index_name}`} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                      <td className="py-2 pr-4">
+                        <div className="font-medium text-gray-900 dark:text-gray-100 text-xs truncate max-w-[200px]" title={idx.index_name}>
+                          {idx.index_name?.split('.').pop() || idx.index_name}
+                        </div>
+                        <div className="text-[11px] text-gray-400 truncate max-w-[200px]">{idx.endpoint_name}</div>
+                      </td>
+                      <td className="py-2 pr-4">
+                        <Badge variant={idx.ready ? 'success' : 'default'} className="text-[10px]">
+                          {idx.detailed_state || idx.index_type || '\u2014'}
+                        </Badge>
+                      </td>
+                      <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">
+                        {Number(idx.indexed_row_count || 0).toLocaleString()}
+                      </td>
+                      <td className="py-2 pr-4 text-xs text-gray-500 truncate max-w-[180px]" title={idx.source_table}>
+                        {idx.source_table?.split('.').pop() || '\u2014'}
+                      </td>
+                      <td className="py-2 pr-4 text-xs text-gray-500">
+                        {idx.embedding_model || '\u2014'}
+                      </td>
+                      <td className="py-2 text-xs text-gray-500">
+                        {idx.pipeline_type || '\u2014'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Endpoint Health History table */}
+      {safeHealthHistory.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Endpoint Health History</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                    <th className="pb-2 pr-4 font-medium">Endpoint</th>
+                    <th className="pb-2 pr-4 font-medium">Status</th>
+                    <th className="pb-2 pr-4 font-medium text-right">Indexes</th>
+                    <th className="pb-2 font-medium">Recorded</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                  {pagedHealth.map((h: any, i: number) => (
+                    <tr key={i} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                      <td className="py-2 pr-4 text-gray-900 dark:text-gray-100 text-xs">{h.endpoint_name}</td>
+                      <td className="py-2 pr-4">
+                        <Badge variant={h.status === 'ONLINE' ? 'success' : 'error'} className="text-[10px]">
+                          {h.status}
+                        </Badge>
+                      </td>
+                      <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{h.num_indexes}</td>
+                      <td className="py-2 text-xs text-gray-500">{h.recorded_at ? new Date(h.recorded_at).toLocaleString() : '\u2014'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <TablePagination
+              page={healthPage}
+              totalItems={safeHealthHistory.length}
+              pageSize={healthPageSize}
+              onPageChange={setHealthPage}
+              onPageSizeChange={setHealthPageSize}
+            />
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+/* ── Lakebase Tab ────────────────────────────────────────────── */
+
+function LakebaseTab({ days, setDays }: { days: number; setDays: (d: number) => void }) {
+  const { data: costSummary, isLoading: summaryLoading } = useLakebaseCostSummary(days)
+  const { data: costTrend, isLoading: trendLoading } = useLakebaseCostTrend(days)
+  const { data: instances, isLoading: instancesLoading } = useLakebaseInstances()
+  const { data: costByWorkspace, isLoading: wsByWsLoading } = useLakebaseCostByWorkspace(days)
+  const { data: costByType } = useLakebaseCostByType(days)
+
+  const [sortCol, setSortCol] = useState<string>('total_cost_usd')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  const [wsPage, setWsPage] = useState(0)
+  const [wsPageSize, setWsPageSize] = useState(10)
+
+  const isLoading = summaryLoading || trendLoading || instancesLoading
+
+  const safeInstances = Array.isArray(instances) ? instances : []
+  const safeCostTrend = Array.isArray(costTrend) ? costTrend : []
+  const safeCostByWorkspace = Array.isArray(costByWorkspace) ? costByWorkspace : []
+  const safeCostByType = Array.isArray(costByType) ? costByType : []
+
+  // Cost type breakdown
+  const computeCost = useMemo(() => {
+    return safeCostByType
+      .filter((r: any) => (r.cost_type || r.sku_name || '').toLowerCase().includes('compute'))
+      .reduce((s: number, r: any) => s + Number(r.total_cost_usd || 0), 0)
+  }, [safeCostByType])
+
+  const storageCost = useMemo(() => {
+    return safeCostByType
+      .filter((r: any) => (r.cost_type || r.sku_name || '').toLowerCase().includes('storage'))
+      .reduce((s: number, r: any) => s + Number(r.total_cost_usd || 0), 0)
+  }, [safeCostByType])
+
+  // Trend data for chart
+  const trendData = useMemo(() => {
+    return safeCostTrend.map((r: any) => ({
+      date: r.usage_date || r.date || '',
+      cost: Number(r.total_cost_usd || r.cost || 0),
+    })).sort((a: any, b: any) => a.date.localeCompare(b.date))
+  }, [safeCostTrend])
+
+  // Sorted workspaces
+  const sortedWorkspaces = useMemo(() => {
+    const rows = safeCostByWorkspace.map((r: any) => ({
+      workspace_id: String(r.workspace_id || ''),
+      total_dbus: Number(r.total_dbus || 0),
+      total_cost_usd: Number(r.total_cost_usd || 0),
+    }))
+    rows.sort((a: any, b: any) => {
+      const av = a[sortCol] ?? 0
+      const bv = b[sortCol] ?? 0
+      if (typeof av === 'string') return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av)
+      return sortDir === 'asc' ? av - bv : bv - av
+    })
+    return rows
+  }, [safeCostByWorkspace, sortCol, sortDir])
+
+  const pagedWorkspaces = sortedWorkspaces.slice(wsPage * wsPageSize, (wsPage + 1) * wsPageSize)
+
+  const handleSort = (col: string) => {
+    if (sortCol === col) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortCol(col)
+      setSortDir('desc')
+    }
+    setWsPage(0)
+  }
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-12 text-gray-400">
+        <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading Lakebase data...
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Days selector */}
+      <div className="flex justify-end">
+        <select
+          value={days}
+          onChange={(e) => setDays(Number(e.target.value))}
           className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-200"
         >
           <option value={7}>Last 7 days</option>
@@ -409,146 +758,151 @@ function CostTab() {
 
       {/* KPIs */}
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-        <KpiCard title="Total DBUs" value={summary?.total_dbus ?? 0} format="number" />
-        <KpiCard title="Total Cost (USD)" value={summary?.total_cost_usd ?? 0} format="currency" />
-        <KpiCard title="Endpoints" value={summary?.endpoint_count ?? 0} format="number" />
-        <KpiCard title="Workspaces" value={summary?.workspace_count ?? 0} format="number" />
+        <KpiCard title="Total Lakebase Cost" value={costSummary?.total_cost_usd ?? 0} format="currency" />
+        <KpiCard title="Total DBUs" value={costSummary?.total_dbus ?? 0} format="number" />
+        <KpiCard title="Instances" value={safeInstances.length} format="number" />
+        <KpiCard title="Workspaces" value={costSummary?.workspace_count ?? 0} format="number" />
       </div>
 
-      {isLoading && (
-        <div className="flex items-center justify-center py-8 text-gray-400">
-          <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading cost data…
+      {/* Cost Type Summary — compute vs storage */}
+      {safeCostByType.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <KpiCard title="Compute Cost" value={computeCost} format="currency" />
+          <KpiCard title="Storage Cost" value={storageCost} format="currency" />
         </div>
       )}
 
-      {/* Cost trend */}
-      {!isLoading && (
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Cost Trend</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {trendList.length === 0 ? (
-              <div className="text-center py-8 text-gray-400 dark:text-gray-500">No cost data available.</div>
-            ) : (
-              <>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
-                        <th className="pb-2 pr-4 font-medium">Date</th>
-                        <th className="pb-2 pr-4 font-medium text-right">DBUs</th>
-                        <th className="pb-2 font-medium text-right">Cost (USD)</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                      {pagedTrend.map((row: any, i: number) => (
-                        <tr key={row.day || i} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
-                          <td className="py-2 pr-4 text-gray-900 dark:text-gray-100">{row.day || '—'}</td>
-                          <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtNumber(Number(row.total_dbus || 0))}</td>
-                          <td className="py-2 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtCost(Number(row.total_cost_usd || 0))}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <TablePagination
-                  page={trendPage}
-                  totalItems={trendList.length}
-                  pageSize={trendPageSize}
-                  onPageChange={setTrendPage}
-                  onPageSizeChange={setTrendPageSize}
-                />
-              </>
-            )}
-          </CardContent>
-        </Card>
-      )}
+      {/* Daily Cost Trend */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Daily Cost Trend</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {trendData.length === 0 ? (
+            <div className="text-center py-12 text-gray-400 dark:text-gray-500">
+              No billing data for the selected period.
+            </div>
+          ) : (
+            <LazyChart height={300}>
+              <ResponsiveContainer width="100%" height={300}>
+                <LineChart data={trendData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={DB_GRID} />
+                  <XAxis dataKey="date" tick={{ fontSize: 12, fill: DB_AXIS_TEXT }} />
+                  <YAxis tick={{ fontSize: 12, fill: DB_AXIS_TEXT }} tickFormatter={(v: number) => `$${v.toFixed(0)}`} />
+                  <Tooltip
+                    formatter={(v: number) => [`$${v.toFixed(2)}`, 'Cost']}
+                    contentStyle={TOOLTIP_STYLE}
+                  />
+                  <Line type="monotone" dataKey="cost" stroke="#3B82F6" strokeWidth={2} dot={false} name="Lakebase Cost" />
+                </LineChart>
+              </ResponsiveContainer>
+            </LazyChart>
+          )}
+        </CardContent>
+      </Card>
 
-      {/* Cost by endpoint */}
-      {!isLoading && (
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Cost by Endpoint</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {epList.length === 0 ? (
-              <div className="text-center py-8 text-gray-400 dark:text-gray-500">No endpoint cost data.</div>
-            ) : (
-              <>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
-                        <th className="pb-2 pr-4 font-medium">Endpoint</th>
-                        <th className="pb-2 pr-4 font-medium">Workspace</th>
-                        <th className="pb-2 pr-4 font-medium text-right">DBUs</th>
-                        <th className="pb-2 font-medium text-right">Cost (USD)</th>
+      {/* Instances table */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Lakebase Instances</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {safeInstances.length === 0 ? (
+            <div className="text-center py-8 text-gray-400 dark:text-gray-500">No instances found.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                    <th className="pb-2 pr-4 font-medium">Name</th>
+                    <th className="pb-2 pr-4 font-medium">State</th>
+                    <th className="pb-2 pr-4 font-medium">Capacity</th>
+                    <th className="pb-2 font-medium">PG Version</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                  {safeInstances.map((inst: any, i: number) => {
+                    const state = (inst.state || inst.status || 'UNKNOWN').toUpperCase()
+                    const isAvailable = state === 'AVAILABLE' || state === 'RUNNING' || state === 'ACTIVE'
+                    return (
+                      <tr key={inst.name || i} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                        <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100">{inst.name || '\u2014'}</td>
+                        <td className="py-2 pr-4">
+                          <Badge
+                            variant={isAvailable ? 'success' : 'error'}
+                            className="text-[10px]"
+                          >
+                            {state}
+                          </Badge>
+                        </td>
+                        <td className="py-2 pr-4 text-gray-700 dark:text-gray-300">{inst.capacity || inst.size || '\u2014'}</td>
+                        <td className="py-2 text-gray-700 dark:text-gray-300">{inst.pg_version || inst.engine_version || '\u2014'}</td>
                       </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                      {pagedEp.map((row: any, i: number) => (
-                        <tr key={`${row.endpoint_name}-${i}`} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
-                          <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100">{row.endpoint_name || '—'}</td>
-                          <td className="py-2 pr-4 text-gray-600 dark:text-gray-400">{row.workspace_id || '—'}</td>
-                          <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtNumber(Number(row.total_dbus || 0))}</td>
-                          <td className="py-2 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtCost(Number(row.total_cost_usd || 0))}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <TablePagination
-                  page={epPage}
-                  totalItems={epList.length}
-                  pageSize={epPageSize}
-                  onPageChange={setEpPage}
-                  onPageSizeChange={setEpPageSize}
-                />
-              </>
-            )}
-          </CardContent>
-        </Card>
-      )}
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
-      {/* Cost by workload type */}
-      {!isLoading && (
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Cost by Workload Type</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {wlList.length === 0 ? (
-              <div className="text-center py-8 text-gray-400 dark:text-gray-500">No workload cost data.</div>
-            ) : (
+      {/* Cost by Workspace table */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Cost by Workspace</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {sortedWorkspaces.length === 0 ? (
+            <div className="text-center py-8 text-gray-400 dark:text-gray-500">No workspace cost data.</div>
+          ) : (
+            <>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
-                      <th className="pb-2 pr-4 font-medium">Workload Type</th>
-                      <th className="pb-2 pr-4 font-medium text-right">DBUs</th>
-                      <th className="pb-2 font-medium text-right">Cost (USD)</th>
+                      <th
+                        className="pb-2 pr-4 font-medium cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-200"
+                        onClick={() => handleSort('workspace_id')}
+                      >
+                        Workspace ID <SortIcon sortCol={sortCol} sortDir={sortDir} col="workspace_id" />
+                      </th>
+                      <th
+                        className="pb-2 pr-4 font-medium text-right cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-200"
+                        onClick={() => handleSort('total_dbus')}
+                      >
+                        Total DBUs <SortIcon sortCol={sortCol} sortDir={sortDir} col="total_dbus" />
+                      </th>
+                      <th
+                        className="pb-2 font-medium text-right cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-200"
+                        onClick={() => handleSort('total_cost_usd')}
+                      >
+                        Total Cost (USD) <SortIcon sortCol={sortCol} sortDir={sortDir} col="total_cost_usd" />
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                    {wlList.map((row: any, i: number) => (
-                      <tr key={row.workload_type || i} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
-                        <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100">
-                          <Badge variant="default" className="text-xs">
-                            {row.workload_type || '—'}
-                          </Badge>
-                        </td>
-                        <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtNumber(Number(row.total_dbus || 0))}</td>
-                        <td className="py-2 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtCost(Number(row.total_cost_usd || 0))}</td>
+                    {pagedWorkspaces.map((row: any, i: number) => (
+                      <tr key={row.workspace_id || i} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                        <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100">{row.workspace_id || '\u2014'}</td>
+                        <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtNumber(row.total_dbus)}</td>
+                        <td className="py-2 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtCost(row.total_cost_usd)}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
+              <TablePagination
+                page={wsPage}
+                totalItems={sortedWorkspaces.length}
+                pageSize={wsPageSize}
+                onPageChange={setWsPage}
+                onPageSizeChange={setWsPageSize}
+              />
+            </>
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }

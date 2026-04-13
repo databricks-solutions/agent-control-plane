@@ -60,11 +60,21 @@ resources:
               lakebase_instance: ${var.lakebase_instance}
           environment_key: default
 
+        - task_key: discover_knowledge_bases
+          description: "Discover Vector Search endpoints/indexes and Lakebase instances → Delta"
+          notebook_task:
+            notebook_path: ./03_discover_knowledge_bases.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+          environment_key: default
+
         - task_key: sync_to_lakebase
-          description: "Sync agents + observability (Delta → Lakebase) + system table experiments/runs"
+          description: "Sync agents + observability + knowledge bases (Delta → Lakebase) + system tables"
           depends_on:
             - task_key: discover_agents
             - task_key: discover_observability
+            - task_key: discover_knowledge_bases
           notebook_task:
             notebook_path: ./02_sync_to_lakebase.py
             base_parameters:

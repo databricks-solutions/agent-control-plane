@@ -1,4 +1,4 @@
-"""Service for Vector Search monitoring — discovery, caching, and billing."""
+"""Service for Knowledge Bases monitoring — Vector Search + Lakebase discovery, caching, and billing."""
 import logging
 import json as _json
 from typing import List, Dict, Any, Optional
@@ -40,12 +40,52 @@ def ensure_vector_search_tables():
             primary_key    TEXT,
             creator        TEXT,
             workspace_id   TEXT,
+            detailed_state TEXT,
+            indexed_row_count INT DEFAULT 0,
+            ready          BOOLEAN DEFAULT FALSE,
+            status_message TEXT,
+            source_table   TEXT,
+            embedding_model TEXT,
+            pipeline_type  TEXT,
             last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             PRIMARY KEY (endpoint_name, index_name)
         )
         """,
         "CREATE INDEX IF NOT EXISTS idx_vsi_endpoint ON vector_search_indexes (endpoint_name)",
         "CREATE INDEX IF NOT EXISTS idx_vsi_type ON vector_search_indexes (index_type)",
+        # Add columns to existing tables (idempotent)
+        "ALTER TABLE vector_search_indexes ADD COLUMN IF NOT EXISTS detailed_state TEXT",
+        "ALTER TABLE vector_search_indexes ADD COLUMN IF NOT EXISTS indexed_row_count INT DEFAULT 0",
+        "ALTER TABLE vector_search_indexes ADD COLUMN IF NOT EXISTS ready BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE vector_search_indexes ADD COLUMN IF NOT EXISTS status_message TEXT",
+        "ALTER TABLE vector_search_indexes ADD COLUMN IF NOT EXISTS source_table TEXT",
+        "ALTER TABLE vector_search_indexes ADD COLUMN IF NOT EXISTS embedding_model TEXT",
+        "ALTER TABLE vector_search_indexes ADD COLUMN IF NOT EXISTS pipeline_type TEXT",
+        # Endpoint health history (one row per discovery run per endpoint)
+        """
+        CREATE TABLE IF NOT EXISTS vector_search_health_history (
+            endpoint_name  TEXT NOT NULL,
+            status         TEXT NOT NULL,
+            num_indexes    INT DEFAULT 0,
+            recorded_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_vshh_ep ON vector_search_health_history (endpoint_name)",
+        "CREATE INDEX IF NOT EXISTS idx_vshh_ts ON vector_search_health_history (recorded_at DESC)",
+        """
+        CREATE TABLE IF NOT EXISTS lakebase_instances (
+            instance_name  TEXT PRIMARY KEY,
+            instance_id    TEXT,
+            state          TEXT,
+            capacity       TEXT,
+            pg_version     TEXT,
+            read_write_dns TEXT,
+            read_only_dns  TEXT,
+            creator        TEXT,
+            created_at     TEXT,
+            last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+        """,
     ]
     for stmt in ddl_statements:
         try:
@@ -121,20 +161,51 @@ def discover_vector_search() -> Dict[str, int]:
                 idx_resp = r.json()
 
             for idx in idx_resp.get("vector_indexes", []):
+                idx_name = idx.get("name", "")
+                # Fetch detailed index status
+                detailed_state = ""
+                indexed_row_count = 0
+                ready = False
+                status_message = ""
+                source_table = ""
+                embedding_model = ""
+                pipeline_type = ""
+                try:
+                    if w and idx_name:
+                        detail = w.api_client.do("GET", f"/api/2.0/vector-search/indexes/{idx_name}")
+                        st = detail.get("status", {})
+                        detailed_state = st.get("detailed_state", "")
+                        indexed_row_count = st.get("indexed_row_count", 0) or 0
+                        ready = bool(st.get("ready", False))
+                        status_message = st.get("message", "")[:500]
+                        ds = detail.get("delta_sync_index_spec", {})
+                        source_table = ds.get("source_table", "")
+                        emb_cols = ds.get("embedding_source_columns", [])
+                        if emb_cols and isinstance(emb_cols, list) and len(emb_cols) > 0:
+                            embedding_model = emb_cols[0].get("embedding_model_endpoint_name", "")
+                        pipeline_type = ds.get("pipeline_type", "")
+                except Exception as exc:
+                    logger.warning("Index detail fetch failed for %s: %s", idx_name, exc)
+
                 try:
                     execute_update(
                         """INSERT INTO vector_search_indexes
-                           (index_name, endpoint_name, index_type, primary_key, creator, last_synced)
-                           VALUES (%s, %s, %s, %s, %s, NOW())
+                           (index_name, endpoint_name, index_type, primary_key, creator,
+                            detailed_state, indexed_row_count, ready, status_message,
+                            source_table, embedding_model, pipeline_type, last_synced)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                            ON CONFLICT (endpoint_name, index_name) DO UPDATE SET
                                index_type = EXCLUDED.index_type, primary_key = EXCLUDED.primary_key,
-                               creator = EXCLUDED.creator, last_synced = NOW()""",
+                               creator = EXCLUDED.creator, detailed_state = EXCLUDED.detailed_state,
+                               indexed_row_count = EXCLUDED.indexed_row_count, ready = EXCLUDED.ready,
+                               status_message = EXCLUDED.status_message, source_table = EXCLUDED.source_table,
+                               embedding_model = EXCLUDED.embedding_model, pipeline_type = EXCLUDED.pipeline_type,
+                               last_synced = NOW()""",
                         (
-                            idx.get("name", ""),
-                            ep_name,
-                            idx.get("index_type", ""),
-                            idx.get("primary_key", ""),
-                            idx.get("creator", ""),
+                            idx_name, ep_name, idx.get("index_type", ""),
+                            idx.get("primary_key", ""), idx.get("creator", ""),
+                            detailed_state, indexed_row_count, ready, status_message,
+                            source_table, embedding_model, pipeline_type,
                         ),
                     )
                     counts["indexes"] += 1
@@ -142,6 +213,16 @@ def discover_vector_search() -> Dict[str, int]:
                     logger.warning("Vector search index upsert failed: %s", exc)
         except Exception as exc:
             logger.warning("Vector search index discovery failed for %s: %s", ep_name, exc)
+
+    # Record health history snapshot
+    for ep in endpoints:
+        try:
+            execute_update(
+                "INSERT INTO vector_search_health_history (endpoint_name, status, num_indexes) VALUES (%s, %s, %s)",
+                (ep.get("name", ""), ep.get("endpoint_status", {}).get("state", "UNKNOWN"), ep.get("num_indexes", 0)),
+            )
+        except Exception as exc:
+            logger.warning("Health history insert failed: %s", exc)
 
     logger.info("Vector search discovery: %s endpoints, %s indexes", counts["endpoints"], counts["indexes"])
     return counts
@@ -162,6 +243,27 @@ def get_indexes(endpoint_name: Optional[str] = None) -> List[Dict[str, Any]]:
             (endpoint_name,),
         )
     return execute_query("SELECT * FROM vector_search_indexes ORDER BY endpoint_name, index_name")
+
+
+def get_index_details() -> List[Dict[str, Any]]:
+    """Return all indexes with detailed sync status."""
+    return execute_query("""
+        SELECT i.*, e.status AS endpoint_status
+        FROM vector_search_indexes i
+        LEFT JOIN vector_search_endpoints e ON i.endpoint_name = e.endpoint_name
+        ORDER BY i.endpoint_name, i.index_name
+    """)
+
+
+def get_health_history(days: int = 7) -> List[Dict[str, Any]]:
+    """Return endpoint health snapshots for the last N days."""
+    return execute_query(
+        """SELECT endpoint_name, status, num_indexes, recorded_at
+           FROM vector_search_health_history
+           WHERE recorded_at >= NOW() - INTERVAL '%s days'
+           ORDER BY recorded_at DESC""",
+        (days,),
+    )
 
 
 def get_overview() -> Dict[str, Any]:
@@ -354,6 +456,31 @@ def get_cost_by_workspace(days: int = 30) -> List[Dict[str, Any]]:
     """)
 
 
+def get_cost_trend_by_workload(days: int = 30) -> List[Dict[str, Any]]:
+    """Daily cost trend broken down by workload type (for stacked chart)."""
+    return _execute_billing_sql(f"""
+        SELECT
+            CAST(u.usage_date AS STRING) AS usage_date,
+            CASE
+                WHEN u.sku_name LIKE '%STORAGE%' THEN 'storage'
+                WHEN u.sku_name LIKE '%INFERENCE%' OR u.sku_name LIKE '%SERVING%' THEN 'serving'
+                ELSE 'ingest'
+            END AS workload_type,
+            ROUND(SUM(u.usage_quantity), 4) AS total_units,
+            ROUND(SUM(u.usage_quantity *
+                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
+            ), 4) AS total_cost_usd
+        FROM system.billing.usage u
+        LEFT JOIN system.billing.list_prices lp
+            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
+            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
+        WHERE u.billing_origin_product = 'VECTOR_SEARCH'
+          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
+        GROUP BY u.usage_date, workload_type
+        ORDER BY u.usage_date, workload_type
+    """)
+
+
 def get_cost_by_workload_type(days: int = 30) -> List[Dict[str, Any]]:
     """Cost split by workload type: ingest, serving, storage."""
     return _execute_billing_sql(f"""
@@ -375,4 +502,154 @@ def get_cost_by_workload_type(days: int = 30) -> List[Dict[str, Any]]:
           AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
         GROUP BY workload_type
         ORDER BY total_cost_usd DESC
+    """)
+
+
+# ══════════════════════════════════════════════════════════════
+# Lakebase Monitoring
+# ══════════════════════════════════════════════════════════════
+
+def get_lakebase_instances() -> List[Dict[str, Any]]:
+    """Return Lakebase instances from cache (populated by workflow)."""
+    try:
+        return execute_query("SELECT * FROM lakebase_instances ORDER BY instance_name")
+    except Exception as exc:
+        logger.warning("Lakebase instances cache read failed: %s", exc)
+        return []
+
+
+def discover_lakebase_instances() -> List[Dict[str, Any]]:
+    """Discover Lakebase instances via REST API (used by refresh button)."""
+    import httpx
+    w = _get_workspace_client()
+    try:
+        if w:
+            resp = w.api_client.do("GET", "/api/2.0/database/instances")
+        else:
+            base = get_databricks_host()
+            r = httpx.get(f"{base}/api/2.0/database/instances",
+                          headers=get_databricks_headers(), timeout=_TIMEOUT)
+            r.raise_for_status()
+            resp = r.json()
+        return resp.get("database_instances", [])
+    except Exception as exc:
+        logger.warning("Lakebase instance discovery failed: %s", exc)
+        return []
+
+
+def get_lakebase_cost_summary(days: int = 30) -> Dict[str, Any]:
+    """Total Lakebase cost (LAKEBASE + DATABASE products)."""
+    rows = _execute_billing_sql(f"""
+        SELECT
+            ROUND(SUM(u.usage_quantity), 4) AS total_dbus,
+            ROUND(SUM(u.usage_quantity *
+                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
+            ), 4) AS total_cost_usd,
+            COUNT(DISTINCT u.workspace_id) AS workspace_count
+        FROM system.billing.usage u
+        LEFT JOIN system.billing.list_prices lp
+            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
+            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
+        WHERE u.billing_origin_product IN ('LAKEBASE', 'DATABASE')
+          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
+    """)
+    if rows:
+        r = rows[0]
+        return {
+            "total_dbus": float(r.get("total_dbus") or 0),
+            "total_cost_usd": float(r.get("total_cost_usd") or 0),
+            "workspace_count": int(r.get("workspace_count") or 0),
+            "days": days,
+        }
+    return {"total_dbus": 0, "total_cost_usd": 0, "workspace_count": 0, "days": days}
+
+
+def get_lakebase_cost_trend(days: int = 30) -> List[Dict[str, Any]]:
+    """Daily Lakebase cost trend."""
+    return _execute_billing_sql(f"""
+        SELECT
+            CAST(u.usage_date AS STRING) AS usage_date,
+            ROUND(SUM(u.usage_quantity), 4) AS total_dbus,
+            ROUND(SUM(u.usage_quantity *
+                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
+            ), 4) AS total_cost_usd
+        FROM system.billing.usage u
+        LEFT JOIN system.billing.list_prices lp
+            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
+            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
+        WHERE u.billing_origin_product IN ('LAKEBASE', 'DATABASE')
+          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
+        GROUP BY u.usage_date
+        ORDER BY u.usage_date
+    """)
+
+
+def get_lakebase_cost_by_workspace(days: int = 30) -> List[Dict[str, Any]]:
+    """Lakebase cost per workspace."""
+    return _execute_billing_sql(f"""
+        SELECT
+            CAST(u.workspace_id AS STRING) AS workspace_id,
+            ROUND(SUM(u.usage_quantity), 4) AS total_dbus,
+            ROUND(SUM(u.usage_quantity *
+                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
+            ), 4) AS total_cost_usd
+        FROM system.billing.usage u
+        LEFT JOIN system.billing.list_prices lp
+            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
+            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
+        WHERE u.billing_origin_product IN ('LAKEBASE', 'DATABASE')
+          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
+        GROUP BY u.workspace_id
+        ORDER BY total_cost_usd DESC
+    """)
+
+
+def get_lakebase_cost_by_type(days: int = 30) -> List[Dict[str, Any]]:
+    """Lakebase cost split: compute vs storage."""
+    return _execute_billing_sql(f"""
+        SELECT
+            CASE
+                WHEN u.sku_name LIKE '%STORAGE%' THEN 'storage'
+                ELSE 'compute'
+            END AS cost_type,
+            ROUND(SUM(u.usage_quantity), 4) AS total_units,
+            ROUND(SUM(u.usage_quantity *
+                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
+            ), 4) AS total_cost_usd
+        FROM system.billing.usage u
+        LEFT JOIN system.billing.list_prices lp
+            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
+            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
+        WHERE u.billing_origin_product IN ('LAKEBASE', 'DATABASE')
+          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
+        GROUP BY cost_type
+        ORDER BY total_cost_usd DESC
+    """)
+
+
+def get_combined_overview(days: int = 30) -> Dict[str, Any]:
+    """Combined overview for the Knowledge Bases page."""
+    return {
+        "vector_search": get_cost_summary(days),
+        "lakebase": get_lakebase_cost_summary(days),
+    }
+
+
+def get_combined_cost_trend(days: int = 30) -> List[Dict[str, Any]]:
+    """Daily cost trend for both Vector Search and Lakebase as separate lines."""
+    return _execute_billing_sql(f"""
+        SELECT
+            CAST(u.usage_date AS STRING) AS usage_date,
+            u.billing_origin_product AS product,
+            ROUND(SUM(u.usage_quantity *
+                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
+            ), 4) AS total_cost_usd
+        FROM system.billing.usage u
+        LEFT JOIN system.billing.list_prices lp
+            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
+            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
+        WHERE u.billing_origin_product IN ('VECTOR_SEARCH', 'LAKEBASE', 'DATABASE')
+          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
+        GROUP BY u.usage_date, u.billing_origin_product
+        ORDER BY u.usage_date
     """)
