@@ -541,17 +541,18 @@ def get_inference_table_config(endpoint_name: Optional[str] = None) -> List[Dict
 # ── Usage from system.serving.endpoint_usage ─────────────────────
 
 def _get_usage_overview_stats(days: int = 1) -> Dict[str, Any]:
-    """Get aggregate usage stats from system tables."""
-    rows = _execute_system_sql(f"""
-        SELECT
-            COUNT(*)                                    AS total_requests,
-            COALESCE(SUM(input_token_count), 0)         AS total_input_tokens,
-            COALESCE(SUM(output_token_count), 0)        AS total_output_tokens,
-            SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS error_count,
-            COUNT(DISTINCT requester)                    AS unique_users
-        FROM system.serving.endpoint_usage
-        WHERE request_time >= date_sub(current_date(), {days})
-    """)
+    """Get aggregate usage stats from Lakebase cache."""
+    from backend.database import execute_query
+    rows = execute_query(
+        """SELECT COALESCE(SUM(request_count), 0) AS total_requests,
+                  COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
+                  COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
+                  COALESCE(SUM(error_count), 0) AS error_count,
+                  COUNT(DISTINCT NULLIF(requester, '')) AS unique_users
+           FROM gateway_usage_daily
+           WHERE usage_date >= CURRENT_DATE - INTERVAL '%s days'""",
+        (days,),
+    )
     if not rows:
         return {}
     r = rows[0]
@@ -568,29 +569,21 @@ def _get_usage_overview_stats(days: int = 1) -> Dict[str, Any]:
 
 
 def get_usage_summary(days: int = 7) -> List[Dict[str, Any]]:
-    """Per-endpoint usage summary from system tables (cached)."""
-    ck = f"usage_summary:{days}"
-    cached = _cache_get(ck)
-    if cached is not None:
-        return cached
-
-    rows = _execute_system_sql(f"""
-        SELECT
-            se.endpoint_name,
-            COUNT(*)                                     AS total_requests,
-            COALESCE(SUM(u.input_token_count), 0)        AS total_input_tokens,
-            COALESCE(SUM(u.output_token_count), 0)       AS total_output_tokens,
-            SUM(CASE WHEN u.status_code >= 400 THEN 1 ELSE 0 END) AS error_count,
-            COUNT(DISTINCT u.requester)                   AS unique_users
-        FROM system.serving.endpoint_usage u
-        JOIN system.serving.served_entities se
-            ON u.served_entity_id = se.served_entity_id
-        WHERE u.request_time >= date_sub(current_date(), {days})
-        GROUP BY se.endpoint_name
-        ORDER BY total_requests DESC
-        LIMIT 100
-    """)
-    result = [
+    """Per-endpoint usage summary from Lakebase cache."""
+    from backend.database import execute_query
+    rows = execute_query(
+        """SELECT endpoint_name,
+                  SUM(request_count) AS total_requests,
+                  SUM(input_tokens) AS total_input_tokens,
+                  SUM(output_tokens) AS total_output_tokens,
+                  SUM(error_count) AS error_count,
+                  COUNT(DISTINCT NULLIF(requester, '')) AS unique_users
+           FROM gateway_usage_daily
+           WHERE usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           GROUP BY endpoint_name ORDER BY total_requests DESC LIMIT 100""",
+        (days,),
+    )
+    return [
         {
             "endpoint_name": r.get("endpoint_name", ""),
             "total_requests": int(r.get("total_requests") or 0),
@@ -601,36 +594,29 @@ def get_usage_summary(days: int = 7) -> List[Dict[str, Any]]:
         }
         for r in rows
     ]
-    return _cache_set(ck, result)
 
 
 def get_usage_timeseries(days: int = 7, endpoint_name: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Hourly usage time series from system tables (cached)."""
-    ck = f"usage_ts:{days}:{endpoint_name or '__all__'}"
-    cached = _cache_get(ck)
-    if cached is not None:
-        return cached
-
-    endpoint_filter = ""
+    """Hourly usage time series from Lakebase cache."""
+    from backend.database import execute_query
     if endpoint_name:
-        endpoint_filter = f"AND se.endpoint_name = '{endpoint_name}'"
-
-    rows = _execute_system_sql(f"""
-        SELECT
-            DATE_TRUNC('HOUR', u.request_time)           AS hour,
-            COUNT(*)                                      AS request_count,
-            COALESCE(SUM(u.input_token_count), 0)         AS input_tokens,
-            COALESCE(SUM(u.output_token_count), 0)        AS output_tokens,
-            SUM(CASE WHEN u.status_code >= 400 THEN 1 ELSE 0 END) AS error_count
-        FROM system.serving.endpoint_usage u
-        JOIN system.serving.served_entities se
-            ON u.served_entity_id = se.served_entity_id
-        WHERE u.request_time >= date_sub(current_date(), {days})
-          {endpoint_filter}
-        GROUP BY DATE_TRUNC('HOUR', u.request_time)
-        ORDER BY hour
-    """)
-    result = [
+        rows = execute_query(
+            """SELECT hour, SUM(request_count) AS request_count,
+                      SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+                      SUM(error_count) AS error_count
+               FROM gateway_usage_hourly WHERE endpoint_name = %s
+               GROUP BY hour ORDER BY hour""",
+            (endpoint_name,),
+        )
+    else:
+        rows = execute_query(
+            """SELECT hour, SUM(request_count) AS request_count,
+                      SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+                      SUM(error_count) AS error_count
+               FROM gateway_usage_hourly
+               GROUP BY hour ORDER BY hour""",
+        )
+    return [
         {
             "hour": r.get("hour", ""),
             "request_count": int(r.get("request_count") or 0),
@@ -640,30 +626,22 @@ def get_usage_timeseries(days: int = 7, endpoint_name: Optional[str] = None) -> 
         }
         for r in rows
     ]
-    return _cache_set(ck, result)
 
 
 def get_usage_by_user(days: int = 7) -> List[Dict[str, Any]]:
-    """Per-user usage summary (cached)."""
-    ck = f"usage_by_user:{days}"
-    cached = _cache_get(ck)
-    if cached is not None:
-        return cached
-
-    rows = _execute_system_sql(f"""
-        SELECT
-            u.requester,
-            COUNT(*)                                     AS total_requests,
-            COALESCE(SUM(u.input_token_count), 0)        AS total_input_tokens,
-            COALESCE(SUM(u.output_token_count), 0)       AS total_output_tokens,
-            SUM(CASE WHEN u.status_code >= 400 THEN 1 ELSE 0 END) AS error_count
-        FROM system.serving.endpoint_usage u
-        WHERE u.request_time >= date_sub(current_date(), {days})
-        GROUP BY u.requester
-        ORDER BY total_requests DESC
-        LIMIT 50
-    """)
-    result = [
+    """Per-user usage summary from Lakebase cache."""
+    from backend.database import execute_query
+    rows = execute_query(
+        """SELECT requester, SUM(request_count) AS total_requests,
+                  SUM(input_tokens) AS total_input_tokens, SUM(output_tokens) AS total_output_tokens,
+                  SUM(error_count) AS error_count
+           FROM gateway_usage_daily
+           WHERE usage_date >= CURRENT_DATE - INTERVAL '%s days'
+             AND requester != ''
+           GROUP BY requester ORDER BY total_requests DESC LIMIT 50""",
+        (days,),
+    )
+    return [
         {
             "requester": r.get("requester", ""),
             "total_requests": int(r.get("total_requests") or 0),
@@ -673,7 +651,6 @@ def get_usage_by_user(days: int = 7) -> List[Dict[str, Any]]:
         }
         for r in rows
     ]
-    return _cache_set(ck, result)
 
 
 def get_inference_logs(

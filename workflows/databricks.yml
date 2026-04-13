@@ -69,12 +69,34 @@ resources:
               schema: ${var.schema}
           environment_key: default
 
+        - task_key: discover_user_analytics
+          description: "Query system.serving.endpoint_usage for user activity → Delta"
+          notebook_task:
+            notebook_path: ./05_discover_user_analytics.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              warehouse_id: ${var.warehouse_id}
+          environment_key: default
+
+        - task_key: discover_gateway_usage
+          description: "Query system.serving.endpoint_usage for AI Gateway usage → Delta"
+          notebook_task:
+            notebook_path: ./06_discover_gateway_usage.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              warehouse_id: ${var.warehouse_id}
+          environment_key: default
+
         - task_key: sync_to_lakebase
-          description: "Sync agents + observability + knowledge bases (Delta → Lakebase) + system tables"
+          description: "Sync all discovery data (Delta → Lakebase) + system table billing"
           depends_on:
             - task_key: discover_agents
             - task_key: discover_observability
             - task_key: discover_knowledge_bases
+            - task_key: discover_user_analytics
+            - task_key: discover_gateway_usage
           notebook_task:
             notebook_path: ./02_sync_to_lakebase.py
             base_parameters:

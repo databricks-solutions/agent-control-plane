@@ -73,6 +73,48 @@ def ensure_vector_search_tables():
         "CREATE INDEX IF NOT EXISTS idx_vshh_ep ON vector_search_health_history (endpoint_name)",
         "CREATE INDEX IF NOT EXISTS idx_vshh_ts ON vector_search_health_history (recorded_at DESC)",
         """
+        CREATE TABLE IF NOT EXISTS kb_billing_daily (
+            usage_date          DATE NOT NULL,
+            product             TEXT NOT NULL,
+            workspace_id        TEXT NOT NULL,
+            endpoint_name       TEXT DEFAULT '',
+            workload_type       TEXT DEFAULT 'other',
+            total_dbus          NUMERIC(18,4) DEFAULT 0,
+            total_cost_usd      NUMERIC(18,4) DEFAULT 0,
+            last_synced         TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (usage_date, product, workspace_id, endpoint_name, workload_type)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_kbd_product ON kb_billing_daily (product)",
+        "CREATE INDEX IF NOT EXISTS idx_kbd_date ON kb_billing_daily (usage_date DESC)",
+        """
+        CREATE TABLE IF NOT EXISTS gateway_usage_daily (
+            usage_date      DATE NOT NULL,
+            endpoint_name   TEXT NOT NULL,
+            requester       TEXT DEFAULT '',
+            request_count   BIGINT DEFAULT 0,
+            input_tokens    BIGINT DEFAULT 0,
+            output_tokens   BIGINT DEFAULT 0,
+            error_count     BIGINT DEFAULT 0,
+            last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (usage_date, endpoint_name, requester)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_gud_date ON gateway_usage_daily (usage_date DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_gud_ep ON gateway_usage_daily (endpoint_name)",
+        """
+        CREATE TABLE IF NOT EXISTS gateway_usage_hourly (
+            hour            TEXT NOT NULL,
+            endpoint_name   TEXT DEFAULT '',
+            request_count   BIGINT DEFAULT 0,
+            input_tokens    BIGINT DEFAULT 0,
+            output_tokens   BIGINT DEFAULT 0,
+            error_count     BIGINT DEFAULT 0,
+            last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (hour, endpoint_name)
+        )
+        """,
+        """
         CREATE TABLE IF NOT EXISTS lakebase_instances (
             instance_name  TEXT PRIMARY KEY,
             instance_id    TEXT,
@@ -365,22 +407,17 @@ def _execute_billing_sql(sql: str) -> List[Dict[str, Any]]:
 
 
 def get_cost_summary(days: int = 30) -> Dict[str, Any]:
-    """Total vector search cost for the last N days."""
-    rows = _execute_billing_sql(f"""
-        SELECT
-            ROUND(SUM(u.usage_quantity), 4) AS total_dbus,
-            ROUND(SUM(u.usage_quantity *
-                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
-            ), 4) AS total_cost_usd,
-            COUNT(DISTINCT u.usage_metadata.endpoint_name) AS endpoint_count,
-            COUNT(DISTINCT u.workspace_id) AS workspace_count
-        FROM system.billing.usage u
-        LEFT JOIN system.billing.list_prices lp
-            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
-        WHERE u.billing_origin_product = 'VECTOR_SEARCH'
-          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
-    """)
+    """Total vector search cost for the last N days (from Lakebase cache)."""
+    rows = execute_query(
+        """SELECT COALESCE(SUM(total_dbus), 0) AS total_dbus,
+                  COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd,
+                  COUNT(DISTINCT NULLIF(endpoint_name, '')) AS endpoint_count,
+                  COUNT(DISTINCT workspace_id) AS workspace_count
+           FROM kb_billing_daily
+           WHERE product = 'VECTOR_SEARCH'
+             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'""",
+        (days,),
+    )
     if rows:
         r = rows[0]
         return {
@@ -394,115 +431,65 @@ def get_cost_summary(days: int = 30) -> Dict[str, Any]:
 
 
 def get_cost_trend(days: int = 30) -> List[Dict[str, Any]]:
-    """Daily cost trend for vector search."""
-    return _execute_billing_sql(f"""
-        SELECT
-            CAST(u.usage_date AS STRING) AS usage_date,
-            ROUND(SUM(u.usage_quantity), 4) AS total_dbus,
-            ROUND(SUM(u.usage_quantity *
-                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
-            ), 4) AS total_cost_usd
-        FROM system.billing.usage u
-        LEFT JOIN system.billing.list_prices lp
-            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
-        WHERE u.billing_origin_product = 'VECTOR_SEARCH'
-          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
-        GROUP BY u.usage_date
-        ORDER BY u.usage_date
-    """)
+    """Daily cost trend for vector search (from Lakebase cache)."""
+    return execute_query(
+        """SELECT CAST(usage_date AS TEXT) AS usage_date,
+                  SUM(total_dbus) AS total_dbus, SUM(total_cost_usd) AS total_cost_usd
+           FROM kb_billing_daily WHERE product = 'VECTOR_SEARCH'
+             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           GROUP BY usage_date ORDER BY usage_date""",
+        (days,),
+    )
 
 
 def get_cost_by_endpoint(days: int = 30) -> List[Dict[str, Any]]:
-    """Cost breakdown per vector search endpoint."""
-    return _execute_billing_sql(f"""
-        SELECT
-            u.usage_metadata.endpoint_name AS endpoint_name,
-            CAST(u.workspace_id AS STRING) AS workspace_id,
-            ROUND(SUM(u.usage_quantity), 4) AS total_dbus,
-            ROUND(SUM(u.usage_quantity *
-                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
-            ), 4) AS total_cost_usd
-        FROM system.billing.usage u
-        LEFT JOIN system.billing.list_prices lp
-            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
-        WHERE u.billing_origin_product = 'VECTOR_SEARCH'
-          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
-          AND u.usage_metadata.endpoint_name IS NOT NULL
-        GROUP BY u.usage_metadata.endpoint_name, u.workspace_id
-        ORDER BY total_cost_usd DESC
-    """)
+    """Cost breakdown per vector search endpoint (from cache)."""
+    return execute_query(
+        """SELECT endpoint_name, workspace_id,
+                  SUM(total_dbus) AS total_dbus, SUM(total_cost_usd) AS total_cost_usd
+           FROM kb_billing_daily WHERE product = 'VECTOR_SEARCH'
+             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+             AND endpoint_name != ''
+           GROUP BY endpoint_name, workspace_id ORDER BY total_cost_usd DESC""",
+        (days,),
+    )
 
 
 def get_cost_by_workspace(days: int = 30) -> List[Dict[str, Any]]:
-    """Cost breakdown per workspace."""
-    return _execute_billing_sql(f"""
-        SELECT
-            CAST(u.workspace_id AS STRING) AS workspace_id,
-            ROUND(SUM(u.usage_quantity), 4) AS total_dbus,
-            ROUND(SUM(u.usage_quantity *
-                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
-            ), 4) AS total_cost_usd,
-            COUNT(DISTINCT u.usage_metadata.endpoint_name) AS endpoint_count
-        FROM system.billing.usage u
-        LEFT JOIN system.billing.list_prices lp
-            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
-        WHERE u.billing_origin_product = 'VECTOR_SEARCH'
-          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
-        GROUP BY u.workspace_id
-        ORDER BY total_cost_usd DESC
-    """)
+    """Cost breakdown per workspace (from cache)."""
+    return execute_query(
+        """SELECT workspace_id, SUM(total_dbus) AS total_dbus,
+                  SUM(total_cost_usd) AS total_cost_usd,
+                  COUNT(DISTINCT NULLIF(endpoint_name, '')) AS endpoint_count
+           FROM kb_billing_daily WHERE product = 'VECTOR_SEARCH'
+             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           GROUP BY workspace_id ORDER BY total_cost_usd DESC""",
+        (days,),
+    )
 
 
 def get_cost_trend_by_workload(days: int = 30) -> List[Dict[str, Any]]:
-    """Daily cost trend broken down by workload type (for stacked chart)."""
-    return _execute_billing_sql(f"""
-        SELECT
-            CAST(u.usage_date AS STRING) AS usage_date,
-            CASE
-                WHEN u.sku_name LIKE '%STORAGE%' THEN 'storage'
-                WHEN u.sku_name LIKE '%INFERENCE%' OR u.sku_name LIKE '%SERVING%' THEN 'serving'
-                ELSE 'ingest'
-            END AS workload_type,
-            ROUND(SUM(u.usage_quantity), 4) AS total_units,
-            ROUND(SUM(u.usage_quantity *
-                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
-            ), 4) AS total_cost_usd
-        FROM system.billing.usage u
-        LEFT JOIN system.billing.list_prices lp
-            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
-        WHERE u.billing_origin_product = 'VECTOR_SEARCH'
-          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
-        GROUP BY u.usage_date, workload_type
-        ORDER BY u.usage_date, workload_type
-    """)
+    """Daily cost trend broken down by workload type (from cache)."""
+    return execute_query(
+        """SELECT CAST(usage_date AS TEXT) AS usage_date, workload_type,
+                  SUM(total_dbus) AS total_units, SUM(total_cost_usd) AS total_cost_usd
+           FROM kb_billing_daily WHERE product = 'VECTOR_SEARCH'
+             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           GROUP BY usage_date, workload_type ORDER BY usage_date, workload_type""",
+        (days,),
+    )
 
 
 def get_cost_by_workload_type(days: int = 30) -> List[Dict[str, Any]]:
-    """Cost split by workload type: ingest, serving, storage."""
-    return _execute_billing_sql(f"""
-        SELECT
-            CASE
-                WHEN u.sku_name LIKE '%STORAGE%' THEN 'storage'
-                WHEN u.sku_name LIKE '%INFERENCE%' OR u.sku_name LIKE '%SERVING%' THEN 'serving'
-                ELSE 'ingest'
-            END AS workload_type,
-            ROUND(SUM(u.usage_quantity), 4) AS total_units,
-            ROUND(SUM(u.usage_quantity *
-                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
-            ), 4) AS total_cost_usd
-        FROM system.billing.usage u
-        LEFT JOIN system.billing.list_prices lp
-            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
-        WHERE u.billing_origin_product = 'VECTOR_SEARCH'
-          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
-        GROUP BY workload_type
-        ORDER BY total_cost_usd DESC
-    """)
+    """Cost split by workload type (from cache)."""
+    return execute_query(
+        """SELECT workload_type, SUM(total_dbus) AS total_units,
+                  SUM(total_cost_usd) AS total_cost_usd
+           FROM kb_billing_daily WHERE product = 'VECTOR_SEARCH'
+             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           GROUP BY workload_type ORDER BY total_cost_usd DESC""",
+        (days,),
+    )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -538,21 +525,16 @@ def discover_lakebase_instances() -> List[Dict[str, Any]]:
 
 
 def get_lakebase_cost_summary(days: int = 30) -> Dict[str, Any]:
-    """Total Lakebase cost (LAKEBASE + DATABASE products)."""
-    rows = _execute_billing_sql(f"""
-        SELECT
-            ROUND(SUM(u.usage_quantity), 4) AS total_dbus,
-            ROUND(SUM(u.usage_quantity *
-                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
-            ), 4) AS total_cost_usd,
-            COUNT(DISTINCT u.workspace_id) AS workspace_count
-        FROM system.billing.usage u
-        LEFT JOIN system.billing.list_prices lp
-            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
-        WHERE u.billing_origin_product IN ('LAKEBASE', 'DATABASE')
-          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
-    """)
+    """Total Lakebase cost (from cache)."""
+    rows = execute_query(
+        """SELECT COALESCE(SUM(total_dbus), 0) AS total_dbus,
+                  COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd,
+                  COUNT(DISTINCT workspace_id) AS workspace_count
+           FROM kb_billing_daily
+           WHERE product IN ('LAKEBASE', 'DATABASE')
+             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'""",
+        (days,),
+    )
     if rows:
         r = rows[0]
         return {
@@ -565,66 +547,39 @@ def get_lakebase_cost_summary(days: int = 30) -> Dict[str, Any]:
 
 
 def get_lakebase_cost_trend(days: int = 30) -> List[Dict[str, Any]]:
-    """Daily Lakebase cost trend."""
-    return _execute_billing_sql(f"""
-        SELECT
-            CAST(u.usage_date AS STRING) AS usage_date,
-            ROUND(SUM(u.usage_quantity), 4) AS total_dbus,
-            ROUND(SUM(u.usage_quantity *
-                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
-            ), 4) AS total_cost_usd
-        FROM system.billing.usage u
-        LEFT JOIN system.billing.list_prices lp
-            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
-        WHERE u.billing_origin_product IN ('LAKEBASE', 'DATABASE')
-          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
-        GROUP BY u.usage_date
-        ORDER BY u.usage_date
-    """)
+    """Daily Lakebase cost trend (from cache)."""
+    return execute_query(
+        """SELECT CAST(usage_date AS TEXT) AS usage_date,
+                  SUM(total_dbus) AS total_dbus, SUM(total_cost_usd) AS total_cost_usd
+           FROM kb_billing_daily WHERE product IN ('LAKEBASE', 'DATABASE')
+             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           GROUP BY usage_date ORDER BY usage_date""",
+        (days,),
+    )
 
 
 def get_lakebase_cost_by_workspace(days: int = 30) -> List[Dict[str, Any]]:
-    """Lakebase cost per workspace."""
-    return _execute_billing_sql(f"""
-        SELECT
-            CAST(u.workspace_id AS STRING) AS workspace_id,
-            ROUND(SUM(u.usage_quantity), 4) AS total_dbus,
-            ROUND(SUM(u.usage_quantity *
-                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
-            ), 4) AS total_cost_usd
-        FROM system.billing.usage u
-        LEFT JOIN system.billing.list_prices lp
-            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
-        WHERE u.billing_origin_product IN ('LAKEBASE', 'DATABASE')
-          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
-        GROUP BY u.workspace_id
-        ORDER BY total_cost_usd DESC
-    """)
+    """Lakebase cost per workspace (from cache)."""
+    return execute_query(
+        """SELECT workspace_id, SUM(total_dbus) AS total_dbus,
+                  SUM(total_cost_usd) AS total_cost_usd
+           FROM kb_billing_daily WHERE product IN ('LAKEBASE', 'DATABASE')
+             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           GROUP BY workspace_id ORDER BY total_cost_usd DESC""",
+        (days,),
+    )
 
 
 def get_lakebase_cost_by_type(days: int = 30) -> List[Dict[str, Any]]:
-    """Lakebase cost split: compute vs storage."""
-    return _execute_billing_sql(f"""
-        SELECT
-            CASE
-                WHEN u.sku_name LIKE '%STORAGE%' THEN 'storage'
-                ELSE 'compute'
-            END AS cost_type,
-            ROUND(SUM(u.usage_quantity), 4) AS total_units,
-            ROUND(SUM(u.usage_quantity *
-                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
-            ), 4) AS total_cost_usd
-        FROM system.billing.usage u
-        LEFT JOIN system.billing.list_prices lp
-            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
-        WHERE u.billing_origin_product IN ('LAKEBASE', 'DATABASE')
-          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
-        GROUP BY cost_type
-        ORDER BY total_cost_usd DESC
-    """)
+    """Lakebase cost split: compute vs storage (from cache)."""
+    return execute_query(
+        """SELECT workload_type AS cost_type, SUM(total_dbus) AS total_units,
+                  SUM(total_cost_usd) AS total_cost_usd
+           FROM kb_billing_daily WHERE product IN ('LAKEBASE', 'DATABASE')
+             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           GROUP BY workload_type ORDER BY total_cost_usd DESC""",
+        (days,),
+    )
 
 
 def get_combined_overview(days: int = 30) -> Dict[str, Any]:
@@ -636,20 +591,12 @@ def get_combined_overview(days: int = 30) -> Dict[str, Any]:
 
 
 def get_combined_cost_trend(days: int = 30) -> List[Dict[str, Any]]:
-    """Daily cost trend for both Vector Search and Lakebase as separate lines."""
-    return _execute_billing_sql(f"""
-        SELECT
-            CAST(u.usage_date AS STRING) AS usage_date,
-            u.billing_origin_product AS product,
-            ROUND(SUM(u.usage_quantity *
-                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
-            ), 4) AS total_cost_usd
-        FROM system.billing.usage u
-        LEFT JOIN system.billing.list_prices lp
-            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
-        WHERE u.billing_origin_product IN ('VECTOR_SEARCH', 'LAKEBASE', 'DATABASE')
-          AND u.usage_date >= current_date() - INTERVAL {int(days)} DAYS
-        GROUP BY u.usage_date, u.billing_origin_product
-        ORDER BY u.usage_date
-    """)
+    """Daily cost trend for both products (from cache)."""
+    return execute_query(
+        """SELECT CAST(usage_date AS TEXT) AS usage_date, product,
+                  SUM(total_cost_usd) AS total_cost_usd
+           FROM kb_billing_daily
+           WHERE usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           GROUP BY usage_date, product ORDER BY usage_date""",
+        (days,),
+    )

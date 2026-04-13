@@ -435,6 +435,7 @@ export default function AdminPage() {
             onRefresh={() => {
               queryClient.invalidateQueries({ queryKey: ['admin'] })
               queryClient.invalidateQueries({ queryKey: ['agents'] })
+              queryClient.invalidateQueries({ queryKey: ['user-analytics'] })
             }}
             isRefreshing={isFetchingAdmin}
             lastSynced={discoveryStatus?.last_synced ?? null}

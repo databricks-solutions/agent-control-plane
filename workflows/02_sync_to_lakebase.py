@@ -853,6 +853,314 @@ kb_conn.close()
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Phase 4: Cache Knowledge Bases Billing (system.billing.usage → Lakebase)
+
+# COMMAND ----------
+
+print("▸ Caching Knowledge Bases billing data from system tables ...")
+
+kb_billing_conn = get_lakebase_connection()
+vs_billing_count = 0
+lb_billing_count = 0
+
+# Ensure billing cache tables
+with kb_billing_conn.cursor() as cur:
+    for ddl in [
+        """CREATE TABLE IF NOT EXISTS kb_billing_daily (
+            usage_date          DATE NOT NULL,
+            product             TEXT NOT NULL,
+            workspace_id        TEXT NOT NULL,
+            endpoint_name       TEXT DEFAULT '',
+            workload_type       TEXT DEFAULT 'other',
+            total_dbus          NUMERIC(18,4) DEFAULT 0,
+            total_cost_usd      NUMERIC(18,4) DEFAULT 0,
+            last_synced         TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (usage_date, product, workspace_id, endpoint_name, workload_type)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_kbd_product ON kb_billing_daily (product)",
+        "CREATE INDEX IF NOT EXISTS idx_kbd_ws ON kb_billing_daily (workspace_id)",
+        "CREATE INDEX IF NOT EXISTS idx_kbd_date ON kb_billing_daily (usage_date DESC)",
+    ]:
+        try:
+            cur.execute(ddl)
+        except Exception as e:
+            print(f"  DDL warning: {e}")
+    kb_billing_conn.commit()
+print("  ✅ kb_billing_daily table ensured")
+
+# COMMAND ----------
+
+# Query system.billing.usage for Vector Search + Lakebase costs (last 90 days)
+print("  Querying system.billing.usage for VECTOR_SEARCH + LAKEBASE + DATABASE ...")
+kb_billing_rows = _execute_system_sql("""
+    SELECT
+        CAST(u.usage_date AS STRING) AS usage_date,
+        u.billing_origin_product AS product,
+        CAST(u.workspace_id AS STRING) AS workspace_id,
+        COALESCE(u.usage_metadata.endpoint_name, '') AS endpoint_name,
+        CASE
+            WHEN u.sku_name LIKE '%STORAGE%' THEN 'storage'
+            WHEN u.sku_name LIKE '%INFERENCE%' OR u.sku_name LIKE '%SERVING%' THEN 'serving'
+            WHEN u.sku_name LIKE '%JOBS%' THEN 'jobs'
+            ELSE 'compute'
+        END AS workload_type,
+        ROUND(SUM(u.usage_quantity), 4) AS total_dbus,
+        ROUND(SUM(u.usage_quantity *
+            COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
+        ), 4) AS total_cost_usd
+    FROM system.billing.usage u
+    LEFT JOIN system.billing.list_prices lp
+        ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
+        AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
+    WHERE u.billing_origin_product IN ('VECTOR_SEARCH', 'LAKEBASE', 'DATABASE')
+      AND u.usage_date >= current_date() - INTERVAL 90 DAYS
+    GROUP BY u.usage_date, u.billing_origin_product, u.workspace_id,
+             u.usage_metadata.endpoint_name, workload_type
+    ORDER BY u.usage_date
+""")
+print(f"  ✅ {len(kb_billing_rows)} billing rows from system tables")
+
+# COMMAND ----------
+
+# Upsert to Lakebase cache
+if kb_billing_rows:
+    with kb_billing_conn.cursor() as cur:
+        for r in kb_billing_rows:
+            try:
+                cur.execute(
+                    """INSERT INTO kb_billing_daily
+                       (usage_date, product, workspace_id, endpoint_name, workload_type, total_dbus, total_cost_usd, last_synced)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                       ON CONFLICT (usage_date, product, workspace_id, endpoint_name, workload_type) DO UPDATE SET
+                           total_dbus = EXCLUDED.total_dbus, total_cost_usd = EXCLUDED.total_cost_usd,
+                           last_synced = NOW()""",
+                    (r.get("usage_date"), r.get("product"), r.get("workspace_id"),
+                     r.get("endpoint_name", ""), r.get("workload_type", "other"),
+                     float(r.get("total_dbus") or 0), float(r.get("total_cost_usd") or 0)))
+                if r.get("product") == "VECTOR_SEARCH":
+                    vs_billing_count += 1
+                else:
+                    lb_billing_count += 1
+            except Exception as exc:
+                print(f"  ⚠️  Billing upsert failed: {exc}")
+        kb_billing_conn.commit()
+print(f"  ✅ Cached {vs_billing_count} VS + {lb_billing_count} Lakebase billing rows")
+
+# COMMAND ----------
+
+kb_billing_conn.close()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Phase 5: Sync User Analytics (Delta → Lakebase)
+
+# COMMAND ----------
+
+UA_DAILY_TABLE = f"{CATALOG}.{SCHEMA}.user_analytics_daily"
+UA_HEATMAP_TABLE = f"{CATALOG}.{SCHEMA}.user_analytics_heatmap"
+
+ua_conn = get_lakebase_connection()
+ua_daily_count = 0
+ua_heatmap_count = 0
+
+# Ensure cache tables
+with ua_conn.cursor() as cur:
+    for ddl in [
+        """CREATE TABLE IF NOT EXISTS user_analytics_daily (
+            usage_date      DATE NOT NULL,
+            requester       TEXT NOT NULL,
+            endpoint_name   TEXT NOT NULL,
+            request_count   BIGINT DEFAULT 0,
+            total_tokens    BIGINT DEFAULT 0,
+            last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (usage_date, requester, endpoint_name)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_uad_date ON user_analytics_daily (usage_date DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_uad_user ON user_analytics_daily (requester)",
+        """CREATE TABLE IF NOT EXISTS user_analytics_heatmap (
+            dow             INT NOT NULL,
+            hour            INT NOT NULL,
+            request_count   BIGINT DEFAULT 0,
+            period_days     INT DEFAULT 30,
+            last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (dow, hour, period_days)
+        )""",
+    ]:
+        try:
+            cur.execute(ddl)
+        except Exception as e:
+            print(f"  DDL warning: {e}")
+    ua_conn.commit()
+
+# COMMAND ----------
+
+# Sync daily activity from Delta
+print(f"▸ Syncing user analytics daily from Delta: {UA_DAILY_TABLE} ...")
+try:
+    ua_df = spark.read.table(UA_DAILY_TABLE)
+    ua_rows = ua_df.collect()
+    if ua_rows:
+        with ua_conn.cursor() as cur:
+            for r in ua_rows:
+                try:
+                    cur.execute(
+                        """INSERT INTO user_analytics_daily
+                           (usage_date, requester, endpoint_name, request_count, total_tokens, last_synced)
+                           VALUES (%s, %s, %s, %s, %s, NOW())
+                           ON CONFLICT (usage_date, requester, endpoint_name) DO UPDATE SET
+                               request_count = EXCLUDED.request_count, total_tokens = EXCLUDED.total_tokens,
+                               last_synced = NOW()""",
+                        (r.usage_date, r.requester, r.endpoint_name,
+                         r.request_count, r.total_tokens))
+                    ua_daily_count += 1
+                except Exception:
+                    pass
+            ua_conn.commit()
+    print(f"  ✅ {ua_daily_count} daily rows synced")
+except Exception as exc:
+    print(f"  ⚠️  UA daily sync failed: {exc}")
+
+# COMMAND ----------
+
+# Sync heatmap from Delta
+print(f"▸ Syncing heatmap from Delta: {UA_HEATMAP_TABLE} ...")
+try:
+    hm_df = spark.read.table(UA_HEATMAP_TABLE)
+    hm_rows = hm_df.collect()
+    if hm_rows:
+        with ua_conn.cursor() as cur:
+            for r in hm_rows:
+                try:
+                    cur.execute(
+                        """INSERT INTO user_analytics_heatmap (dow, hour, request_count, period_days, last_synced)
+                           VALUES (%s, %s, %s, %s, NOW())
+                           ON CONFLICT (dow, hour, period_days) DO UPDATE SET
+                               request_count = EXCLUDED.request_count, last_synced = NOW()""",
+                        (r.dow, r.hour, r.request_count, r.period_days))
+                    ua_heatmap_count += 1
+                except Exception:
+                    pass
+            ua_conn.commit()
+    print(f"  ✅ {ua_heatmap_count} heatmap rows synced")
+except Exception as exc:
+    print(f"  ⚠️  UA heatmap sync failed: {exc}")
+
+# COMMAND ----------
+
+ua_conn.close()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Phase 6: Sync Gateway Usage (Delta → Lakebase)
+
+# COMMAND ----------
+
+GW_DAILY_TABLE = f"{CATALOG}.{SCHEMA}.gateway_usage_daily"
+GW_HOURLY_TABLE = f"{CATALOG}.{SCHEMA}.gateway_usage_hourly"
+
+gw_conn = get_lakebase_connection()
+gw_daily_count = 0
+gw_hourly_count = 0
+
+with gw_conn.cursor() as cur:
+    for ddl in [
+        """CREATE TABLE IF NOT EXISTS gateway_usage_daily (
+            usage_date      DATE NOT NULL,
+            endpoint_name   TEXT NOT NULL,
+            requester       TEXT DEFAULT '',
+            request_count   BIGINT DEFAULT 0,
+            input_tokens    BIGINT DEFAULT 0,
+            output_tokens   BIGINT DEFAULT 0,
+            error_count     BIGINT DEFAULT 0,
+            last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (usage_date, endpoint_name, requester)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_gud_date ON gateway_usage_daily (usage_date DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_gud_ep ON gateway_usage_daily (endpoint_name)",
+        """CREATE TABLE IF NOT EXISTS gateway_usage_hourly (
+            hour            TEXT NOT NULL,
+            endpoint_name   TEXT DEFAULT '',
+            request_count   BIGINT DEFAULT 0,
+            input_tokens    BIGINT DEFAULT 0,
+            output_tokens   BIGINT DEFAULT 0,
+            error_count     BIGINT DEFAULT 0,
+            last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (hour, endpoint_name)
+        )""",
+    ]:
+        try:
+            cur.execute(ddl)
+        except Exception as e:
+            print(f"  DDL warning: {e}")
+    gw_conn.commit()
+
+# COMMAND ----------
+
+# Sync daily
+print(f"▸ Syncing gateway daily usage from Delta: {GW_DAILY_TABLE} ...")
+try:
+    gw_df = spark.read.table(GW_DAILY_TABLE)
+    gw_rows = gw_df.collect()
+    if gw_rows:
+        with gw_conn.cursor() as cur:
+            for r in gw_rows:
+                try:
+                    cur.execute(
+                        """INSERT INTO gateway_usage_daily
+                           (usage_date, endpoint_name, requester, request_count, input_tokens, output_tokens, error_count, last_synced)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                           ON CONFLICT (usage_date, endpoint_name, requester) DO UPDATE SET
+                               request_count = EXCLUDED.request_count, input_tokens = EXCLUDED.input_tokens,
+                               output_tokens = EXCLUDED.output_tokens, error_count = EXCLUDED.error_count,
+                               last_synced = NOW()""",
+                        (r.usage_date, r.endpoint_name, r.requester or "",
+                         r.request_count, r.input_tokens, r.output_tokens, r.error_count))
+                    gw_daily_count += 1
+                except Exception:
+                    pass
+            gw_conn.commit()
+    print(f"  ✅ {gw_daily_count} daily rows synced")
+except Exception as exc:
+    print(f"  ⚠️  Gateway daily sync failed: {exc}")
+
+# COMMAND ----------
+
+# Sync hourly
+print(f"▸ Syncing gateway hourly usage from Delta: {GW_HOURLY_TABLE} ...")
+try:
+    gh_df = spark.read.table(GW_HOURLY_TABLE)
+    gh_rows = gh_df.collect()
+    if gh_rows:
+        with gw_conn.cursor() as cur:
+            for r in gh_rows:
+                try:
+                    cur.execute(
+                        """INSERT INTO gateway_usage_hourly
+                           (hour, endpoint_name, request_count, input_tokens, output_tokens, error_count, last_synced)
+                           VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                           ON CONFLICT (hour, endpoint_name) DO UPDATE SET
+                               request_count = EXCLUDED.request_count, input_tokens = EXCLUDED.input_tokens,
+                               output_tokens = EXCLUDED.output_tokens, error_count = EXCLUDED.error_count,
+                               last_synced = NOW()""",
+                        (r.hour, r.endpoint_name or "", r.request_count,
+                         r.input_tokens, r.output_tokens, r.error_count))
+                    gw_hourly_count += 1
+                except Exception:
+                    pass
+            gw_conn.commit()
+    print(f"  ✅ {gw_hourly_count} hourly rows synced")
+except Exception as exc:
+    print(f"  ⚠️  Gateway hourly sync failed: {exc}")
+
+# COMMAND ----------
+
+gw_conn.close()
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Final Summary
 
 # COMMAND ----------
@@ -867,6 +1175,12 @@ result = {
     "vs_endpoints": vs_ep_count,
     "vs_indexes": vs_idx_count,
     "lakebase_instances": lb_inst_count,
+    "kb_billing_vs": vs_billing_count,
+    "kb_billing_lakebase": lb_billing_count,
+    "ua_daily_rows": ua_daily_count,
+    "ua_heatmap_rows": ua_heatmap_count,
+    "gw_daily_rows": gw_daily_count,
+    "gw_hourly_rows": gw_hourly_count,
     "synced_at": datetime.now(timezone.utc).isoformat(),
 }
 print(json.dumps(result, indent=2))
