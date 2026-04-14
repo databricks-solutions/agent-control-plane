@@ -23,7 +23,7 @@ const queryClient = new QueryClient({
     queries: {
       refetchOnWindowFocus: false,
       refetchOnMount: 'always',   // refetch when a component mounts (tab change)
-      staleTime: 30_000,          // 30s — data considered fresh, no refetch
+      staleTime: 120_000,         // 2 min — matches workflow refresh cadence (15 min)
       retry: 1,
     },
   },
