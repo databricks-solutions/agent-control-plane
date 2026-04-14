@@ -36,9 +36,11 @@ spark = SparkSession.builder.getOrCreate()
 
 dbutils.widgets.text("catalog", "", "Unity Catalog name")
 dbutils.widgets.text("schema", "", "Schema name")
+dbutils.widgets.text("warehouse_id", "", "SQL warehouse ID for billing queries")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
+WAREHOUSE_ID = dbutils.widgets.get("warehouse_id")
 
 if not CATALOG or not SCHEMA:
     raise ValueError(f"catalog and schema required (got {CATALOG!r}, {SCHEMA!r})")
@@ -48,8 +50,10 @@ spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
 VS_ENDPOINTS_TABLE = f"{CATALOG}.{SCHEMA}.vector_search_endpoints"
 VS_INDEXES_TABLE = f"{CATALOG}.{SCHEMA}.vector_search_indexes"
 LAKEBASE_INSTANCES_TABLE = f"{CATALOG}.{SCHEMA}.lakebase_instances"
+KB_BILLING_TABLE = f"{CATALOG}.{SCHEMA}.kb_billing_daily"
 
-print(f"Target tables: {VS_ENDPOINTS_TABLE}, {VS_INDEXES_TABLE}, {LAKEBASE_INSTANCES_TABLE}")
+print(f"Target tables: {VS_ENDPOINTS_TABLE}, {VS_INDEXES_TABLE}, {LAKEBASE_INSTANCES_TABLE}, {KB_BILLING_TABLE}")
+print(f"Warehouse: {WAREHOUSE_ID}")
 
 # COMMAND ----------
 
@@ -266,6 +270,124 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Query Billing Data (system.billing.usage)
+
+# COMMAND ----------
+
+import time
+
+def _execute_sql(sql):
+    """Execute via SQL Statements API."""
+    if not WAREHOUSE_ID:
+        print("  No warehouse ID — cannot query billing")
+        return []
+    try:
+        resp = w.api_client.do("POST", "/api/2.0/sql/statements", body={
+            "warehouse_id": WAREHOUSE_ID, "statement": sql,
+            "wait_timeout": "50s", "disposition": "INLINE", "format": "JSON_ARRAY"})
+    except Exception as exc:
+        print(f"  SQL failed: {exc}")
+        return []
+    status = resp.get("status", {}).get("state", "")
+    sid = resp.get("statement_id", "")
+    if status in ("PENDING", "RUNNING") and sid:
+        for _ in range(30):
+            time.sleep(3)
+            try:
+                resp = w.api_client.do("GET", f"/api/2.0/sql/statements/{sid}")
+            except Exception:
+                continue
+            status = resp.get("status", {}).get("state", "")
+            if status not in ("PENDING", "RUNNING"):
+                break
+    if status != "SUCCEEDED":
+        err = resp.get("status", {}).get("error", {})
+        print(f"  SQL {status}: {err.get('message', '')[:300]}")
+        return []
+    cols = [c["name"] for c in resp.get("manifest", {}).get("schema", {}).get("columns", [])]
+    return [dict(zip(cols, row)) for row in resp.get("result", {}).get("data_array", [])]
+
+# COMMAND ----------
+
+from pyspark.sql.types import DoubleType as _DoubleType
+
+KB_BILLING_SCHEMA = StructType([
+    StructField("usage_date", StringType(), False),
+    StructField("product", StringType(), False),
+    StructField("workspace_id", StringType(), False),
+    StructField("endpoint_name", StringType(), True),
+    StructField("workload_type", StringType(), True),
+    StructField("total_dbus", _DoubleType(), True),
+    StructField("total_cost_usd", _DoubleType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+all_billing_rows = []
+
+# Query in two batches to avoid result size limits
+# Split into smaller chunks to avoid SQL Statements API result size limits
+for product_filter, label, days_back in [
+    ("'VECTOR_SEARCH'", "Vector Search (recent 30d)", 30),
+    ("'VECTOR_SEARCH'", "Vector Search (31-90d)", "31_90"),
+    ("'LAKEBASE'", "Lakebase (recent 30d)", 30),
+    ("'LAKEBASE'", "Lakebase (31-90d)", "31_90"),
+    ("'DATABASE'", "Database (recent 30d)", 30),
+    ("'DATABASE'", "Database (31-90d)", "31_90"),
+]:
+    if days_back == "31_90":
+        date_filter = "AND u.usage_date >= current_date() - INTERVAL 90 DAYS AND u.usage_date < current_date() - INTERVAL 30 DAYS"
+    else:
+        date_filter = f"AND u.usage_date >= current_date() - INTERVAL {days_back} DAYS"
+
+    print(f"▸ Querying system.billing.usage for {label} ...")
+    rows = _execute_sql(f"""
+        SELECT
+            CAST(u.usage_date AS STRING) AS usage_date,
+            u.billing_origin_product AS product,
+            CAST(u.workspace_id AS STRING) AS workspace_id,
+            COALESCE(u.usage_metadata.endpoint_name, '') AS endpoint_name,
+            CASE
+                WHEN u.sku_name LIKE '%STORAGE%' THEN 'storage'
+                WHEN u.sku_name LIKE '%INFERENCE%' OR u.sku_name LIKE '%SERVING%' THEN 'serving'
+                WHEN u.sku_name LIKE '%JOBS%' THEN 'jobs'
+                ELSE 'compute'
+            END AS workload_type,
+            ROUND(SUM(u.usage_quantity), 4) AS total_dbus,
+            ROUND(SUM(u.usage_quantity *
+                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
+            ), 4) AS total_cost_usd
+        FROM system.billing.usage u
+        LEFT JOIN system.billing.list_prices lp
+            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
+            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
+        WHERE u.billing_origin_product IN ({product_filter})
+          {date_filter}
+        GROUP BY u.usage_date, u.billing_origin_product, u.workspace_id,
+                 u.usage_metadata.endpoint_name, workload_type
+    """)
+    print(f"  ✅ {len(rows)} rows for {label}")
+    all_billing_rows.extend(rows)
+
+print(f"Total billing rows: {len(all_billing_rows)}")
+
+# COMMAND ----------
+
+# Write billing to Delta
+if all_billing_rows:
+    billing_data = [(
+        r.get("usage_date", ""), r.get("product", ""), r.get("workspace_id", ""),
+        r.get("endpoint_name", ""), r.get("workload_type", "other"),
+        float(r.get("total_dbus") or 0), float(r.get("total_cost_usd") or 0), now,
+    ) for r in all_billing_rows]
+    spark.createDataFrame(billing_data, KB_BILLING_SCHEMA).write.mode("overwrite").saveAsTable(KB_BILLING_TABLE)
+    print(f"✅ Wrote {len(billing_data)} billing rows to {KB_BILLING_TABLE}")
+else:
+    spark.createDataFrame([], KB_BILLING_SCHEMA).write.mode("overwrite").saveAsTable(KB_BILLING_TABLE)
+    print("ℹ️  No billing data — empty table written")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Summary
 
 # COMMAND ----------
@@ -275,6 +397,7 @@ result = {
     "vector_search_endpoints": len(vs_endpoints),
     "vector_search_indexes": len(vs_indexes),
     "lakebase_instances": len(lb_instances),
+    "kb_billing_rows": len(all_billing_rows),
     "discovered_at": now.isoformat(),
 }
 print(json.dumps(result, indent=2))

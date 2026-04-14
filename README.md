@@ -127,7 +127,7 @@ agent-control-plane/
 ├── workflows/                  # Databricks Asset Bundles
 │   ├── 01_discover_agents.py          # Agent discovery → Delta
 │   ├── 02_sync_to_lakebase.py         # All Delta → Lakebase + billing cache
-│   ├── 03_discover_knowledge_bases.py # Vector Search + Lakebase → Delta
+│   ├── 03_discover_knowledge_bases.py # Vector Search + Lakebase + billing → Delta
 │   ├── 04_discover_observability.py   # Cross-workspace traces → Delta
 │   ├── 05_discover_user_analytics.py  # User activity → Delta
 │   ├── 06_discover_gateway_usage.py   # Gateway usage → Delta

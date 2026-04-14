@@ -764,6 +764,12 @@ print("✅ Knowledge bases tables ensured")
 # Sync VS endpoints
 print(f"▸ Syncing Vector Search endpoints from Delta: {VS_EP_TABLE} ...")
 try:
+    with kb_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE vector_search_endpoints")
+        cur.execute("TRUNCATE TABLE vector_search_indexes")
+        # Don't truncate health_history — it's append-only for uptime tracking
+        cur.execute("TRUNCATE TABLE lakebase_instances")
+        kb_conn.commit()
     ep_df = spark.read.table(VS_EP_TABLE)
     ep_rows = ep_df.collect()
     if ep_rows:
@@ -853,17 +859,17 @@ kb_conn.close()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Phase 4: Cache Knowledge Bases Billing (system.billing.usage → Lakebase)
+# MAGIC ## Phase 4: Sync KB Billing (Delta → Lakebase)
 
 # COMMAND ----------
 
-print("▸ Caching Knowledge Bases billing data from system tables ...")
+KB_BILLING_DELTA = f"{CATALOG}.{SCHEMA}.kb_billing_daily"
 
 kb_billing_conn = get_lakebase_connection()
 vs_billing_count = 0
 lb_billing_count = 0
 
-# Ensure billing cache tables
+# Ensure billing cache table
 with kb_billing_conn.cursor() as cur:
     for ddl in [
         """CREATE TABLE IF NOT EXISTS kb_billing_daily (
@@ -886,67 +892,36 @@ with kb_billing_conn.cursor() as cur:
         except Exception as e:
             print(f"  DDL warning: {e}")
     kb_billing_conn.commit()
-print("  ✅ kb_billing_daily table ensured")
 
-# COMMAND ----------
-
-# Query system.billing.usage for Vector Search + Lakebase costs (last 90 days)
-print("  Querying system.billing.usage for VECTOR_SEARCH + LAKEBASE + DATABASE ...")
-kb_billing_rows = _execute_system_sql("""
-    SELECT
-        CAST(u.usage_date AS STRING) AS usage_date,
-        u.billing_origin_product AS product,
-        CAST(u.workspace_id AS STRING) AS workspace_id,
-        COALESCE(u.usage_metadata.endpoint_name, '') AS endpoint_name,
-        CASE
-            WHEN u.sku_name LIKE '%STORAGE%' THEN 'storage'
-            WHEN u.sku_name LIKE '%INFERENCE%' OR u.sku_name LIKE '%SERVING%' THEN 'serving'
-            WHEN u.sku_name LIKE '%JOBS%' THEN 'jobs'
-            ELSE 'compute'
-        END AS workload_type,
-        ROUND(SUM(u.usage_quantity), 4) AS total_dbus,
-        ROUND(SUM(u.usage_quantity *
-            COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
-        ), 4) AS total_cost_usd
-    FROM system.billing.usage u
-    LEFT JOIN system.billing.list_prices lp
-        ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-        AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
-    WHERE u.billing_origin_product IN ('VECTOR_SEARCH', 'LAKEBASE', 'DATABASE')
-      AND u.usage_date >= current_date() - INTERVAL 90 DAYS
-    GROUP BY u.usage_date, u.billing_origin_product, u.workspace_id,
-             u.usage_metadata.endpoint_name, workload_type
-    ORDER BY u.usage_date
-""")
-print(f"  ✅ {len(kb_billing_rows)} billing rows from system tables")
-
-# COMMAND ----------
-
-# Upsert to Lakebase cache
-if kb_billing_rows:
+# Sync from Delta (populated by 07_discover_kb_billing task)
+print(f"▸ Syncing KB billing from Delta: {KB_BILLING_DELTA} ...")
+try:
     with kb_billing_conn.cursor() as cur:
-        for r in kb_billing_rows:
-            try:
-                cur.execute(
-                    """INSERT INTO kb_billing_daily
-                       (usage_date, product, workspace_id, endpoint_name, workload_type, total_dbus, total_cost_usd, last_synced)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
-                       ON CONFLICT (usage_date, product, workspace_id, endpoint_name, workload_type) DO UPDATE SET
-                           total_dbus = EXCLUDED.total_dbus, total_cost_usd = EXCLUDED.total_cost_usd,
-                           last_synced = NOW()""",
-                    (r.get("usage_date"), r.get("product"), r.get("workspace_id"),
-                     r.get("endpoint_name", ""), r.get("workload_type", "other"),
-                     float(r.get("total_dbus") or 0), float(r.get("total_cost_usd") or 0)))
-                if r.get("product") == "VECTOR_SEARCH":
-                    vs_billing_count += 1
-                else:
-                    lb_billing_count += 1
-            except Exception as exc:
-                print(f"  ⚠️  Billing upsert failed: {exc}")
+        cur.execute("TRUNCATE TABLE kb_billing_daily")
         kb_billing_conn.commit()
-print(f"  ✅ Cached {vs_billing_count} VS + {lb_billing_count} Lakebase billing rows")
-
-# COMMAND ----------
+    kb_df = spark.read.table(KB_BILLING_DELTA)
+    kb_rows = kb_df.collect()
+    if kb_rows:
+        values = [(r.usage_date, r.product, r.workspace_id,
+                   r.endpoint_name or "", r.workload_type or "other",
+                   float(r.total_dbus or 0), float(r.total_cost_usd or 0))
+                  for r in kb_rows]
+        vs_billing_count = sum(1 for r in kb_rows if r.product == "VECTOR_SEARCH")
+        lb_billing_count = len(kb_rows) - vs_billing_count
+        with kb_billing_conn.cursor() as cur:
+            execute_values(cur,
+                """INSERT INTO kb_billing_daily
+                   (usage_date, product, workspace_id, endpoint_name, workload_type, total_dbus, total_cost_usd, last_synced)
+                   VALUES %s
+                   ON CONFLICT (usage_date, product, workspace_id, endpoint_name, workload_type) DO UPDATE SET
+                       total_dbus = EXCLUDED.total_dbus, total_cost_usd = EXCLUDED.total_cost_usd,
+                       last_synced = NOW()""",
+                [(v[0], v[1], v[2], v[3], v[4], v[5], v[6], now) for v in values],
+                page_size=500)
+            kb_billing_conn.commit()
+    print(f"  ✅ Synced {vs_billing_count} VS + {lb_billing_count} Lakebase billing rows")
+except Exception as exc:
+    print(f"  ⚠️  KB billing sync failed: {exc}")
 
 kb_billing_conn.close()
 
@@ -998,24 +973,22 @@ with ua_conn.cursor() as cur:
 # Sync daily activity from Delta
 print(f"▸ Syncing user analytics daily from Delta: {UA_DAILY_TABLE} ...")
 try:
+    with ua_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE user_analytics_daily")
+        cur.execute("TRUNCATE TABLE user_analytics_heatmap")
+        ua_conn.commit()
     ua_df = spark.read.table(UA_DAILY_TABLE)
     ua_rows = ua_df.collect()
     if ua_rows:
+        values = [(r.usage_date, r.requester, r.endpoint_name, r.request_count, r.total_tokens, now)
+                  for r in ua_rows]
+        ua_daily_count = len(values)
         with ua_conn.cursor() as cur:
-            for r in ua_rows:
-                try:
-                    cur.execute(
-                        """INSERT INTO user_analytics_daily
-                           (usage_date, requester, endpoint_name, request_count, total_tokens, last_synced)
-                           VALUES (%s, %s, %s, %s, %s, NOW())
-                           ON CONFLICT (usage_date, requester, endpoint_name) DO UPDATE SET
-                               request_count = EXCLUDED.request_count, total_tokens = EXCLUDED.total_tokens,
-                               last_synced = NOW()""",
-                        (r.usage_date, r.requester, r.endpoint_name,
-                         r.request_count, r.total_tokens))
-                    ua_daily_count += 1
-                except Exception:
-                    pass
+            execute_values(cur,
+                """INSERT INTO user_analytics_daily
+                   (usage_date, requester, endpoint_name, request_count, total_tokens, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
             ua_conn.commit()
     print(f"  ✅ {ua_daily_count} daily rows synced")
 except Exception as exc:
@@ -1029,18 +1002,13 @@ try:
     hm_df = spark.read.table(UA_HEATMAP_TABLE)
     hm_rows = hm_df.collect()
     if hm_rows:
+        values = [(r.dow, r.hour, r.request_count, r.period_days, now) for r in hm_rows]
+        ua_heatmap_count = len(values)
         with ua_conn.cursor() as cur:
-            for r in hm_rows:
-                try:
-                    cur.execute(
-                        """INSERT INTO user_analytics_heatmap (dow, hour, request_count, period_days, last_synced)
-                           VALUES (%s, %s, %s, %s, NOW())
-                           ON CONFLICT (dow, hour, period_days) DO UPDATE SET
-                               request_count = EXCLUDED.request_count, last_synced = NOW()""",
-                        (r.dow, r.hour, r.request_count, r.period_days))
-                    ua_heatmap_count += 1
-                except Exception:
-                    pass
+            execute_values(cur,
+                """INSERT INTO user_analytics_heatmap (dow, hour, request_count, period_days, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
             ua_conn.commit()
     print(f"  ✅ {ua_heatmap_count} heatmap rows synced")
 except Exception as exc:
@@ -1101,25 +1069,23 @@ with gw_conn.cursor() as cur:
 # Sync daily
 print(f"▸ Syncing gateway daily usage from Delta: {GW_DAILY_TABLE} ...")
 try:
+    with gw_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE gateway_usage_daily")
+        cur.execute("TRUNCATE TABLE gateway_usage_hourly")
+        gw_conn.commit()
     gw_df = spark.read.table(GW_DAILY_TABLE)
     gw_rows = gw_df.collect()
     if gw_rows:
+        values = [(r.usage_date, r.endpoint_name, r.requester or "",
+                   r.request_count, r.input_tokens, r.output_tokens, r.error_count, now)
+                  for r in gw_rows]
+        gw_daily_count = len(values)
         with gw_conn.cursor() as cur:
-            for r in gw_rows:
-                try:
-                    cur.execute(
-                        """INSERT INTO gateway_usage_daily
-                           (usage_date, endpoint_name, requester, request_count, input_tokens, output_tokens, error_count, last_synced)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
-                           ON CONFLICT (usage_date, endpoint_name, requester) DO UPDATE SET
-                               request_count = EXCLUDED.request_count, input_tokens = EXCLUDED.input_tokens,
-                               output_tokens = EXCLUDED.output_tokens, error_count = EXCLUDED.error_count,
-                               last_synced = NOW()""",
-                        (r.usage_date, r.endpoint_name, r.requester or "",
-                         r.request_count, r.input_tokens, r.output_tokens, r.error_count))
-                    gw_daily_count += 1
-                except Exception:
-                    pass
+            execute_values(cur,
+                """INSERT INTO gateway_usage_daily
+                   (usage_date, endpoint_name, requester, request_count, input_tokens, output_tokens, error_count, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
             gw_conn.commit()
     print(f"  ✅ {gw_daily_count} daily rows synced")
 except Exception as exc:
@@ -1133,22 +1099,16 @@ try:
     gh_df = spark.read.table(GW_HOURLY_TABLE)
     gh_rows = gh_df.collect()
     if gh_rows:
+        values = [(r.hour, r.endpoint_name or "", r.request_count,
+                   r.input_tokens, r.output_tokens, r.error_count, now)
+                  for r in gh_rows]
+        gw_hourly_count = len(values)
         with gw_conn.cursor() as cur:
-            for r in gh_rows:
-                try:
-                    cur.execute(
-                        """INSERT INTO gateway_usage_hourly
-                           (hour, endpoint_name, request_count, input_tokens, output_tokens, error_count, last_synced)
-                           VALUES (%s, %s, %s, %s, %s, %s, NOW())
-                           ON CONFLICT (hour, endpoint_name) DO UPDATE SET
-                               request_count = EXCLUDED.request_count, input_tokens = EXCLUDED.input_tokens,
-                               output_tokens = EXCLUDED.output_tokens, error_count = EXCLUDED.error_count,
-                               last_synced = NOW()""",
-                        (r.hour, r.endpoint_name or "", r.request_count,
-                         r.input_tokens, r.output_tokens, r.error_count))
-                    gw_hourly_count += 1
-                except Exception:
-                    pass
+            execute_values(cur,
+                """INSERT INTO gateway_usage_hourly
+                   (hour, endpoint_name, request_count, input_tokens, output_tokens, error_count, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
             gw_conn.commit()
     print(f"  ✅ {gw_hourly_count} hourly rows synced")
 except Exception as exc:

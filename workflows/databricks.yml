@@ -61,12 +61,13 @@ resources:
           environment_key: default
 
         - task_key: discover_knowledge_bases
-          description: "Discover Vector Search endpoints/indexes and Lakebase instances → Delta"
+          description: "Discover Vector Search + Lakebase + billing costs → Delta"
           notebook_task:
             notebook_path: ./03_discover_knowledge_bases.py
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              warehouse_id: ${var.warehouse_id}
           environment_key: default
 
         - task_key: discover_user_analytics
