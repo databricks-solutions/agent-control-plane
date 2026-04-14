@@ -9,7 +9,7 @@ export function useAppConfig() {
       const { data } = await apiClient.get('/config')
       return data as { databricks_host: string }
     },
-    staleTime: Infinity, // Never refetch — it won't change at runtime
+    staleTime: 120_000, // 2 min — host won't change often
   })
 }
 
@@ -30,7 +30,7 @@ export function useCurrentUser() {
       const { data } = await apiClient.get('/me')
       return data as CurrentUser
     },
-    staleTime: Infinity,
+    staleTime: 120_000, // 2 min
     retry: false,
   })
 }
@@ -800,7 +800,7 @@ export function useBillingCurrentWorkspace() {
       const { data } = await apiClient.get('/billing/current-workspace')
       return data as { workspace_id: string | null }
     },
-    staleTime: Infinity,
+    staleTime: 120_000, // 2 min
   })
 }
 
