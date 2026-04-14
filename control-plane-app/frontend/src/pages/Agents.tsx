@@ -20,8 +20,6 @@ import { TablePagination } from '@/components/TablePagination'
 import { LineChart } from '@/components/charts/LineChart'
 import { BarChart } from '@/components/charts/BarChart'
 import { DB_CHART } from '@/lib/brand'
-import TopologyTab from '@/components/TopologyTab'
-
 import OperationsRTPage from './OperationsRT'
 import { RefreshButton } from '@/components/RefreshButton'
 import {
@@ -36,9 +34,9 @@ import {
   Search,
   Sparkles,
   Brain,
-  Network,
   Activity,
   LayoutDashboard,
+  Network,
 
   Pin,
   PinOff,
@@ -52,8 +50,6 @@ const TABS = [
   { key: 'overview',      label: 'Overview',   icon: LayoutDashboard },
   { key: 'operations',    label: 'Metrics',    icon: Activity },
   { key: 'operations_rt', label: 'Operations', icon: Server },
-  { key: 'topology',      label: 'Topology',   icon: Network },
-
 ] as const
 
 type TabKey = (typeof TABS)[number]['key']
@@ -95,7 +91,6 @@ export default function AgentsPage() {
       {tab === 'overview' && <OverviewTab />}
       {tab === 'operations' && <OperationsTab />}
       {tab === 'operations_rt' && <OperationsRTPage />}
-      {tab === 'topology' && <TopologyTab />}
     </div>
   )
 }

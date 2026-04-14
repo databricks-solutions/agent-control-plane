@@ -15,7 +15,6 @@ import AdminPage from './pages/Admin'
 import ToolsPage from './pages/Tools'
 // import PlaygroundPage from './pages/Playground'  // hidden — embedded in Agents page
 import WorkspacesPage from './pages/Workspaces'
-import TopologyView from './pages/TopologyView'
 import VectorSearchPage from './pages/VectorSearch'
 
 const queryClient = new QueryClient({
@@ -50,7 +49,6 @@ ReactDOM.createRoot(rootElement).render(
             <Route path="/observability" element={<ObservabilityPage />} />
             {/* <Route path="/playground" element={<PlaygroundPage />} /> */}
             <Route path="/workspaces" element={<WorkspacesPage />} />
-            <Route path="/topology" element={<TopologyView />} />
             <Route path="/admin" element={<AdminPage />} />
           </Route>
         </Routes>
