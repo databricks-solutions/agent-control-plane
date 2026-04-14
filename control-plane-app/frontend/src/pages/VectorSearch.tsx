@@ -14,6 +14,9 @@ import {
   useLakebaseCostTrend,
   useLakebaseCostByWorkspace,
   useLakebaseCostByType,
+  useKBTopWorkspacesDaily,
+  useVSTopWorkspacesDaily,
+  useLBTopWorkspacesDaily,
 } from '@/api/hooks'
 import { apiClient } from '@/api/client'
 import { RefreshButton } from '@/components/RefreshButton'
@@ -35,7 +38,7 @@ import {
 import {
   Search,
   Database,
-  DollarSign,
+  LayoutDashboard,
   Server,
   CheckCircle2,
   XCircle,
@@ -45,6 +48,8 @@ import {
   Layers,
 } from 'lucide-react'
 import { DB_GRID, DB_AXIS_TEXT } from '@/lib/brand'
+
+const WS_COLORS = ['#E53935', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6']
 
 /* ── helpers ─────────────────────────────────────────────────── */
 
@@ -63,7 +68,7 @@ function fmtNumber(v: number): string {
 /* ── tabs ─────────────────────────────────────────────────────── */
 
 const TABS = [
-  { id: 'overview', label: 'Overview', icon: DollarSign },
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'vector-search', label: 'Vector Search', icon: Search },
   { id: 'lakebase', label: 'Lakebase', icon: Database },
 ] as const
@@ -75,11 +80,15 @@ type TabId = (typeof TABS)[number]['id']
 export default function VectorSearchPage() {
   const [tab, setTab] = useState<TabId>('overview')
   const [days, setDays] = useState(30)
+  const [selectedWs, setSelectedWs] = useState<string | null>(null)
 
   const queryClient = useQueryClient()
   const isFetching = useIsFetching({ queryKey: ['vector-search'] }) > 0
   const updatedAt = queryClient.getQueryState(['vector-search', 'overview'])?.dataUpdatedAt
   const lastSynced = updatedAt ? new Date(updatedAt).toISOString() : null
+
+  // Fetch overview for workspace list in filter dropdown
+  const { data: overviewForFilter } = useKnowledgeBasesOverview(days)
 
   const handleRefresh = async () => {
     try {
@@ -101,6 +110,16 @@ export default function VectorSearchPage() {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <select
+            value={selectedWs || ''}
+            onChange={(e) => setSelectedWs(e.target.value || null)}
+            className="text-xs border border-gray-300 dark:border-gray-600 rounded-md px-2.5 py-1.5 bg-white dark:bg-gray-800"
+          >
+            <option value="">All Workspaces</option>
+            {(overviewForFilter?.top_workspaces || []).slice(0, 20).map((ws: any) => (
+              <option key={ws.workspace_id} value={ws.workspace_id}>WS {String(ws.workspace_id).substring(0, 12)}...</option>
+            ))}
+          </select>
           <RefreshButton
             onRefresh={handleRefresh}
             isRefreshing={isFetching}
@@ -133,9 +152,9 @@ export default function VectorSearchPage() {
       </div>
 
       {/* Tab content */}
-      {tab === 'overview' && <OverviewTab days={days} setDays={setDays} />}
-      {tab === 'vector-search' && <VectorSearchTab days={days} setDays={setDays} />}
-      {tab === 'lakebase' && <LakebaseTab days={days} setDays={setDays} />}
+      {tab === 'overview' && <OverviewTab days={days} setDays={setDays} selectedWs={selectedWs} />}
+      {tab === 'vector-search' && <VectorSearchTab days={days} setDays={setDays} selectedWs={selectedWs} />}
+      {tab === 'lakebase' && <LakebaseTab days={days} setDays={setDays} selectedWs={selectedWs} />}
     </div>
   )
 }
@@ -159,9 +178,21 @@ function SortIcon({ sortCol, sortDir, col }: { sortCol: string; sortDir: 'asc' |
 
 /* ── Overview Tab ────────────────────────────────────────────── */
 
-function OverviewTab({ days, setDays }: { days: number; setDays: (d: number) => void }) {
+function OverviewTab({ days, setDays, selectedWs }: { days: number; setDays: (d: number) => void; selectedWs: string | null }) {
   const { data: overview, isLoading: overviewLoading } = useKnowledgeBasesOverview(days)
   const { data: costTrend, isLoading: trendLoading } = useKnowledgeBasesCostTrend(days)
+  const { data: kbTopWsDaily } = useKBTopWorkspacesDaily(days)
+
+  const [owSortCol, setOwSortCol] = useState<string>('total_cost')
+  const [owSortDir, setOwSortDir] = useState<'asc' | 'desc'>('desc')
+  const [owPage, setOwPage] = useState(0)
+  const [owPageSize, setOwPageSize] = useState(10)
+
+  const handleOwSort = (col: string) => {
+    if (owSortCol === col) setOwSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    else { setOwSortCol(col); setOwSortDir('desc') }
+    setOwPage(0)
+  }
 
   const isLoading = overviewLoading || trendLoading
 
@@ -207,29 +238,54 @@ function OverviewTab({ days, setDays }: { days: number; setDays: (d: number) => 
     return keys
   }, [pivotedTrend])
 
-  // Top workspaces: combine VS + Lakebase workspace costs
+  // Top workspaces from overview
   const topWorkspaces = useMemo(() => {
-    const vsWorkspaces = Array.isArray(overview?.vector_search?.workspaces) ? overview.vector_search.workspaces : []
-    const lbWorkspaces = Array.isArray(overview?.lakebase?.workspaces) ? overview.lakebase.workspaces : []
-    const map: Record<string, { workspace_id: string; vs_cost: number; lb_cost: number; total_cost: number }> = {}
-    for (const ws of vsWorkspaces) {
-      const id = String(ws.workspace_id || '')
-      if (!map[id]) map[id] = { workspace_id: id, vs_cost: 0, lb_cost: 0, total_cost: 0 }
-      const cost = Number(ws.total_cost_usd || 0)
-      map[id].vs_cost += cost
-      map[id].total_cost += cost
-    }
-    for (const ws of lbWorkspaces) {
-      const id = String(ws.workspace_id || '')
-      if (!map[id]) map[id] = { workspace_id: id, vs_cost: 0, lb_cost: 0, total_cost: 0 }
-      const cost = Number(ws.total_cost_usd || 0)
-      map[id].lb_cost += cost
-      map[id].total_cost += cost
-    }
-    return Object.values(map)
-      .sort((a, b) => b.total_cost - a.total_cost)
-      .slice(0, 20)
+    const ws = Array.isArray(overview?.top_workspaces) ? overview.top_workspaces : []
+    return ws.map((w: any) => ({
+      workspace_id: String(w.workspace_id || ''),
+      vs_cost: Number(w.vs_cost || 0),
+      lb_cost: Number(w.lb_cost || 0),
+      total_cost: Number(w.total_cost || 0),
+    })).slice(0, 20)
   }, [overview])
+
+  // Filter workspaces by selected workspace
+  const filteredWorkspaces = useMemo(() => {
+    if (!selectedWs) return topWorkspaces
+    return topWorkspaces.filter((w: any) => w.workspace_id === selectedWs)
+  }, [topWorkspaces, selectedWs])
+
+  // Sorted + paginated workspaces
+  const sortedOwWorkspaces = useMemo(() => {
+    const rows = [...filteredWorkspaces]
+    rows.sort((a: any, b: any) => {
+      const av = owSortCol === 'workspace_id' ? String(a[owSortCol] || '') : Number(a[owSortCol] || 0)
+      const bv = owSortCol === 'workspace_id' ? String(b[owSortCol] || '') : Number(b[owSortCol] || 0)
+      const cmp = av < bv ? -1 : av > bv ? 1 : 0
+      return owSortDir === 'asc' ? cmp : -cmp
+    })
+    return rows
+  }, [filteredWorkspaces, owSortCol, owSortDir])
+
+  const pagedOwWorkspaces = useMemo(() => {
+    const start = owPage * owPageSize
+    return sortedOwWorkspaces.slice(start, start + owPageSize)
+  }, [sortedOwWorkspaces, owPage, owPageSize])
+
+  // Pivot top workspace daily data
+  const topWsDailyData = useMemo(() => {
+    const raw = kbTopWsDaily || []
+    const byDate: Record<string, Record<string, number>> = {}
+    const wsIds = new Set<string>()
+    for (const row of raw) {
+      const d = row.usage_date || ''
+      const ws = String(row.workspace_id || '').substring(0, 12)
+      wsIds.add(ws)
+      if (!byDate[d]) byDate[d] = { date: d } as any
+      byDate[d][ws] = Number(row.total_cost_usd || 0)
+    }
+    return { data: Object.values(byDate).sort((a: any, b: any) => (a.date > b.date ? 1 : -1)), workspaces: Array.from(wsIds) }
+  }, [kbTopWsDaily])
 
   if (isLoading) {
     return (
@@ -301,37 +357,77 @@ function OverviewTab({ days, setDays }: { days: number; setDays: (d: number) => 
         </CardContent>
       </Card>
 
+      {/* Daily Cost — Top 5 Workspaces */}
+      <Card>
+        <CardHeader><CardTitle className="text-base">Daily Cost — Top 5 Workspaces</CardTitle></CardHeader>
+        <CardContent>
+          {topWsDailyData.data.length === 0 ? (
+            <div className="text-center py-12 text-gray-400">No data</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={topWsDailyData.data}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `$${v >= 1000 ? (v/1000).toFixed(0) + 'k' : v.toFixed(0)}`} />
+                <Tooltip formatter={(v: number) => [`$${v.toFixed(2)}`, '']} />
+                <Legend />
+                {topWsDailyData.workspaces.map((ws, i) => (
+                  <Line key={ws} type="monotone" dataKey={ws} stroke={WS_COLORS[i % WS_COLORS.length]} strokeWidth={2} dot={false} name={ws} />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+        </CardContent>
+      </Card>
+
       {/* Top Workspaces table */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Top Workspaces by Spend</CardTitle>
         </CardHeader>
         <CardContent>
-          {topWorkspaces.length === 0 ? (
+          {filteredWorkspaces.length === 0 ? (
             <div className="text-center py-8 text-gray-400 dark:text-gray-500">No workspace cost data.</div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
-                    <th className="pb-2 pr-4 font-medium">Workspace ID</th>
-                    <th className="pb-2 pr-4 font-medium text-right">Vector Search</th>
-                    <th className="pb-2 pr-4 font-medium text-right">Lakebase</th>
-                    <th className="pb-2 font-medium text-right">Total Cost</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                  {topWorkspaces.map((ws, i) => (
-                    <tr key={ws.workspace_id || i} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
-                      <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100">{ws.workspace_id || '\u2014'}</td>
-                      <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtCost(ws.vs_cost)}</td>
-                      <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtCost(ws.lb_cost)}</td>
-                      <td className="py-2 text-right tabular-nums font-medium text-gray-900 dark:text-gray-100">{fmtCost(ws.total_cost)}</td>
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                      <th className="pb-2 pr-4 font-medium cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-200" onClick={() => handleOwSort('workspace_id')}>
+                        Workspace ID <SortIcon sortCol={owSortCol} sortDir={owSortDir} col="workspace_id" />
+                      </th>
+                      <th className="pb-2 pr-4 font-medium text-right cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-200" onClick={() => handleOwSort('vs_cost')}>
+                        Vector Search <SortIcon sortCol={owSortCol} sortDir={owSortDir} col="vs_cost" />
+                      </th>
+                      <th className="pb-2 pr-4 font-medium text-right cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-200" onClick={() => handleOwSort('lb_cost')}>
+                        Lakebase <SortIcon sortCol={owSortCol} sortDir={owSortDir} col="lb_cost" />
+                      </th>
+                      <th className="pb-2 font-medium text-right cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-200" onClick={() => handleOwSort('total_cost')}>
+                        Total Cost <SortIcon sortCol={owSortCol} sortDir={owSortDir} col="total_cost" />
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                    {pagedOwWorkspaces.map((ws: any, i: number) => (
+                      <tr key={ws.workspace_id || i} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                        <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100">{ws.workspace_id || '\u2014'}</td>
+                        <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtCost(ws.vs_cost)}</td>
+                        <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtCost(ws.lb_cost)}</td>
+                        <td className="py-2 text-right tabular-nums font-medium text-gray-900 dark:text-gray-100">{fmtCost(ws.total_cost)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <TablePagination
+                page={owPage}
+                totalItems={sortedOwWorkspaces.length}
+                pageSize={owPageSize}
+                onPageChange={setOwPage}
+                onPageSizeChange={setOwPageSize}
+              />
+            </>
           )}
         </CardContent>
       </Card>
@@ -341,10 +437,11 @@ function OverviewTab({ days, setDays }: { days: number; setDays: (d: number) => 
 
 /* ── Vector Search Tab ──────────────────────────────────────── */
 
-function VectorSearchTab({ days, setDays }: { days: number; setDays: (d: number) => void }) {
+function VectorSearchTab({ days, setDays, selectedWs }: { days: number; setDays: (d: number) => void; selectedWs: string | null }) {
   const { data, isLoading: pageLoading } = useVectorSearchPageData(days)
   const { data: indexDetails, isLoading: idxLoading } = useVectorSearchIndexDetails()
   const { data: healthHistory } = useVectorSearchHealthHistory(days)
+  const { data: vsTopWsDaily } = useVSTopWorkspacesDaily(days)
 
   const [sortCol, setSortCol] = useState<string>('total_cost_usd')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
@@ -398,6 +495,27 @@ function VectorSearchTab({ days, setDays }: { days: number; setDays: (d: number)
     }
     setWsPage(0)
   }
+
+  // Pivot VS top workspace daily data
+  const vsTopWsDailyData = useMemo(() => {
+    const raw = vsTopWsDaily || []
+    const byDate: Record<string, Record<string, number>> = {}
+    const wsIds = new Set<string>()
+    for (const row of raw) {
+      const d = row.usage_date || ''
+      const ws = String(row.workspace_id || '').substring(0, 12)
+      wsIds.add(ws)
+      if (!byDate[d]) byDate[d] = { date: d } as any
+      byDate[d][ws] = Number(row.total_cost_usd || 0)
+    }
+    return { data: Object.values(byDate).sort((a: any, b: any) => (a.date > b.date ? 1 : -1)), workspaces: Array.from(wsIds) }
+  }, [vsTopWsDaily])
+
+  // Filter workspaces by selected workspace
+  const filteredVsWorkspaces = useMemo(() => {
+    if (!selectedWs) return pagedWorkspaces
+    return sortedWorkspaces.filter((w: any) => w.workspace_id === selectedWs)
+  }, [sortedWorkspaces, pagedWorkspaces, selectedWs])
 
   // Health KPIs
   const safeIndexDetails = Array.isArray(indexDetails) ? indexDetails : []
@@ -474,13 +592,36 @@ function VectorSearchTab({ days, setDays }: { days: number; setDays: (d: number)
         </CardContent>
       </Card>
 
+      {/* Daily VS Cost — Top 5 Workspaces */}
+      <Card>
+        <CardHeader><CardTitle className="text-base">Daily VS Cost — Top 5 Workspaces</CardTitle></CardHeader>
+        <CardContent>
+          {vsTopWsDailyData.data.length === 0 ? (
+            <div className="text-center py-12 text-gray-400">No data</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={vsTopWsDailyData.data}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `$${v >= 1000 ? (v/1000).toFixed(0) + 'k' : v.toFixed(0)}`} />
+                <Tooltip formatter={(v: number) => [`$${v.toFixed(2)}`, '']} />
+                <Legend />
+                {vsTopWsDailyData.workspaces.map((ws, i) => (
+                  <Line key={ws} type="monotone" dataKey={ws} stroke={WS_COLORS[i % WS_COLORS.length]} strokeWidth={2} dot={false} name={ws} />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+        </CardContent>
+      </Card>
+
       {/* All Workspaces table */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">All Workspaces</CardTitle>
         </CardHeader>
         <CardContent>
-          {sortedWorkspaces.length === 0 ? (
+          {filteredVsWorkspaces.length === 0 ? (
             <div className="text-center py-8 text-gray-400 dark:text-gray-500">No workspace data.</div>
           ) : (
             <>
@@ -515,7 +656,7 @@ function VectorSearchTab({ days, setDays }: { days: number; setDays: (d: number)
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                    {pagedWorkspaces.map((row: any, i: number) => (
+                    {filteredVsWorkspaces.map((row: any, i: number) => (
                       <tr key={row.workspace_id || i} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
                         <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100">{row.workspace_id || '\u2014'}</td>
                         <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtNumber(row.total_dbus)}</td>
@@ -526,13 +667,15 @@ function VectorSearchTab({ days, setDays }: { days: number; setDays: (d: number)
                   </tbody>
                 </table>
               </div>
-              <TablePagination
-                page={wsPage}
-                totalItems={sortedWorkspaces.length}
-                pageSize={wsPageSize}
-                onPageChange={setWsPage}
-                onPageSizeChange={setWsPageSize}
-              />
+              {!selectedWs && (
+                <TablePagination
+                  page={wsPage}
+                  totalItems={sortedWorkspaces.length}
+                  pageSize={wsPageSize}
+                  onPageChange={setWsPage}
+                  onPageSizeChange={setWsPageSize}
+                />
+              )}
             </>
           )}
         </CardContent>
@@ -664,12 +807,13 @@ function VectorSearchTab({ days, setDays }: { days: number; setDays: (d: number)
 
 /* ── Lakebase Tab ────────────────────────────────────────────── */
 
-function LakebaseTab({ days, setDays }: { days: number; setDays: (d: number) => void }) {
+function LakebaseTab({ days, setDays, selectedWs }: { days: number; setDays: (d: number) => void; selectedWs: string | null }) {
   const { data: costSummary, isLoading: summaryLoading } = useLakebaseCostSummary(days)
   const { data: costTrend, isLoading: trendLoading } = useLakebaseCostTrend(days)
   const { data: instances, isLoading: instancesLoading } = useLakebaseInstances()
   const { data: costByWorkspace, isLoading: wsByWsLoading } = useLakebaseCostByWorkspace(days)
   const { data: costByType } = useLakebaseCostByType(days)
+  const { data: lbTopWsDaily } = useLBTopWorkspacesDaily(days)
 
   const [sortCol, setSortCol] = useState<string>('total_cost_usd')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
@@ -731,6 +875,27 @@ function LakebaseTab({ days, setDays }: { days: number; setDays: (d: number) => 
     }
     setWsPage(0)
   }
+
+  // Pivot LB top workspace daily data
+  const lbTopWsDailyData = useMemo(() => {
+    const raw = lbTopWsDaily || []
+    const byDate: Record<string, Record<string, number>> = {}
+    const wsIds = new Set<string>()
+    for (const row of raw) {
+      const d = row.usage_date || ''
+      const ws = String(row.workspace_id || '').substring(0, 12)
+      wsIds.add(ws)
+      if (!byDate[d]) byDate[d] = { date: d } as any
+      byDate[d][ws] = Number(row.total_cost_usd || 0)
+    }
+    return { data: Object.values(byDate).sort((a: any, b: any) => (a.date > b.date ? 1 : -1)), workspaces: Array.from(wsIds) }
+  }, [lbTopWsDaily])
+
+  // Filter workspaces by selected workspace
+  const filteredLbWorkspaces = useMemo(() => {
+    if (!selectedWs) return pagedWorkspaces
+    return sortedWorkspaces.filter((w: any) => w.workspace_id === selectedWs)
+  }, [sortedWorkspaces, pagedWorkspaces, selectedWs])
 
   if (isLoading) {
     return (
@@ -801,6 +966,29 @@ function LakebaseTab({ days, setDays }: { days: number; setDays: (d: number) => 
         </CardContent>
       </Card>
 
+      {/* Daily Lakebase Cost — Top 5 Workspaces */}
+      <Card>
+        <CardHeader><CardTitle className="text-base">Daily Lakebase Cost — Top 5 Workspaces</CardTitle></CardHeader>
+        <CardContent>
+          {lbTopWsDailyData.data.length === 0 ? (
+            <div className="text-center py-12 text-gray-400">No data</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={lbTopWsDailyData.data}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `$${v >= 1000 ? (v/1000).toFixed(0) + 'k' : v.toFixed(0)}`} />
+                <Tooltip formatter={(v: number) => [`$${v.toFixed(2)}`, '']} />
+                <Legend />
+                {lbTopWsDailyData.workspaces.map((ws, i) => (
+                  <Line key={ws} type="monotone" dataKey={ws} stroke={WS_COLORS[i % WS_COLORS.length]} strokeWidth={2} dot={false} name={ws} />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+        </CardContent>
+      </Card>
+
       {/* Instances table */}
       <Card>
         <CardHeader className="pb-3">
@@ -853,7 +1041,7 @@ function LakebaseTab({ days, setDays }: { days: number; setDays: (d: number) => 
           <CardTitle className="text-base">Cost by Workspace</CardTitle>
         </CardHeader>
         <CardContent>
-          {sortedWorkspaces.length === 0 ? (
+          {filteredLbWorkspaces.length === 0 ? (
             <div className="text-center py-8 text-gray-400 dark:text-gray-500">No workspace cost data.</div>
           ) : (
             <>
@@ -882,7 +1070,7 @@ function LakebaseTab({ days, setDays }: { days: number; setDays: (d: number) => 
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                    {pagedWorkspaces.map((row: any, i: number) => (
+                    {filteredLbWorkspaces.map((row: any, i: number) => (
                       <tr key={row.workspace_id || i} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
                         <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100">{row.workspace_id || '\u2014'}</td>
                         <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtNumber(row.total_dbus)}</td>
@@ -892,13 +1080,15 @@ function LakebaseTab({ days, setDays }: { days: number; setDays: (d: number) => 
                   </tbody>
                 </table>
               </div>
-              <TablePagination
-                page={wsPage}
-                totalItems={sortedWorkspaces.length}
-                pageSize={wsPageSize}
-                onPageChange={setWsPage}
-                onPageSizeChange={setWsPageSize}
-              />
+              {!selectedWs && (
+                <TablePagination
+                  page={wsPage}
+                  totalItems={sortedWorkspaces.length}
+                  pageSize={wsPageSize}
+                  onPageChange={setWsPage}
+                  onPageSizeChange={setWsPageSize}
+                />
+              )}
             </>
           )}
         </CardContent>

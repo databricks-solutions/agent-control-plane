@@ -17,6 +17,7 @@ import { BarChart } from '@/components/charts/BarChart'
 import { DB_COLORS } from '@/lib/brand'
 import {
   Globe,
+  LayoutDashboard,
   DollarSign,
   Bot,
   Zap,
@@ -72,7 +73,7 @@ function costDelta(current: number, prev: number): { pct: number; dir: 'up' | 'd
 /* ── tabs ─────────────────────────────────────────────────────── */
 
 const TABS = [
-  { key: 'overview', label: 'Overview', icon: Globe },
+  { key: 'overview', label: 'Overview', icon: LayoutDashboard },
   { key: 'costs', label: 'Cost Breakdown', icon: DollarSign },
   { key: 'agents', label: 'Agent Inventory', icon: Bot },
   { key: 'endpoints', label: 'Top Endpoints', icon: Server },

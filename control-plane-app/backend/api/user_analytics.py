@@ -148,7 +148,10 @@ def _get_requests_per_user_distribution(days: int) -> List[Dict[str, Any]]:
             SELECT
                 CASE WHEN cnt = 1 THEN '1' WHEN cnt <= 5 THEN '2-5'
                      WHEN cnt <= 20 THEN '6-20' WHEN cnt <= 100 THEN '21-100'
-                     ELSE '100+' END AS bucket,
+                     WHEN cnt <= 500 THEN '101-500' WHEN cnt <= 1000 THEN '501-1K'
+                     WHEN cnt <= 5000 THEN '1K-5K' WHEN cnt <= 10000 THEN '5K-10K'
+                     WHEN cnt <= 50000 THEN '10K-50K' WHEN cnt <= 100000 THEN '50K-100K'
+                     ELSE '100K+' END AS bucket,
                 COUNT(*) AS user_count
             FROM per_user GROUP BY bucket ORDER BY MIN(cnt)""",
             (days,),

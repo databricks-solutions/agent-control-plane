@@ -19,35 +19,53 @@ Built natively on Databricks: **Lakebase**, **system tables**, **MLflow**, **Uni
 
 ## Features
 
-### Agents
-Auto-discovered registry across all workspaces. Finds serving endpoints, Databricks Apps, Genie Spaces, and Agent Bricks (Knowledge Assistants, Multi-Agent Supervisors). Includes operations metrics, interactive dependency topology graph, and embedded playground for testing.
-
-<!-- ![Agents](docs/screenshots/agents.png) -->
-
 ### Governance
-Billing and cost attribution powered by `system.billing.usage`. Tracks DBU spend per endpoint, token usage trends, and cost breakdown by SKU — across all workspaces in the account.
 
-<!-- ![Governance](docs/screenshots/governance.png) -->
+Cost attribution and billing analytics powered by `system.billing.usage`. Track DBU spend per endpoint, token usage trends, and cost breakdown by SKU across all workspaces in the account. Drill into daily cost trends, product-level breakdown, and top consumers.
 
-### Observability
-Cross-workspace MLflow experiments, evaluation runs, and traces. Queries `system.mlflow.experiments_latest` and `system.mlflow.runs_latest` for account-wide visibility. Each row tagged with its data source (`system_table` or `rest_api`).
+![Governance](docs/gifs/governance.gif)
 
-<!-- ![Observability](docs/screenshots/observability.png) -->
+### Agents
+
+Auto-discovered agent registry across all workspaces. Finds serving endpoints, Databricks Apps, Genie Spaces, and Agent Bricks (Knowledge Assistants, Multi-Agent Supervisors, Knowledge Inference Engines). View endpoint status, operations metrics, interactive dependency topology, and test agents with an embedded playground.
+
+![Agents](docs/gifs/agents.gif)
 
 ### AI Gateway
-Usage analytics, request logs, permissions, and rate limits for all model serving endpoints. Manage Unity Catalog grants directly from the UI.
+
+Unified view of all model serving endpoints with usage analytics, token volume charts, per-endpoint and per-user breakdowns. Manage Unity Catalog permissions directly from the UI. Monitor operational metrics (requests, errors, latency), view individual request logs, and inspect rate limits and safety guardrails configured via AI Gateway.
+
+![AI Gateway](docs/gifs/ai-gateway.gif)
 
 ### Knowledge Bases
-Unified monitoring for Vector Search and Lakebase. Overview with combined cost trends, per-workspace drill-down. Vector Search tab shows endpoint/index inventory, sync status, health history, and cost by workload type (ingest/serving/storage). Lakebase tab shows instance inventory, compute vs storage cost, and per-workspace breakdown.
 
-### Workspaces
-Multi-workspace federation dashboard. Agent inventory, cost breakdown, and health status per workspace.
+Combined monitoring for Vector Search and Lakebase. Overview tab shows total cost, daily cost trends by product, and top workspaces by spend. Vector Search tab provides endpoint/index inventory, sync status, health history, and cost attribution by workload type (ingest, serving, storage). Lakebase tab shows instance inventory, compute vs storage cost, and per-workspace breakdown.
+
+![Knowledge Bases](docs/gifs/knowledge-bases.gif)
+
+### Observability
+
+Cross-workspace MLflow experiments, evaluation runs, and traces. Queries `system.mlflow.experiments_latest` and `system.mlflow.runs_latest` for account-wide visibility. Filter by workspace, view trace details, and identify which data source (system table or REST API) each record came from.
+
+![Observability](docs/gifs/observability.gif)
 
 ### Tools
-Registry of MCP servers and Unity Catalog functions available to agents.
+
+Registry of Unity Catalog functions and MCP servers available to agents. Browse function signatures, descriptions, and catalog locations.
+
+![Tools](docs/gifs/tools.gif)
+
+### Workspaces
+
+Multi-workspace federation dashboard. See agent inventory, cost breakdown, cloud provider, and deployment region per workspace. Drill into individual workspaces for detailed agent and cost views.
+
+![Workspaces](docs/gifs/workspaces.gif)
 
 ### Admin
-User analytics with activity heatmap, RBAC matrix, and access management. See who accessed which endpoints, when, and how often.
+
+Identity and access management with all principals, builders/users breakdown, RBAC matrix, and per-agent permission management. User activity tab shows top users, request distribution, daily active user trends, activity heatmap (24h UTC, Monday-first), and per-user agent usage.
+
+![Admin](docs/gifs/admin.gif)
 
 ## Architecture
 

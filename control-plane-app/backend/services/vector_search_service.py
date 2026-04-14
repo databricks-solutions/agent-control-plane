@@ -480,6 +480,23 @@ def get_cost_trend_by_workload(days: int = 30) -> List[Dict[str, Any]]:
     )
 
 
+def get_vs_top_workspaces_daily(days: int = 30, limit: int = 5) -> List[Dict[str, Any]]:
+    """Daily VS cost for top N workspaces."""
+    return execute_query(
+        """WITH top_ws AS (
+              SELECT workspace_id FROM kb_billing_daily
+              WHERE product = 'VECTOR_SEARCH' AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+              GROUP BY workspace_id ORDER BY SUM(total_cost_usd) DESC LIMIT %s
+           )
+           SELECT CAST(b.usage_date AS TEXT) AS usage_date, b.workspace_id,
+                  SUM(b.total_cost_usd) AS total_cost_usd
+           FROM kb_billing_daily b JOIN top_ws ON b.workspace_id = top_ws.workspace_id
+           WHERE b.product = 'VECTOR_SEARCH' AND b.usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           GROUP BY b.usage_date, b.workspace_id ORDER BY b.usage_date""",
+        (days, limit, days),
+    )
+
+
 def get_cost_by_workload_type(days: int = 30) -> List[Dict[str, Any]]:
     """Cost split by workload type (from cache)."""
     return execute_query(
@@ -570,6 +587,23 @@ def get_lakebase_cost_by_workspace(days: int = 30) -> List[Dict[str, Any]]:
     )
 
 
+def get_lb_top_workspaces_daily(days: int = 30, limit: int = 5) -> List[Dict[str, Any]]:
+    """Daily Lakebase cost for top N workspaces."""
+    return execute_query(
+        """WITH top_ws AS (
+              SELECT workspace_id FROM kb_billing_daily
+              WHERE product IN ('LAKEBASE', 'DATABASE') AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+              GROUP BY workspace_id ORDER BY SUM(total_cost_usd) DESC LIMIT %s
+           )
+           SELECT CAST(b.usage_date AS TEXT) AS usage_date, b.workspace_id,
+                  SUM(b.total_cost_usd) AS total_cost_usd
+           FROM kb_billing_daily b JOIN top_ws ON b.workspace_id = top_ws.workspace_id
+           WHERE b.product IN ('LAKEBASE', 'DATABASE') AND b.usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           GROUP BY b.usage_date, b.workspace_id ORDER BY b.usage_date""",
+        (days, limit, days),
+    )
+
+
 def get_lakebase_cost_by_type(days: int = 30) -> List[Dict[str, Any]]:
     """Lakebase cost split: compute vs storage (from cache)."""
     return execute_query(
@@ -587,7 +621,42 @@ def get_combined_overview(days: int = 30) -> Dict[str, Any]:
     return {
         "vector_search": get_cost_summary(days),
         "lakebase": get_lakebase_cost_summary(days),
+        "top_workspaces": get_combined_top_workspaces(days),
     }
+
+
+def get_combined_top_workspaces(days: int = 30, limit: int = 20) -> List[Dict[str, Any]]:
+    """Top workspaces by combined VS + Lakebase spend."""
+    return execute_query(
+        """SELECT workspace_id,
+                  SUM(CASE WHEN product = 'VECTOR_SEARCH' THEN total_cost_usd ELSE 0 END) AS vs_cost,
+                  SUM(CASE WHEN product IN ('LAKEBASE', 'DATABASE') THEN total_cost_usd ELSE 0 END) AS lb_cost,
+                  SUM(total_cost_usd) AS total_cost
+           FROM kb_billing_daily
+           WHERE usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           GROUP BY workspace_id ORDER BY total_cost DESC LIMIT %s""",
+        (days, limit),
+    )
+
+
+def get_top_workspaces_daily_trend(days: int = 30, limit: int = 5) -> List[Dict[str, Any]]:
+    """Daily cost trend for the top N workspaces (for line chart)."""
+    return execute_query(
+        """WITH top_ws AS (
+              SELECT workspace_id FROM kb_billing_daily
+              WHERE usage_date >= CURRENT_DATE - INTERVAL '%s days'
+              GROUP BY workspace_id ORDER BY SUM(total_cost_usd) DESC LIMIT %s
+           )
+           SELECT CAST(b.usage_date AS TEXT) AS usage_date,
+                  b.workspace_id,
+                  SUM(b.total_cost_usd) AS total_cost_usd
+           FROM kb_billing_daily b
+           JOIN top_ws ON b.workspace_id = top_ws.workspace_id
+           WHERE b.usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           GROUP BY b.usage_date, b.workspace_id
+           ORDER BY b.usage_date""",
+        (days, limit, days),
+    )
 
 
 def get_combined_cost_trend(days: int = 30) -> List[Dict[str, Any]]:

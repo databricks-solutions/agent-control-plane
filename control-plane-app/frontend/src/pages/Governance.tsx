@@ -16,7 +16,7 @@ import { LineChart } from '@/components/charts/LineChart'
 import { BarChart } from '@/components/charts/BarChart'
 import { PieChart } from '@/components/charts/PieChart'
 import { DB_CHART } from '@/lib/brand'
-import { DollarSign, Zap, Server, ChevronDown, ChevronRight, BarChart3, Layers, Globe, RefreshCw, Users } from 'lucide-react'
+import { LayoutDashboard, Zap, Server, ChevronDown, ChevronRight, BarChart3, Layers, Globe, RefreshCw, Users } from 'lucide-react'
 
 /* ── helpers ──────────────────────────────────────────────────── */
 
@@ -50,7 +50,7 @@ function fmtNumber(v: number): string {
 /* ── tabs ─────────────────────────────────────────────────────── */
 
 const TABS = [
-  { key: 'overview', label: 'Cost Overview', icon: DollarSign },
+  { key: 'overview', label: 'Cost Overview', icon: LayoutDashboard },
   { key: 'endpoints', label: 'Endpoint Costs', icon: Server },
   { key: 'tokens', label: 'Token Usage', icon: Zap },
   { key: 'products', label: 'All Products', icon: Layers },

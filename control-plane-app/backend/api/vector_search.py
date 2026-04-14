@@ -133,6 +133,24 @@ def combined_overview(days: int = Query(30, ge=1, le=365)):
     return vector_search_service.get_combined_overview(days)
 
 
+@router.get("/combined/top-workspaces-daily")
+def combined_top_workspaces_daily(days: int = Query(30, ge=1, le=365)):
+    """Daily cost trend for top 5 workspaces (combined VS + Lakebase)."""
+    return vector_search_service.get_top_workspaces_daily_trend(days)
+
+
+@router.get("/cost/top-workspaces-daily")
+def vs_top_workspaces_daily(days: int = Query(30, ge=1, le=365)):
+    """Daily VS cost for top 5 workspaces."""
+    return vector_search_service.get_vs_top_workspaces_daily(days)
+
+
+@router.get("/lakebase/cost/top-workspaces-daily")
+def lb_top_workspaces_daily(days: int = Query(30, ge=1, le=365)):
+    """Daily Lakebase cost for top 5 workspaces."""
+    return vector_search_service.get_lb_top_workspaces_daily(days)
+
+
 @router.get("/combined/cost-trend")
 def combined_cost_trend(days: int = Query(30, ge=1, le=365)):
     """Daily cost trend for both products."""

@@ -51,13 +51,9 @@ import {
 /* ── tab definitions ─────────────────────────────────────────── */
 const tabs = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'usage', label: 'Usage', icon: BarChart3 },
-  { id: 'users', label: 'Users', icon: Users },
-  { id: 'inference', label: 'Request Logs', icon: ScrollText },
   { id: 'metrics', label: 'Metrics', icon: Cpu },
   { id: 'permissions', label: 'Permissions', icon: Shield },
-  { id: 'rate-limits', label: 'Rate Limits', icon: ShieldAlert },
-  { id: 'guardrails', label: 'Guardrails', icon: ShieldCheck },
+  { id: 'rate-limits', label: 'Rate Limits & Guardrails', icon: ShieldAlert },
 ] as const
 
 type TabId = (typeof tabs)[number]['id']
@@ -153,24 +149,61 @@ export default function AIGatewayPage() {
       </div>
 
       {/* Tab content */}
-      {activeTab === 'overview' && <OverviewSection endpoints={endpoints} overview={overview} workspaceUrl={workspaceUrl} loading={pageLoading} searchQuery={searchQuery} />}
-      {activeTab === 'usage' && <UsageSection days={days} />}
-      {activeTab === 'users' && <UsersSection days={days} />}
-      {activeTab === 'inference' && <InferenceSection />}
+      {activeTab === 'overview' && <OverviewSection endpoints={endpoints} overview={overview} workspaceUrl={workspaceUrl} loading={pageLoading} searchQuery={searchQuery} days={days} />}
       {activeTab === 'metrics' && <MetricsSection />}
       {activeTab === 'permissions' && <PermissionsSection />}
-      {activeTab === 'rate-limits' && <RateLimitsSection />}
-      {activeTab === 'guardrails' && <GuardrailsSection />}
+      {activeTab === 'rate-limits' && <RateLimitsAndGuardrailsSection />}
     </div>
   )
 }
 
 /* ── Overview Section ─────────────────────────────────────────── */
 
-function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQuery }: { endpoints: any; overview: any; workspaceUrl: string; loading: boolean; searchQuery: string }) {
+function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQuery, days }: { endpoints: any; overview: any; workspaceUrl: string; loading: boolean; searchQuery: string; days: number }) {
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(10)
   const { sort, toggle } = useSort('name', 'asc')
+
+  // Usage data
+  const { data: summary, isLoading: usageLoading } = useGatewayUsageSummary(days)
+  const { data: timeseries } = useGatewayUsageTimeseries(days)
+  const { data: users, isLoading: usersLoading } = useGatewayUsageByUser(days)
+  const [usagePage, setUsagePage] = useState(0)
+  const [usagePageSize, setUsagePageSize] = useState(10)
+  const usageSort = useSort('total_requests', 'desc')
+  const [userPage, setUserPage] = useState(0)
+  const [userPageSize, setUserPageSize] = useState(10)
+  const userSort = useSort('total_requests', 'desc')
+
+  const chartData = timeseries?.map((t: any) => ({ timestamp: t.hour, value: Number(t.request_count) })) || []
+  const tokenData = timeseries?.map((t: any) => ({ timestamp: t.hour, value: Number(t.input_tokens) + Number(t.output_tokens) })) || []
+
+  const allSummary = summary || []
+  const sortedUsage = useMemo(() => sortRows(allSummary, usageSort.sort, (s: any, key) => {
+    if (key === 'endpoint_name') return (s.endpoint_name || '').toLowerCase()
+    if (key === 'total_requests') return Number(s.total_requests || 0)
+    if (key === 'total_input_tokens') return Number(s.total_input_tokens || 0)
+    if (key === 'total_output_tokens') return Number(s.total_output_tokens || 0)
+    if (key === 'error_count') return Number(s.error_count || 0)
+    if (key === 'unique_users') return Number(s.unique_users || 0)
+    return 0
+  }), [allSummary, usageSort.sort])
+  const usageTotalPages = Math.max(1, Math.ceil(sortedUsage.length / usagePageSize))
+  const usageSafePage = Math.min(usagePage, usageTotalPages - 1)
+  const pagedUsage = sortedUsage.slice(usageSafePage * usagePageSize, (usageSafePage + 1) * usagePageSize)
+
+  const allUsers = users || []
+  const sortedUsers = useMemo(() => sortRows(allUsers, userSort.sort, (u: any, key) => {
+    if (key === 'requester') return (u.requester || '').toLowerCase()
+    if (key === 'total_requests') return Number(u.total_requests || 0)
+    if (key === 'total_input_tokens') return Number(u.total_input_tokens || 0)
+    if (key === 'total_output_tokens') return Number(u.total_output_tokens || 0)
+    if (key === 'error_count') return Number(u.error_count || 0)
+    return 0
+  }), [allUsers, userSort.sort])
+  const userTotalPages = Math.max(1, Math.ceil(sortedUsers.length / userPageSize))
+  const userSafePage = Math.min(userPage, userTotalPages - 1)
+  const pagedUsers = sortedUsers.slice(userSafePage * userPageSize, (userSafePage + 1) * userPageSize)
 
   const q = searchQuery.toLowerCase().trim()
   const allEndpoints: any[] = endpoints || []
@@ -323,6 +356,98 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
             onPageChange={setPage}
             onPageSizeChange={setPageSize}
           />
+        </CardContent>
+      </Card>
+
+      {/* ── Usage Charts ──────────────────────────────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card>
+          <CardHeader><CardTitle className="text-base">Request Volume</CardTitle></CardHeader>
+          <CardContent>
+            {chartData.length ? <LineChart data={chartData} name="Requests" color={DB_CHART.primary} /> : <div className="text-gray-400 dark:text-gray-500 text-center py-12">{usageLoading ? 'Loading…' : 'No data'}</div>}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader><CardTitle className="text-base">Token Volume</CardTitle></CardHeader>
+          <CardContent>
+            {tokenData.length ? <LineChart data={tokenData} name="Total Tokens" color={DB_CHART.success} /> : <div className="text-gray-400 dark:text-gray-500 text-center py-12">{usageLoading ? 'Loading…' : 'No data'}</div>}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* ── Usage by Endpoint ─────────────────────────────────── */}
+      <Card>
+        <CardHeader><CardTitle className="text-base">Usage by Endpoint</CardTitle></CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                  <SortableHeader label="Endpoint" sortKey="endpoint_name" current={usageSort.sort} onToggle={usageSort.toggle} />
+                  <SortableHeader label="Requests" sortKey="total_requests" current={usageSort.sort} onToggle={usageSort.toggle} align="right" />
+                  <SortableHeader label="Input Tokens" sortKey="total_input_tokens" current={usageSort.sort} onToggle={usageSort.toggle} align="right" />
+                  <SortableHeader label="Output Tokens" sortKey="total_output_tokens" current={usageSort.sort} onToggle={usageSort.toggle} align="right" />
+                  <SortableHeader label="Errors" sortKey="error_count" current={usageSort.sort} onToggle={usageSort.toggle} align="right" />
+                  <SortableHeader label="Users" sortKey="unique_users" current={usageSort.sort} onToggle={usageSort.toggle} align="right" />
+                </tr>
+              </thead>
+              <tbody>
+                {pagedUsage.map((s: any) => (
+                  <tr key={s.endpoint_name} className="border-b border-gray-100 dark:border-gray-700">
+                    <td className="py-2 font-medium">{s.endpoint_name}</td>
+                    <td className="py-2 text-right">{Number(s.total_requests).toLocaleString()}</td>
+                    <td className="py-2 text-right">{Number(s.total_input_tokens).toLocaleString()}</td>
+                    <td className="py-2 text-right">{Number(s.total_output_tokens).toLocaleString()}</td>
+                    <td className="py-2 text-right text-red-600">{Number(s.error_count).toLocaleString()}</td>
+                    <td className="py-2 text-right">{Number(s.unique_users).toLocaleString()}</td>
+                  </tr>
+                ))}
+                {sortedUsage.length === 0 && (
+                  <tr><td colSpan={6} className="py-8 text-center text-gray-400 dark:text-gray-500">{usageLoading ? 'Loading…' : 'No usage data'}</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <TablePagination page={usageSafePage} totalItems={sortedUsage.length} pageSize={usagePageSize} onPageChange={setUsagePage} onPageSizeChange={setUsagePageSize} />
+        </CardContent>
+      </Card>
+
+      {/* ── Usage by User ─────────────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Users className="w-4 h-4 text-blue-600" /> Usage by User (last {days} days)
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                  <SortableHeader label="User" sortKey="requester" current={userSort.sort} onToggle={userSort.toggle} />
+                  <SortableHeader label="Requests" sortKey="total_requests" current={userSort.sort} onToggle={userSort.toggle} align="right" />
+                  <SortableHeader label="Input Tokens" sortKey="total_input_tokens" current={userSort.sort} onToggle={userSort.toggle} align="right" />
+                  <SortableHeader label="Output Tokens" sortKey="total_output_tokens" current={userSort.sort} onToggle={userSort.toggle} align="right" />
+                  <SortableHeader label="Errors" sortKey="error_count" current={userSort.sort} onToggle={userSort.toggle} align="right" />
+                </tr>
+              </thead>
+              <tbody>
+                {pagedUsers.map((u: any) => (
+                  <tr key={u.requester} className="border-b border-gray-100 dark:border-gray-700">
+                    <td className="py-2 font-medium text-sm">{u.requester || '—'}</td>
+                    <td className="py-2 text-right">{Number(u.total_requests).toLocaleString()}</td>
+                    <td className="py-2 text-right">{Number(u.total_input_tokens).toLocaleString()}</td>
+                    <td className="py-2 text-right">{Number(u.total_output_tokens).toLocaleString()}</td>
+                    <td className="py-2 text-right text-red-600">{Number(u.error_count).toLocaleString()}</td>
+                  </tr>
+                ))}
+                {sortedUsers.length === 0 && (
+                  <tr><td colSpan={5} className="py-8 text-center text-gray-400 dark:text-gray-500">{usersLoading ? 'Loading…' : 'No user data'}</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <TablePagination page={userSafePage} totalItems={sortedUsers.length} pageSize={userPageSize} onPageChange={setUserPage} onPageSizeChange={setUserPageSize} />
         </CardContent>
       </Card>
     </div>
@@ -744,257 +869,15 @@ function PermissionsSection() {
   )
 }
 
-/* ── Usage Tracking Section ───────────────────────────────────── */
-
-function UsageSection({ days }: { days: number }) {
-  const { data: summary, isLoading } = useGatewayUsageSummary(days)
-  const { data: timeseries } = useGatewayUsageTimeseries(days)
-  const [page, setPage] = useState(0)
-  const [pageSize, setPageSize] = useState(10)
-  const { sort, toggle } = useSort('total_requests', 'desc')
-
-  const chartData = timeseries?.map((t: any) => ({
-    timestamp: t.hour,
-    value: Number(t.request_count),
-  })) || []
-
-  const tokenData = timeseries?.map((t: any) => ({
-    timestamp: t.hour,
-    value: Number(t.input_tokens) + Number(t.output_tokens),
-  })) || []
-
-  const allSummary = summary || []
-  const sorted = useMemo(
-    () =>
-      sortRows(allSummary, sort, (s: any, key) => {
-        if (key === 'endpoint_name') return (s.endpoint_name || '').toLowerCase()
-        if (key === 'total_requests') return Number(s.total_requests || 0)
-        if (key === 'total_input_tokens') return Number(s.total_input_tokens || 0)
-        if (key === 'total_output_tokens') return Number(s.total_output_tokens || 0)
-        if (key === 'error_count') return Number(s.error_count || 0)
-        if (key === 'unique_users') return Number(s.unique_users || 0)
-        return 0
-      }),
-    [allSummary, sort],
-  )
-
-  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize))
-  const safePage = Math.min(page, totalPages - 1)
-  const pagedSummary = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize)
-
-  return (
-    <div className="space-y-6">
-      {/* Charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card>
-          <CardHeader><CardTitle className="text-base">Request Volume</CardTitle></CardHeader>
-          <CardContent>
-            {chartData.length ? <LineChart data={chartData} name="Requests" color={DB_CHART.primary} /> : <div className="text-gray-400 dark:text-gray-500 text-center py-12">{isLoading ? 'Loading…' : 'No data'}</div>}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader><CardTitle className="text-base">Token Volume</CardTitle></CardHeader>
-          <CardContent>
-            {tokenData.length ? <LineChart data={tokenData} name="Total Tokens" color={DB_CHART.success} /> : <div className="text-gray-400 dark:text-gray-500 text-center py-12">{isLoading ? 'Loading…' : 'No data'}</div>}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Per-endpoint summary */}
-      <Card>
-        <CardHeader><CardTitle className="text-base">Usage by Endpoint</CardTitle></CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
-                  <SortableHeader label="Endpoint" sortKey="endpoint_name" current={sort} onToggle={toggle} />
-                  <SortableHeader label="Requests" sortKey="total_requests" current={sort} onToggle={toggle} align="right" />
-                  <SortableHeader label="Input Tokens" sortKey="total_input_tokens" current={sort} onToggle={toggle} align="right" />
-                  <SortableHeader label="Output Tokens" sortKey="total_output_tokens" current={sort} onToggle={toggle} align="right" />
-                  <SortableHeader label="Errors" sortKey="error_count" current={sort} onToggle={toggle} align="right" />
-                  <SortableHeader label="Users" sortKey="unique_users" current={sort} onToggle={toggle} align="right" />
-                </tr>
-              </thead>
-              <tbody>
-                {pagedSummary.map((s: any) => (
-                  <tr key={s.endpoint_name} className="border-b border-gray-100 dark:border-gray-700">
-                    <td className="py-2 font-medium">{s.endpoint_name}</td>
-                    <td className="py-2 text-right">{Number(s.total_requests).toLocaleString()}</td>
-                    <td className="py-2 text-right">{Number(s.total_input_tokens).toLocaleString()}</td>
-                    <td className="py-2 text-right">{Number(s.total_output_tokens).toLocaleString()}</td>
-                    <td className="py-2 text-right text-red-600">{Number(s.error_count).toLocaleString()}</td>
-                    <td className="py-2 text-right">{Number(s.unique_users).toLocaleString()}</td>
-                  </tr>
-                ))}
-                {sorted.length === 0 && (
-                  <tr><td colSpan={6} className="py-8 text-center text-gray-400 dark:text-gray-500">{isLoading ? 'Loading…' : 'No usage data'}</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-          <TablePagination page={safePage} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
-        </CardContent>
-      </Card>
-    </div>
-  )
-}
-
-/* ── Users Section ──────────────────────────────────────────── */
-
-function UsersSection({ days }: { days: number }) {
-  const { data: users, isLoading } = useGatewayUsageByUser(days)
-  const [page, setPage] = useState(0)
-  const [pageSize, setPageSize] = useState(10)
-  const { sort, toggle } = useSort('total_requests', 'desc')
-
-  const allUsers = users || []
-  const sorted = useMemo(
-    () =>
-      sortRows(allUsers, sort, (u: any, key) => {
-        if (key === 'requester') return (u.requester || '').toLowerCase()
-        if (key === 'total_requests') return Number(u.total_requests || 0)
-        if (key === 'total_input_tokens') return Number(u.total_input_tokens || 0)
-        if (key === 'total_output_tokens') return Number(u.total_output_tokens || 0)
-        if (key === 'error_count') return Number(u.error_count || 0)
-        return 0
-      }),
-    [allUsers, sort],
-  )
-
-  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize))
-  const safePage = Math.min(page, totalPages - 1)
-  const pagedUsers = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize)
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base flex items-center gap-2">
-          <Users className="w-4 h-4 text-blue-600" /> Usage by User (last {days} days)
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
-                <SortableHeader label="User" sortKey="requester" current={sort} onToggle={toggle} />
-                <SortableHeader label="Requests" sortKey="total_requests" current={sort} onToggle={toggle} align="right" />
-                <SortableHeader label="Input Tokens" sortKey="total_input_tokens" current={sort} onToggle={toggle} align="right" />
-                <SortableHeader label="Output Tokens" sortKey="total_output_tokens" current={sort} onToggle={toggle} align="right" />
-                <SortableHeader label="Errors" sortKey="error_count" current={sort} onToggle={toggle} align="right" />
-              </tr>
-            </thead>
-            <tbody>
-              {pagedUsers.map((u: any) => (
-                <tr key={u.requester} className="border-b border-gray-100 dark:border-gray-700">
-                  <td className="py-2 font-medium text-sm">{u.requester || '—'}</td>
-                  <td className="py-2 text-right">{Number(u.total_requests).toLocaleString()}</td>
-                  <td className="py-2 text-right">{Number(u.total_input_tokens).toLocaleString()}</td>
-                  <td className="py-2 text-right">{Number(u.total_output_tokens).toLocaleString()}</td>
-                  <td className="py-2 text-right text-red-600">{Number(u.error_count).toLocaleString()}</td>
-                </tr>
-              ))}
-              {sorted.length === 0 && (
-                <tr><td colSpan={5} className="py-8 text-center text-gray-400 dark:text-gray-500">{isLoading ? 'Loading…' : 'No user data'}</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        <TablePagination page={safePage} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
-      </CardContent>
-    </Card>
-  )
-}
-
-/* ── Inference / Request Logs Section ─────────────────────────── */
-
-function InferenceSection() {
-  const { data: logs, isLoading } = useGatewayInferenceLogs(100)
-  const [page, setPage] = useState(0)
-  const [pageSize, setPageSize] = useState(10)
-  const { sort, toggle } = useSort('request_time', 'desc')
-
-  const allLogs = logs || []
-  const sorted = useMemo(
-    () =>
-      sortRows(allLogs, sort, (l: any, key) => {
-        if (key === 'request_time') return l.request_time ? new Date(l.request_time).getTime() : 0
-        if (key === 'endpoint_name') return (l.endpoint_name || '').toLowerCase()
-        if (key === 'requester') return (l.requester || '').toLowerCase()
-        if (key === 'input_tokens') return Number(l.input_tokens || 0)
-        if (key === 'output_tokens') return Number(l.output_tokens || 0)
-        if (key === 'status_code') return Number(l.status_code || 0)
-        if (key === 'streaming') return l.streaming ? 'yes' : 'no'
-        return ''
-      }),
-    [allLogs, sort],
-  )
-
-  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize))
-  const safePage = Math.min(page, totalPages - 1)
-  const pagedLogs = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize)
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base flex items-center gap-2">
-          <ScrollText className="w-4 h-4 text-db-orange" /> Recent Request Logs
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <p className="text-xs text-gray-500 mb-4">
-          Individual requests from <code className="text-xs bg-gray-100 dark:bg-gray-700 px-1 rounded">system.serving.endpoint_usage</code>.
-        </p>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
-                <SortableHeader label="Time" sortKey="request_time" current={sort} onToggle={toggle} />
-                <SortableHeader label="Endpoint" sortKey="endpoint_name" current={sort} onToggle={toggle} />
-                <SortableHeader label="User" sortKey="requester" current={sort} onToggle={toggle} />
-                <SortableHeader label="Input Tokens" sortKey="input_tokens" current={sort} onToggle={toggle} align="right" />
-                <SortableHeader label="Output Tokens" sortKey="output_tokens" current={sort} onToggle={toggle} align="right" />
-                <SortableHeader label="Status" sortKey="status_code" current={sort} onToggle={toggle} />
-                <SortableHeader label="Streaming" sortKey="streaming" current={sort} onToggle={toggle} />
-              </tr>
-            </thead>
-            <tbody>
-              {pagedLogs.map((l: any, i: number) => (
-                <tr key={l.request_id || i} className="border-b border-gray-100 dark:border-gray-700">
-                  <td className="py-2 text-xs text-gray-500">
-                    {l.request_time ? format(new Date(l.request_time), 'MMM dd HH:mm:ss') : '—'}
-                  </td>
-                  <td className="py-2 font-medium text-sm">{l.endpoint_name || '—'}</td>
-                  <td className="py-2 text-gray-500 text-xs max-w-[200px] truncate">{l.requester || '—'}</td>
-                  <td className="py-2 text-right text-xs">{Number(l.input_tokens || 0).toLocaleString()}</td>
-                  <td className="py-2 text-right text-xs">{Number(l.output_tokens || 0).toLocaleString()}</td>
-                  <td className="py-2 text-center">
-                    <span className={`inline-block w-2 h-2 rounded-full ${
-                      (l.status_code || 0) >= 400 ? 'bg-red-500' : 'bg-green-500'
-                    }`} />
-                    <span className="ml-1 text-xs text-gray-500">{l.status_code}</span>
-                  </td>
-                  <td className="py-2 text-center text-xs text-gray-400">{l.streaming ? 'Yes' : 'No'}</td>
-                </tr>
-              ))}
-              {sorted.length === 0 && (
-                <tr><td colSpan={7} className="py-8 text-center text-gray-400 dark:text-gray-500">{isLoading ? 'Loading…' : 'No request logs'}</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        <TablePagination page={safePage} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
-      </CardContent>
-    </Card>
-  )
-}
-
-/* ── Operational Metrics Section ──────────────────────────────── */
+/* ── Metrics Section (metrics + request logs) ────────────────── */
 
 function MetricsSection() {
   const { data: metrics, isLoading } = useGatewayMetrics(24)
   const { data: timeseries } = useGatewayUsageTimeseries(1) // last 24h
+  const { data: logs, isLoading: logsLoading } = useGatewayInferenceLogs(100)
+  const [logPage, setLogPage] = useState(0)
+  const [logPageSize, setLogPageSize] = useState(10)
+  const logSort = useSort('request_time', 'desc')
 
   const requestData = timeseries?.map((t: any) => ({
     timestamp: t.hour,
@@ -1005,6 +888,25 @@ function MetricsSection() {
     timestamp: t.hour,
     value: t.request_count > 0 ? (Number(t.error_count) * 100 / Number(t.request_count)) : 0,
   })) || []
+
+  const allLogs = logs || []
+  const sortedLogs = useMemo(
+    () =>
+      sortRows(allLogs, logSort.sort, (l: any, key) => {
+        if (key === 'request_time') return l.request_time ? new Date(l.request_time).getTime() : 0
+        if (key === 'endpoint_name') return (l.endpoint_name || '').toLowerCase()
+        if (key === 'requester') return (l.requester || '').toLowerCase()
+        if (key === 'input_tokens') return Number(l.input_tokens || 0)
+        if (key === 'output_tokens') return Number(l.output_tokens || 0)
+        if (key === 'status_code') return Number(l.status_code || 0)
+        if (key === 'streaming') return l.streaming ? 'yes' : 'no'
+        return ''
+      }),
+    [allLogs, logSort.sort],
+  )
+  const logTotalPages = Math.max(1, Math.ceil(sortedLogs.length / logPageSize))
+  const logSafePage = Math.min(logPage, logTotalPages - 1)
+  const pagedLogs = sortedLogs.slice(logSafePage * logPageSize, (logSafePage + 1) * logPageSize)
 
   return (
     <div className="space-y-6">
@@ -1038,6 +940,59 @@ function MetricsSection() {
       {metrics?.by_task && metrics.by_task.length > 0 && (
         <TaskMetricsTable tasks={metrics.by_task} />
       )}
+
+      {/* Request Logs */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <ScrollText className="w-4 h-4 text-db-orange" /> Recent Request Logs
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-xs text-gray-500 mb-4">
+            Individual requests from <code className="text-xs bg-gray-100 dark:bg-gray-700 px-1 rounded">system.serving.endpoint_usage</code>.
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                  <SortableHeader label="Time" sortKey="request_time" current={logSort.sort} onToggle={logSort.toggle} />
+                  <SortableHeader label="Endpoint" sortKey="endpoint_name" current={logSort.sort} onToggle={logSort.toggle} />
+                  <SortableHeader label="User" sortKey="requester" current={logSort.sort} onToggle={logSort.toggle} />
+                  <SortableHeader label="Input Tokens" sortKey="input_tokens" current={logSort.sort} onToggle={logSort.toggle} align="right" />
+                  <SortableHeader label="Output Tokens" sortKey="output_tokens" current={logSort.sort} onToggle={logSort.toggle} align="right" />
+                  <SortableHeader label="Status" sortKey="status_code" current={logSort.sort} onToggle={logSort.toggle} />
+                  <SortableHeader label="Streaming" sortKey="streaming" current={logSort.sort} onToggle={logSort.toggle} />
+                </tr>
+              </thead>
+              <tbody>
+                {pagedLogs.map((l: any, i: number) => (
+                  <tr key={l.request_id || i} className="border-b border-gray-100 dark:border-gray-700">
+                    <td className="py-2 text-xs text-gray-500">
+                      {l.request_time ? format(new Date(l.request_time), 'MMM dd HH:mm:ss') : '—'}
+                    </td>
+                    <td className="py-2 font-medium text-sm">{l.endpoint_name || '—'}</td>
+                    <td className="py-2 text-gray-500 text-xs max-w-[200px] truncate">{l.requester || '—'}</td>
+                    <td className="py-2 text-right text-xs">{Number(l.input_tokens || 0).toLocaleString()}</td>
+                    <td className="py-2 text-right text-xs">{Number(l.output_tokens || 0).toLocaleString()}</td>
+                    <td className="py-2 text-center">
+                      <span className={`inline-block w-2 h-2 rounded-full ${
+                        (l.status_code || 0) >= 400 ? 'bg-red-500' : 'bg-green-500'
+                      }`} />
+                      <span className="ml-1 text-xs text-gray-500">{l.status_code}</span>
+                    </td>
+                    <td className="py-2 text-center text-xs text-gray-400">{l.streaming ? 'Yes' : 'No'}</td>
+                  </tr>
+                ))}
+                {sortedLogs.length === 0 && (
+                  <tr><td colSpan={7} className="py-8 text-center text-gray-400 dark:text-gray-500">{logsLoading ? 'Loading…' : 'No request logs'}</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <TablePagination page={logSafePage} totalItems={sortedLogs.length} pageSize={logPageSize} onPageChange={setLogPage} onPageSizeChange={setLogPageSize} />
+        </CardContent>
+      </Card>
     </div>
   )
 }
@@ -1100,10 +1055,11 @@ function TaskMetricsTable({ tasks }: { tasks: any[] }) {
   )
 }
 
-/* ── Rate Limits Section ──────────────────────────────────────── */
+/* ── Rate Limits & Guardrails Section ────────────────────────── */
 
-function RateLimitsSection() {
-  const { data: limits, isLoading } = useGatewayRateLimits()
+function RateLimitsAndGuardrailsSection() {
+  const { data: limits, isLoading: limitsLoading } = useGatewayRateLimits()
+  const { data: guardrails, isLoading: guardrailsLoading } = useGatewayGuardrails()
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(10)
   const { sort, toggle } = useSort('endpoint_name', 'asc')
@@ -1125,108 +1081,102 @@ function RateLimitsSection() {
   const safePage = Math.min(page, totalPages - 1)
   const pagedLimits = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize)
 
-  if (isLoading) return <div className="text-sm text-gray-400 dark:text-gray-500">Loading rate limits…</div>
+  if (limitsLoading && guardrailsLoading) return <div className="text-sm text-gray-400 dark:text-gray-500">Loading…</div>
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base flex items-center gap-2">
-          <ShieldAlert className="w-4 h-4 text-yellow-600" /> Rate Limits
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
-          Rate limits configured via AI Gateway on serving endpoints.
-        </p>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
-                <SortableHeader label="Endpoint" sortKey="endpoint_name" current={sort} onToggle={toggle} />
-                <SortableHeader label="Calls" sortKey="calls" current={sort} onToggle={toggle} align="right" />
-                <SortableHeader label="Renewal Period" sortKey="renewal_period" current={sort} onToggle={toggle} />
-                <SortableHeader label="Key" sortKey="key" current={sort} onToggle={toggle} />
-              </tr>
-            </thead>
-            <tbody>
-              {pagedLimits.map((l: any, i: number) => (
-                <tr key={i} className="border-b border-gray-100 dark:border-gray-700">
-                  <td className="py-2 font-medium">{l.endpoint_name}</td>
-                  <td className="py-2 text-right">{l.calls?.toLocaleString() ?? '—'}</td>
-                  <td className="py-2">
-                    <Badge variant="info" className="text-xs">{l.renewal_period || '—'}</Badge>
-                  </td>
-                  <td className="py-2 text-gray-500">{l.key || '—'}</td>
+    <div className="space-y-6">
+      {/* Rate Limits */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <ShieldAlert className="w-4 h-4 text-yellow-600" /> Rate Limits
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+            Rate limits configured via AI Gateway on serving endpoints.
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                  <SortableHeader label="Endpoint" sortKey="endpoint_name" current={sort} onToggle={toggle} />
+                  <SortableHeader label="Calls" sortKey="calls" current={sort} onToggle={toggle} align="right" />
+                  <SortableHeader label="Renewal Period" sortKey="renewal_period" current={sort} onToggle={toggle} />
+                  <SortableHeader label="Key" sortKey="key" current={sort} onToggle={toggle} />
                 </tr>
-              ))}
-              {sorted.length === 0 && (
-                <tr><td colSpan={4} className="py-8 text-center text-gray-400 dark:text-gray-500">No rate limits configured on any endpoint</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        <TablePagination page={safePage} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
-      </CardContent>
-    </Card>
-  )
-}
-
-/* ── Guardrails Section ──────────────────────────────────────── */
-
-function GuardrailsSection() {
-  const { data: guardrails, isLoading } = useGatewayGuardrails()
-
-  if (isLoading) return <div className="text-sm text-gray-400 dark:text-gray-500">Loading guardrails…</div>
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base flex items-center gap-2">
-          <ShieldCheck className="w-4 h-4 text-green-600" /> Guardrails
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
-          Safety guardrails configured via AI Gateway to protect inputs and outputs.
-        </p>
-        {guardrails && guardrails.length > 0 ? (
-          <div className="space-y-4">
-            {guardrails.map((g: any, i: number) => (
-              <div key={i} className="border dark:border-gray-700 rounded-lg p-4">
-                <div className="font-medium dark:text-gray-200 mb-2">{g.endpoint_name}</div>
-                {g.guardrails?.input && (
-                  <div className="mb-2">
-                    <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">Input Guardrails</span>
-                    <div className="mt-1 flex gap-2 flex-wrap">
-                      {g.guardrails.input.pii && (
-                        <Badge variant="warning" className="text-xs">PII: {g.guardrails.input.pii.behavior}</Badge>
-                      )}
-                      {g.guardrails.input.safety && (
-                        <Badge variant="error" className="text-xs">Safety: ON</Badge>
-                      )}
-                    </div>
-                  </div>
+              </thead>
+              <tbody>
+                {pagedLimits.map((l: any, i: number) => (
+                  <tr key={i} className="border-b border-gray-100 dark:border-gray-700">
+                    <td className="py-2 font-medium">{l.endpoint_name}</td>
+                    <td className="py-2 text-right">{l.calls?.toLocaleString() ?? '—'}</td>
+                    <td className="py-2">
+                      <Badge variant="info" className="text-xs">{l.renewal_period || '—'}</Badge>
+                    </td>
+                    <td className="py-2 text-gray-500">{l.key || '—'}</td>
+                  </tr>
+                ))}
+                {sorted.length === 0 && (
+                  <tr><td colSpan={4} className="py-8 text-center text-gray-400 dark:text-gray-500">No rate limits configured on any endpoint</td></tr>
                 )}
-                {g.guardrails?.output && (
-                  <div>
-                    <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">Output Guardrails</span>
-                    <div className="mt-1 flex gap-2 flex-wrap">
-                      {g.guardrails.output.pii && (
-                        <Badge variant="warning" className="text-xs">PII: {g.guardrails.output.pii.behavior}</Badge>
-                      )}
-                      {g.guardrails.output.safety && (
-                        <Badge variant="error" className="text-xs">Safety: ON</Badge>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            ))}
+              </tbody>
+            </table>
           </div>
-        ) : (
-          <div className="text-gray-400 dark:text-gray-500 text-center py-8">No guardrails configured on any endpoint</div>
-        )}
-      </CardContent>
-    </Card>
+          <TablePagination page={safePage} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+        </CardContent>
+      </Card>
+
+      {/* Guardrails */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-green-600" /> Guardrails
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+            Safety guardrails configured via AI Gateway to protect inputs and outputs.
+          </p>
+          {guardrails && guardrails.length > 0 ? (
+            <div className="space-y-4">
+              {guardrails.map((g: any, i: number) => (
+                <div key={i} className="border dark:border-gray-700 rounded-lg p-4">
+                  <div className="font-medium dark:text-gray-200 mb-2">{g.endpoint_name}</div>
+                  {g.guardrails?.input && (
+                    <div className="mb-2">
+                      <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">Input Guardrails</span>
+                      <div className="mt-1 flex gap-2 flex-wrap">
+                        {g.guardrails.input.pii && (
+                          <Badge variant="warning" className="text-xs">PII: {g.guardrails.input.pii.behavior}</Badge>
+                        )}
+                        {g.guardrails.input.safety && (
+                          <Badge variant="error" className="text-xs">Safety: ON</Badge>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {g.guardrails?.output && (
+                    <div>
+                      <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">Output Guardrails</span>
+                      <div className="mt-1 flex gap-2 flex-wrap">
+                        {g.guardrails.output.pii && (
+                          <Badge variant="warning" className="text-xs">PII: {g.guardrails.output.pii.behavior}</Badge>
+                        )}
+                        {g.guardrails.output.safety && (
+                          <Badge variant="error" className="text-xs">Safety: ON</Badge>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-gray-400 dark:text-gray-500 text-center py-8">No guardrails configured on any endpoint</div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   )
 }

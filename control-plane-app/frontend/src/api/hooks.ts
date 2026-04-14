@@ -1422,3 +1422,33 @@ export function useLakebaseCostByType(days = 30) {
     },
   })
 }
+
+export function useKBTopWorkspacesDaily(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'combined-top-ws-daily', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/combined/top-workspaces-daily', { params: { days } })
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
+
+export function useVSTopWorkspacesDaily(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'vs-top-ws-daily', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/cost/top-workspaces-daily', { params: { days } })
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
+
+export function useLBTopWorkspacesDaily(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'lb-top-ws-daily', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/lakebase/cost/top-workspaces-daily', { params: { days } })
+      return Array.isArray(data) ? data : []
+    },
+  })
+}
