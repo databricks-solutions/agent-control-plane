@@ -37,7 +37,7 @@ The discovery workflows are configured via `workflows/databricks.yml`. Each targ
 | `schema` | Schema name | `control_plane` |
 | `lakebase_dns` | Lakebase hostname (same as `.env`) | `instance-xxxx.database.cloud.databricks.com` |
 | `lakebase_instance` | Lakebase instance name | `ai-control-plane-db` |
-| `warehouse_id` | SQL warehouse ID for system table queries | `4b858148f7c56d1f` |
+| `warehouse_id` | SQL warehouse ID for system table queries | `xxxxxxxxxxxx` |
 | `account_id` | Databricks account ID | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
 
 ### Example Target

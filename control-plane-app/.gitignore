@@ -4,6 +4,7 @@
 !.env.example
 
 # Generated deploy configs (contain workspace-specific values)
+app.yaml
 app-sandbox.yaml
 
 # Databricks sync state

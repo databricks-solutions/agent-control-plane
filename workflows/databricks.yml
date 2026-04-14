@@ -147,12 +147,12 @@ targets:
   prod:
     mode: development
     variables:
-      catalog: your_catalog
+      catalog: <your-catalog>
       schema: control_plane
-      lakebase_dns: "instance-xxxx.database.cloud.databricks.com"
-      lakebase_instance: "ai-control-plane-db"
-      warehouse_id: "4b858148f7c56d1f"
-      account_id: "0d26daa6-5e44-4c97-a497-ef015f91254a"
+      lakebase_dns: <your-lakebase-dns>
+      lakebase_instance: <your-lakebase-instance-name>
+      warehouse_id: <your-warehouse-id>
+      account_id: <your-account-id>
   #     lakebase_instance: "my-lakebase-instance"
   #     warehouse_id: "xxxx"
   #     account_id: "xxxx"
