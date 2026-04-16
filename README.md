@@ -91,16 +91,17 @@ Identity and access management with all principals, builders/users breakdown, RB
 
 **Key data sources:**
 - `system.serving.served_entities` — cross-workspace agent discovery
-- `system.billing.usage` — cost attribution
+- `system.serving.endpoint_usage` — per-endpoint request and token metrics
+- `system.billing.usage` + `system.billing.list_prices` — cost attribution
 - `system.mlflow.experiments_latest` / `runs_latest` — observability
-- MLflow Tracking API — traces (per-workspace)
-- Databricks REST APIs — endpoints, apps, genie spaces
+- `system.access.audit` — user activity and access patterns
+- Databricks REST APIs — endpoints, apps, genie spaces, traces
 
 ## Quick Start
 
 ```bash
 # 1. Clone and configure
-git clone https://github.com/databrickslabs/agent-control-plane.git
+git clone https://github.com/databricks-solutions/agent-control-plane.git
 cd agent-control-plane
 make setup
 
