@@ -172,19 +172,40 @@ def get_lakebase_password() -> str:
     """
     Return a valid Lakebase password.
 
-    Uses the Databricks SDK to generate a fresh credential (works for both
-    local PAT auth and Databricks App service-principal auth).
+    Supports both Lakebase Autoscaling (projects/branches/endpoints) and
+    Provisioned (instance_names) credential generation.
     Falls back to the static LAKEBASE_TOKEN env var.
     """
     w = _get_workspace_client()
     if w:
+        # Try Autoscaling Lakebase first (POST /api/2.0/postgres/credentials)
+        endpoint_path = os.environ.get("LAKEBASE_ENDPOINT_PATH", "")
+        if endpoint_path:
+            try:
+                import httpx
+                auth_headers = _sdk_auth_headers() or {}
+                host = get_databricks_host()
+                resp = httpx.post(
+                    f"{host}/api/2.0/postgres/credentials",
+                    headers={**auth_headers, "Content-Type": "application/json"},
+                    json={"endpoint": endpoint_path},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                token = resp.json().get("token", "")
+                if token:
+                    return token
+            except Exception as exc:
+                logger.warning("Lakebase Autoscaling credential generation failed: %s", exc)
+
+        # Try Provisioned Lakebase (w.database.generate_database_credential)
         try:
             creds = w.database.generate_database_credential(
                 instance_names=[os.environ.get("LAKEBASE_INSTANCE", "ai-control-plane-db")]
             )
             return creds.token
         except Exception as exc:
-            logger.warning("Lakebase SDK token generation failed: %s", exc)
+            logger.warning("Lakebase Provisioned credential generation failed: %s", exc)
     return settings.lakebase_password
 
 

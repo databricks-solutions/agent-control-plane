@@ -59,10 +59,9 @@ if not CATALOG or not SCHEMA:
         f"catalog and schema must be set via job parameters (got catalog={CATALOG!r}, schema={SCHEMA!r}). "
         "Deploy with: databricks bundle deploy -t <target>"
     )
-if not LAKEBASE_DNS or not LAKEBASE_INSTANCE:
+if not LAKEBASE_DNS:
     raise ValueError(
-        f"lakebase_dns and lakebase_instance must be set via job parameters "
-        f"(got dns={LAKEBASE_DNS!r}, instance={LAKEBASE_INSTANCE!r}). "
+        f"lakebase_dns must be set via job parameters (got dns={LAKEBASE_DNS!r}). "
         "Deploy with: databricks bundle deploy -t <target>"
     )
 
@@ -93,36 +92,63 @@ def get_lakebase_connection():
     pg_user = me.user_name
     print(f"Lakebase user: {pg_user}")
 
-    # Try SDK first (requires databricks-sdk >= 0.38)
+    # Get auth token for REST API calls
+    def _get_auth_token():
+        try:
+            header_factory = w.config.authenticate
+            auth_headers = header_factory()
+            return auth_headers.get("Authorization", "").replace("Bearer ", "")
+        except Exception:
+            pass
+        try:
+            return dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
+        except Exception:
+            return getattr(w.config, "token", "") or ""
+
     pg_password = None
-    if hasattr(w, "database"):
+    host = w.config.host.rstrip("/")
+
+    # Try Autoscaling Lakebase first (POST /api/2.0/postgres/credentials)
+    # The DNS hostname contains the endpoint UID (e.g., ep-hidden-forest-d1sk7g53)
+    if LAKEBASE_DNS and "database" in LAKEBASE_DNS:
+        # Derive endpoint path from DNS: ep-xxx → look up via project name
+        # Use LAKEBASE_INSTANCE as project name for autoscaling
+        if LAKEBASE_INSTANCE:
+            endpoint_path = f"projects/{LAKEBASE_INSTANCE}/branches/production/endpoints/primary"
+        else:
+            endpoint_path = ""
+        if endpoint_path:
+            try:
+                token = _get_auth_token()
+                headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+                cred_resp = http_requests.post(
+                    f"{host}/api/2.0/postgres/credentials",
+                    headers=headers,
+                    json={"endpoint": endpoint_path},
+                )
+                cred_resp.raise_for_status()
+                pg_password = cred_resp.json().get("token", "")
+                if pg_password:
+                    print(f"Credential generated via Autoscaling API (project={LAKEBASE_INSTANCE})")
+            except Exception as e:
+                print(f"Autoscaling credential generation failed: {e}")
+
+    # Try Provisioned Lakebase SDK (w.database.generate_database_credential)
+    if not pg_password and LAKEBASE_INSTANCE and hasattr(w, "database"):
         try:
             creds = w.database.generate_database_credential(
                 instance_names=[LAKEBASE_INSTANCE]
             )
             pg_password = creds.token
-            print("Credential generated via SDK")
+            print("Credential generated via Provisioned SDK")
         except Exception as e:
-            print(f"SDK credential generation failed: {e}")
+            print(f"Provisioned SDK credential generation failed: {e}")
 
-    # Fallback to REST API
-    if not pg_password:
-        print("Falling back to REST API for credential generation")
-        # Get auth token — try SDK header provider, then fall back to notebook context
-        try:
-            header_factory = w.config.authenticate
-            auth_headers = header_factory()
-            token = auth_headers.get("Authorization", "").replace("Bearer ", "")
-        except Exception:
-            token = ""
-        if not token:
-            try:
-                token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
-            except Exception:
-                token = getattr(w.config, "token", "") or ""
+    # Fallback to Provisioned REST API
+    if not pg_password and LAKEBASE_INSTANCE:
+        print("Falling back to Provisioned REST API for credential generation")
+        token = _get_auth_token()
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        host = w.config.host.rstrip("/")
-
         cred_resp = http_requests.post(
             f"{host}/api/2.0/database/credentials",
             headers=headers,
@@ -130,7 +156,10 @@ def get_lakebase_connection():
         )
         cred_resp.raise_for_status()
         pg_password = cred_resp.json().get("token", "")
-        print("Credential generated via REST API")
+        print("Credential generated via Provisioned REST API")
+
+    if not pg_password:
+        raise RuntimeError("Could not generate Lakebase credentials via any method")
 
     print(f"Connecting to Lakebase at: {LAKEBASE_DNS}")
 

@@ -162,30 +162,51 @@ import psycopg2
 import requests as _http
 
 def _get_lakebase_conn():
-    """Connect to Lakebase using SDK credentials (same pattern as 02_sync_to_lakebase)."""
+    """Connect to Lakebase using SDK credentials. Supports both Autoscaling and Provisioned."""
     w = WorkspaceClient()
     me = w.current_user.me()
     pg_user = me.user_name
     pg_password = None
-    if hasattr(w, "database"):
+    host = w.config.host.rstrip("/")
+
+    def _get_token():
+        try:
+            return w.config.authenticate().get("Authorization", "").replace("Bearer ", "")
+        except Exception:
+            return dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
+
+    # Try Autoscaling Lakebase first
+    if LAKEBASE_INSTANCE:
+        endpoint_path = f"projects/{LAKEBASE_INSTANCE}/branches/production/endpoints/primary"
+        try:
+            token = _get_token()
+            resp = _http.post(f"{host}/api/2.0/postgres/credentials",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"endpoint": endpoint_path})
+            resp.raise_for_status()
+            pg_password = resp.json().get("token", "")
+            if pg_password:
+                print(f"  Autoscaling credential OK (project={LAKEBASE_INSTANCE})")
+        except Exception as e:
+            print(f"  Autoscaling credential failed: {e}")
+
+    # Fallback to Provisioned SDK
+    if not pg_password and hasattr(w, "database"):
         try:
             creds = w.database.generate_database_credential(instance_names=[LAKEBASE_INSTANCE])
             pg_password = creds.token
         except Exception as e:
-            print(f"  SDK credential failed: {e}")
+            print(f"  Provisioned SDK credential failed: {e}")
+
+    # Fallback to Provisioned REST
     if not pg_password:
-        try:
-            hf = w.config.authenticate
-            ah = hf()
-            token = ah.get("Authorization", "").replace("Bearer ", "")
-        except Exception:
-            token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
-        host = w.config.host.rstrip("/")
+        token = _get_token()
         resp = _http.post(f"{host}/api/2.0/database/credentials",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"instance_names": [LAKEBASE_INSTANCE], "request_id": str(uuid.uuid4())})
         resp.raise_for_status()
         pg_password = resp.json().get("token", "")
+
     return psycopg2.connect(host=LAKEBASE_DNS, port=5432, database=LAKEBASE_DATABASE,
         user=pg_user, password=pg_password, sslmode="require", connect_timeout=15)
 

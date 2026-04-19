@@ -43,7 +43,8 @@ set +a
 # Validate required variables
 : "${LAKEBASE_DNS:?Set LAKEBASE_DNS in .env}"
 : "${LAKEBASE_DATABASE:?Set LAKEBASE_DATABASE in .env}"
-: "${LAKEBASE_INSTANCE:?Set LAKEBASE_INSTANCE in .env}"
+# LAKEBASE_INSTANCE is optional (not needed for Autoscaling Lakebase)
+LAKEBASE_INSTANCE="${LAKEBASE_INSTANCE:-}"
 
 # App name — update this to match your Databricks App name
 APP_NAME="${APP_NAME:-ai-control-plane}"
@@ -77,14 +78,11 @@ env:
   - name: LAKEBASE_DATABASE
     value: "${LAKEBASE_DATABASE}"
   - name: LAKEBASE_INSTANCE
-    value: "${LAKEBASE_INSTANCE}"
+    value: "${LAKEBASE_INSTANCE:-}"
+  - name: LAKEBASE_ENDPOINT_PATH
+    value: "${LAKEBASE_ENDPOINT_PATH:-}"
   - name: DATABRICKS_ACCOUNT_ID
     value: "${DATABRICKS_ACCOUNT_ID:-}"
-
-resources:
-  - name: obo-auth
-    description: "User authorization for OBO identity"
-    permission: "all-apis"
 EOF
 echo "  Generated app.yaml"
 
