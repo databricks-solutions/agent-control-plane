@@ -26,9 +26,32 @@ class DatabasePool:
 
     @classmethod
     def _create_pool(cls) -> pool.ThreadedConnectionPool:
-        """Create a new connection pool using a (possibly refreshed) password."""
+        """Create a new connection pool.
+
+        Prefers the Databricks Apps auto-injected PG* env vars (set when
+        Lakebase is declared as an app resource). Falls back to the legacy
+        LAKEBASE_* config + OAuth token flow.
+        """
+        pg_host = os.environ.get("PGHOST")
+        pg_user = os.environ.get("PGUSER")
+        pg_password = os.environ.get("PGPASSWORD")
+        pg_database = os.environ.get("PGDATABASE")
+        pg_port = int(os.environ.get("PGPORT", "5432"))
+
+        if pg_host and pg_user and pg_password:
+            logger.info("Creating Lakebase connection pool via PG* env vars: host=%s, db=%s, user=%s",
+                         pg_host, pg_database, pg_user)
+            return pool.ThreadedConnectionPool(
+                minconn=1, maxconn=10,
+                host=pg_host, port=pg_port,
+                database=pg_database or settings.lakebase_database,
+                user=pg_user, password=pg_password,
+                sslmode="require", connect_timeout=15,
+                options="-c statement_timeout=30000",
+            )
+
         user = get_lakebase_user()
-        logger.info("Creating Lakebase connection pool: host=%s, db=%s, user=%s",
+        logger.info("Creating Lakebase connection pool (OAuth): host=%s, db=%s, user=%s",
                      settings.lakebase_dns, settings.lakebase_database, user)
         return pool.ThreadedConnectionPool(
             minconn=1,
