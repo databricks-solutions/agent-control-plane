@@ -14,8 +14,11 @@ variables:
     default: control_plane
     description: Lakebase database name
   lakebase_instance:
-    default: your-lakebase-instance
-    description: Lakebase instance name for credential generation
+    default: ""
+    description: Lakebase instance name for Provisioned credential generation (leave empty for Autoscaling)
+  lakebase_endpoint_path:
+    default: ""
+    description: Lakebase endpoint path for Autoscaling credential generation (e.g. projects/<name>/branches/<branch>/endpoints/<endpoint>). Leave empty for Provisioned.
   account_id:
     description: Databricks account ID for cross-workspace operations (find in your workspace URL or account console)
   warehouse_id:
@@ -58,6 +61,7 @@ resources:
               lakebase_dns: ${var.lakebase_dns}
               lakebase_database: ${var.lakebase_database}
               lakebase_instance: ${var.lakebase_instance}
+              lakebase_endpoint_path: ${var.lakebase_endpoint_path}
           environment_key: default
 
         - task_key: discover_knowledge_bases
@@ -107,6 +111,7 @@ resources:
               lakebase_dns: ${var.lakebase_dns}
               lakebase_database: ${var.lakebase_database}
               lakebase_instance: ${var.lakebase_instance}
+              lakebase_endpoint_path: ${var.lakebase_endpoint_path}
               account_id: ${var.account_id}
               warehouse_id: ${var.warehouse_id}
           environment_key: default
@@ -133,16 +138,18 @@ resources:
 targets:
   # Copy and customize a target for your workspace.
   # See docs/installation.md for configuration details.
+  # Set EITHER lakebase_endpoint_path (Autoscaling) OR lakebase_instance (Provisioned).
   dev:
     mode: development
     default: true
     variables:
-      catalog: <your-catalog>           # e.g. main, my_catalog
+      catalog: <your-catalog>                   # e.g. main, my_catalog
       schema: control_plane
-      lakebase_dns: <your-lakebase-dns> # e.g. instance-xxxx.database.cloud.databricks.com
-      lakebase_instance: <your-lakebase-instance-name>
-      warehouse_id: <your-warehouse-id> # SQL warehouse ID for system table queries
-      account_id: <your-account-id>     # Databricks account ID
+      lakebase_dns: <your-lakebase-dns>         # e.g. ep-xxxx.database.cloud.databricks.com
+      lakebase_endpoint_path: <your-endpoint>   # Autoscaling: projects/<name>/branches/<branch>/endpoints/<endpoint>
+      lakebase_instance: ""                     # Provisioned only — leave empty for Autoscaling
+      warehouse_id: <your-warehouse-id>         # SQL warehouse ID for system table queries
+      account_id: <your-account-id>             # Databricks account ID
 
   prod:
     mode: development
@@ -150,14 +157,7 @@ targets:
       catalog: <your-catalog>
       schema: control_plane
       lakebase_dns: <your-lakebase-dns>
-      lakebase_instance: <your-lakebase-instance-name>
+      lakebase_endpoint_path: <your-endpoint>
+      lakebase_instance: ""
       warehouse_id: <your-warehouse-id>
       account_id: <your-account-id>
-  #     lakebase_instance: "my-lakebase-instance"
-  #     warehouse_id: "xxxx"
-  #     account_id: "xxxx"
-  #   resources:
-  #     jobs:
-  #       agent_discovery:
-  #         schedule:
-  #           quartz_cron_expression: "0 0/15 * * * ?"

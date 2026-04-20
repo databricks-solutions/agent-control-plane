@@ -199,13 +199,13 @@ def get_lakebase_password() -> str:
                 logger.warning("Lakebase Autoscaling credential generation failed: %s", exc)
 
         # Try Provisioned Lakebase (w.database.generate_database_credential)
-        try:
-            creds = w.database.generate_database_credential(
-                instance_names=[os.environ.get("LAKEBASE_INSTANCE", "ai-control-plane-db")]
-            )
-            return creds.token
-        except Exception as exc:
-            logger.warning("Lakebase Provisioned credential generation failed: %s", exc)
+        instance = os.environ.get("LAKEBASE_INSTANCE", "")
+        if instance:
+            try:
+                creds = w.database.generate_database_credential(instance_names=[instance])
+                return creds.token
+            except Exception as exc:
+                logger.warning("Lakebase Provisioned credential generation failed: %s", exc)
     return settings.lakebase_password
 
 

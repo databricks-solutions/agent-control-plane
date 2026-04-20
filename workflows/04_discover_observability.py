@@ -45,7 +45,8 @@ dbutils.widgets.text("warehouse_id", "", "SQL warehouse ID for system table quer
 dbutils.widgets.text("account_id", "", "Databricks account ID")
 dbutils.widgets.text("lakebase_dns", "", "Lakebase host (DNS)")
 dbutils.widgets.text("lakebase_database", "control_plane", "Lakebase database name")
-dbutils.widgets.text("lakebase_instance", "", "Lakebase instance name")
+dbutils.widgets.text("lakebase_instance", "", "Lakebase instance name (Provisioned only)")
+dbutils.widgets.text("lakebase_endpoint_path", "", "Lakebase endpoint path (Autoscaling only)")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
@@ -54,6 +55,7 @@ ACCOUNT_ID = dbutils.widgets.get("account_id")
 LAKEBASE_DNS = dbutils.widgets.get("lakebase_dns")
 LAKEBASE_DATABASE = dbutils.widgets.get("lakebase_database")
 LAKEBASE_INSTANCE = dbutils.widgets.get("lakebase_instance")
+LAKEBASE_ENDPOINT_PATH = dbutils.widgets.get("lakebase_endpoint_path")
 
 if ACCOUNT_ID:
     os.environ["DATABRICKS_ACCOUNT_ID"] = ACCOUNT_ID
@@ -175,23 +177,22 @@ def _get_lakebase_conn():
         except Exception:
             return dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
 
-    # Try Autoscaling Lakebase first
-    if LAKEBASE_INSTANCE:
-        endpoint_path = f"projects/{LAKEBASE_INSTANCE}/branches/production/endpoints/primary"
+    # Autoscaling Lakebase: explicit endpoint path
+    if LAKEBASE_ENDPOINT_PATH:
         try:
             token = _get_token()
             resp = _http.post(f"{host}/api/2.0/postgres/credentials",
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json={"endpoint": endpoint_path})
+                json={"endpoint": LAKEBASE_ENDPOINT_PATH})
             resp.raise_for_status()
             pg_password = resp.json().get("token", "")
             if pg_password:
-                print(f"  Autoscaling credential OK (project={LAKEBASE_INSTANCE})")
+                print(f"  Autoscaling credential OK (endpoint={LAKEBASE_ENDPOINT_PATH})")
         except Exception as e:
             print(f"  Autoscaling credential failed: {e}")
 
-    # Fallback to Provisioned SDK
-    if not pg_password and hasattr(w, "database"):
+    # Provisioned SDK
+    if not pg_password and LAKEBASE_INSTANCE and hasattr(w, "database"):
         try:
             creds = w.database.generate_database_credential(instance_names=[LAKEBASE_INSTANCE])
             pg_password = creds.token
@@ -199,13 +200,16 @@ def _get_lakebase_conn():
             print(f"  Provisioned SDK credential failed: {e}")
 
     # Fallback to Provisioned REST
-    if not pg_password:
+    if not pg_password and LAKEBASE_INSTANCE:
         token = _get_token()
         resp = _http.post(f"{host}/api/2.0/database/credentials",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"instance_names": [LAKEBASE_INSTANCE], "request_id": str(uuid.uuid4())})
         resp.raise_for_status()
         pg_password = resp.json().get("token", "")
+
+    if not pg_password:
+        raise RuntimeError("Could not generate Lakebase credentials — set lakebase_endpoint_path (Autoscaling) or lakebase_instance (Provisioned)")
 
     return psycopg2.connect(host=LAKEBASE_DNS, port=5432, database=LAKEBASE_DATABASE,
         user=pg_user, password=pg_password, sslmode="require", connect_timeout=15)

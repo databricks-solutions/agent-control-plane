@@ -12,9 +12,15 @@ cp control-plane-app/.env.example control-plane-app/.env
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `LAKEBASE_DNS` | Lakebase instance hostname | `instance-xxxx.database.cloud.databricks.com` |
+| `LAKEBASE_DNS` | Lakebase instance hostname | `ep-xxxx.database.us-east-1.cloud.databricks.com` |
 | `LAKEBASE_DATABASE` | Lakebase database name | `control_plane` |
-| `LAKEBASE_INSTANCE` | Lakebase instance name (for credential generation) | `ai-control-plane-db` |
+
+**Plus exactly one of the following**, depending on Lakebase mode:
+
+| Variable | Mode | Example |
+|----------|------|---------|
+| `LAKEBASE_ENDPOINT_PATH` | Autoscaling (recommended) | `projects/ai-control-plane-db/branches/production/endpoints/primary` |
+| `LAKEBASE_INSTANCE` | Provisioned (legacy) | `ai-control-plane-db` |
 
 ### Optional
 
@@ -35,12 +41,13 @@ The discovery workflows are configured via `workflows/databricks.yml`. Each targ
 |----------|-------------|---------|
 | `catalog` | Unity Catalog name for Delta tables | `main` |
 | `schema` | Schema name | `control_plane` |
-| `lakebase_dns` | Lakebase hostname (same as `.env`) | `instance-xxxx.database.cloud.databricks.com` |
-| `lakebase_instance` | Lakebase instance name | `ai-control-plane-db` |
+| `lakebase_dns` | Lakebase hostname (same as `.env`) | `ep-xxxx.database.us-east-1.cloud.databricks.com` |
+| `lakebase_endpoint_path` | Autoscaling endpoint path (set this OR `lakebase_instance`) | `projects/<name>/branches/<branch>/endpoints/<endpoint>` |
+| `lakebase_instance` | Provisioned instance name (set this OR `lakebase_endpoint_path`) | `ai-control-plane-db` |
 | `warehouse_id` | SQL warehouse ID for system table queries | `xxxxxxxxxxxx` |
 | `account_id` | Databricks account ID | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
 
-### Example Target
+### Example Target (Autoscaling)
 
 ```yaml
 targets:
@@ -50,11 +57,14 @@ targets:
     variables:
       catalog: my_catalog
       schema: control_plane
-      lakebase_dns: "instance-xxxx.database.cloud.databricks.com"
-      lakebase_instance: "my-lakebase-instance"
+      lakebase_dns: "ep-xxxx.database.us-east-1.cloud.databricks.com"
+      lakebase_endpoint_path: "projects/my-lakebase/branches/production/endpoints/primary"
+      lakebase_instance: ""
       warehouse_id: "xxxxxxxxxxxx"
       account_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 ```
+
+For Provisioned Lakebase, leave `lakebase_endpoint_path` empty and set `lakebase_instance`.
 
 ### Workflow Schedule
 
