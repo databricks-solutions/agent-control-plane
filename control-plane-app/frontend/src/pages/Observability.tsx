@@ -10,6 +10,7 @@ import {
   useMlflowModelVersions,
   useMlflowObservabilityWorkspaces,
 } from '@/api/hooks'
+import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
 import { RefreshButton } from '@/components/RefreshButton'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -131,7 +132,7 @@ type TabId = (typeof tabs)[number]['id']
 
 export default function ObservabilityPage() {
   const [activeTab, setActiveTab] = useState<TabId>('traces')
-  const [selectedWs, setSelectedWs] = useState<string | null>('all') // default to all workspaces
+  const [selectedWs, setSelectedWs] = usePersistedWorkspaceFilter('ws-filter:observability', 'all')
   const { data: config } = useAppConfig()
   const rawHost = (config?.databricks_host || '').replace(/\/$/, '')
   const workspaceUrl = rawHost && !rawHost.startsWith('http') ? `https://${rawHost}` : rawHost

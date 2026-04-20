@@ -7,6 +7,7 @@ import {
   useBillingCacheStatus,
   type BillingPageData,
 } from '@/api/hooks'
+import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { KpiCard } from '@/components/KpiCard'
@@ -101,7 +102,7 @@ function WorkspaceSelector({
 export default function GovernancePage() {
   const [days, setDays] = useState(30)
   const [tab, setTab] = useState<TabKey>('overview')
-  const [workspaceId, setWorkspaceId] = useState<string>(ALL_WORKSPACES)
+  const [workspaceId, setWorkspaceId] = usePersistedWorkspaceFilter('ws-filter:governance', ALL_WORKSPACES)
   // Track local refresh completion time so the age display updates immediately
   const [localRefreshTime, setLocalRefreshTime] = useState<Date | null>(null)
 

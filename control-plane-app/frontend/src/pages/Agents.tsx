@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { useQueryClient, useIsFetching } from '@tanstack/react-query'
 import { usePinnedAgents } from '@/lib/usePinnedAgents'
+import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
 import {
   useAllAgentsMerged,
   useDiscoveryStatus,
@@ -110,7 +111,7 @@ function resolveAgentType(agent: any): string {
 }
 
 function OverviewTab() {
-  const [workspaceId, setWorkspaceId] = useState<string>(ALL_WORKSPACES)
+  const [workspaceId, setWorkspaceId] = usePersistedWorkspaceFilter('ws-filter:agents', ALL_WORKSPACES)
   const wsParam = workspaceId === ALL_WORKSPACES ? undefined : workspaceId
 
   const { data: agents, isLoading } = useAllAgentsMerged(wsParam)
