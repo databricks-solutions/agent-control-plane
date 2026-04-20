@@ -40,6 +40,8 @@ The scheduled workflows need a SQL warehouse to query system tables.
 
 ## Step 3: Create a Databricks App
 
+> **Enable OBO on the account first.** Before creating the app, make sure *User authorization with OAuth* (also known as user-token passthrough) is enabled at the **account level**. If you create the app *before* the feature is enabled, the app's OAuth integration is provisioned in a pre-feature state and scope writes silently fail — the UI will show "scopes updated" but they won't persist on refresh. The only fix is to delete and recreate the app after the feature is on. Save yourself the round-trip and enable it first.
+
 1. Go to **Apps** > **Create App**
 2. Name it (e.g., `ai-control-plane`)
 3. After creation, go to the app settings and **enable User Authorization** (OBO)
@@ -195,6 +197,20 @@ GRANT SELECT ON TABLE system.mlflow.run_metrics_history TO `<sp-application-id>`
 
 ### "SP only" shown instead of your username
 User Authorization (OBO) is not enabled on the app. Go to the app settings in your workspace and enable it.
+
+### OBO scopes show "updated" in the UI but disappear on refresh
+This usually means the app was created *before* the account-level *User authorization with OAuth* feature was enabled. The app's OAuth integration is stuck in a pre-feature state; `user_api_scopes` writes succeed at the API layer but are silently discarded by the persistence layer — both via the UI and `databricks apps update --json '{"user_api_scopes":[...]}'`.
+
+**Fix:** confirm the feature is enabled at the account level, then delete and recreate the app so its OAuth integration is provisioned against the current backend:
+
+```bash
+databricks apps delete <app-name> --profile <profile>
+# wait for it to fully delete, then recreate and redeploy
+databricks apps create <app-name> --profile <profile>
+bash deploy.sh --profile <profile>
+```
+
+After redeploy, add scopes in the UI and refresh — they should persist.
 
 ### Empty Observability page
 The workflow hasn't run yet, or `system.mlflow` access hasn't been granted. Check the workflow run output and Step 8 above.
