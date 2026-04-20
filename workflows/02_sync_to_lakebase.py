@@ -37,7 +37,8 @@ dbutils.widgets.text("schema", "", "Schema name")
 dbutils.widgets.text("delta_table", "discovered_agents", "Delta table name")
 dbutils.widgets.text("lakebase_dns", "", "Lakebase host (DNS)")
 dbutils.widgets.text("lakebase_database", "", "Lakebase database name")
-dbutils.widgets.text("lakebase_instance", "", "Lakebase instance name")
+dbutils.widgets.text("lakebase_instance", "", "Lakebase instance name (Provisioned only)")
+dbutils.widgets.text("lakebase_endpoint_path", "", "Lakebase endpoint path (Autoscaling only, e.g. projects/<name>/branches/<branch>/endpoints/<endpoint>)")
 dbutils.widgets.text("account_id", "", "Databricks account ID")
 dbutils.widgets.text("warehouse_id", "", "SQL warehouse ID for system table queries")
 
@@ -47,6 +48,7 @@ DELTA_TABLE = f"{CATALOG}.{SCHEMA}.{dbutils.widgets.get('delta_table')}"
 LAKEBASE_DNS = dbutils.widgets.get("lakebase_dns")
 LAKEBASE_DATABASE = dbutils.widgets.get("lakebase_database")
 LAKEBASE_INSTANCE = dbutils.widgets.get("lakebase_instance")
+LAKEBASE_ENDPOINT_PATH = dbutils.widgets.get("lakebase_endpoint_path")
 ACCOUNT_ID = dbutils.widgets.get("account_id")
 WAREHOUSE_ID = dbutils.widgets.get("warehouse_id")
 
@@ -63,6 +65,10 @@ if not LAKEBASE_DNS:
     raise ValueError(
         f"lakebase_dns must be set via job parameters (got dns={LAKEBASE_DNS!r}). "
         "Deploy with: databricks bundle deploy -t <target>"
+    )
+if not LAKEBASE_ENDPOINT_PATH and not LAKEBASE_INSTANCE:
+    raise ValueError(
+        "Either lakebase_endpoint_path (Autoscaling) or lakebase_instance (Provisioned) must be set via job parameters."
     )
 
 print(f"Source Delta table: {DELTA_TABLE}")
@@ -108,32 +114,24 @@ def get_lakebase_connection():
     pg_password = None
     host = w.config.host.rstrip("/")
 
-    # Try Autoscaling Lakebase first (POST /api/2.0/postgres/credentials)
-    # The DNS hostname contains the endpoint UID (e.g., ep-hidden-forest-d1sk7g53)
-    if LAKEBASE_DNS and "database" in LAKEBASE_DNS:
-        # Derive endpoint path from DNS: ep-xxx → look up via project name
-        # Use LAKEBASE_INSTANCE as project name for autoscaling
-        if LAKEBASE_INSTANCE:
-            endpoint_path = f"projects/{LAKEBASE_INSTANCE}/branches/production/endpoints/primary"
-        else:
-            endpoint_path = ""
-        if endpoint_path:
-            try:
-                token = _get_auth_token()
-                headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-                cred_resp = http_requests.post(
-                    f"{host}/api/2.0/postgres/credentials",
-                    headers=headers,
-                    json={"endpoint": endpoint_path},
-                )
-                cred_resp.raise_for_status()
-                pg_password = cred_resp.json().get("token", "")
-                if pg_password:
-                    print(f"Credential generated via Autoscaling API (project={LAKEBASE_INSTANCE})")
-            except Exception as e:
-                print(f"Autoscaling credential generation failed: {e}")
+    # Autoscaling Lakebase: POST /api/2.0/postgres/credentials with explicit endpoint path
+    if LAKEBASE_ENDPOINT_PATH:
+        try:
+            token = _get_auth_token()
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+            cred_resp = http_requests.post(
+                f"{host}/api/2.0/postgres/credentials",
+                headers=headers,
+                json={"endpoint": LAKEBASE_ENDPOINT_PATH},
+            )
+            cred_resp.raise_for_status()
+            pg_password = cred_resp.json().get("token", "")
+            if pg_password:
+                print(f"Credential generated via Autoscaling API (endpoint={LAKEBASE_ENDPOINT_PATH})")
+        except Exception as e:
+            print(f"Autoscaling credential generation failed: {e}")
 
-    # Try Provisioned Lakebase SDK (w.database.generate_database_credential)
+    # Provisioned Lakebase SDK (w.database.generate_database_credential)
     if not pg_password and LAKEBASE_INSTANCE and hasattr(w, "database"):
         try:
             creds = w.database.generate_database_credential(

@@ -24,11 +24,14 @@ import psycopg2
 LAKEBASE_DNS = os.environ.get("LAKEBASE_DNS", "")
 DATABASE = os.environ.get("LAKEBASE_DATABASE", "control_plane")
 LAKEBASE_INSTANCE = os.environ.get("LAKEBASE_INSTANCE", "")
+LAKEBASE_ENDPOINT_PATH = os.environ.get("LAKEBASE_ENDPOINT_PATH", "")
 PORT = 5432
 
-if not LAKEBASE_DNS or not LAKEBASE_INSTANCE:
-    print("Error: LAKEBASE_DNS and LAKEBASE_INSTANCE environment variables are required.")
-    print("Set them or copy .env.example to .env and fill in your values.")
+if not LAKEBASE_DNS:
+    print("Error: LAKEBASE_DNS environment variable is required.")
+    sys.exit(1)
+if not LAKEBASE_ENDPOINT_PATH and not LAKEBASE_INSTANCE:
+    print("Error: Set LAKEBASE_ENDPOINT_PATH (Autoscaling) or LAKEBASE_INSTANCE (Provisioned).")
     sys.exit(1)
 
 
@@ -36,26 +39,40 @@ def get_lakebase_credentials():
     """Generate Lakebase credentials using the Databricks SDK."""
     try:
         from databricks.sdk import WorkspaceClient
+        import requests
         w = WorkspaceClient()
         me = w.current_user.me()
         pg_user = me.user_name
 
-        pg_password = None
-        if hasattr(w, "database"):
-            try:
-                creds = w.database.generate_database_credential(
-                    instance_names=[LAKEBASE_INSTANCE]
-                )
-                pg_password = creds.token
-            except Exception as e:
-                print(f"SDK credential generation failed: {e}")
+        header_factory = w.config.authenticate
+        auth_headers = header_factory()
+        token = auth_headers.get("Authorization", "").replace("Bearer ", "")
+        host = w.config.host.rstrip("/")
 
-        if not pg_password:
-            import requests
-            header_factory = w.config.authenticate
-            auth_headers = header_factory()
-            token = auth_headers.get("Authorization", "").replace("Bearer ", "")
-            host = w.config.host.rstrip("/")
+        pg_password = None
+
+        # Autoscaling: POST /api/2.0/postgres/credentials with endpoint path
+        if LAKEBASE_ENDPOINT_PATH:
+            resp = requests.post(
+                f"{host}/api/2.0/postgres/credentials",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"endpoint": LAKEBASE_ENDPOINT_PATH},
+            )
+            resp.raise_for_status()
+            pg_password = resp.json().get("token", "")
+            if pg_password:
+                print(f"Credential generated via Autoscaling API")
+
+        # Provisioned fallback: SDK then REST
+        if not pg_password and LAKEBASE_INSTANCE and hasattr(w, "database"):
+            try:
+                creds = w.database.generate_database_credential(instance_names=[LAKEBASE_INSTANCE])
+                pg_password = creds.token
+                print("Credential generated via Provisioned SDK")
+            except Exception as e:
+                print(f"Provisioned SDK credential generation failed: {e}")
+
+        if not pg_password and LAKEBASE_INSTANCE:
             resp = requests.post(
                 f"{host}/api/2.0/database/credentials",
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
@@ -63,6 +80,11 @@ def get_lakebase_credentials():
             )
             resp.raise_for_status()
             pg_password = resp.json().get("token", "")
+            print("Credential generated via Provisioned REST API")
+
+        if not pg_password:
+            print("Error: could not generate Lakebase credentials")
+            sys.exit(1)
 
         return pg_user, pg_password
     except Exception as e:

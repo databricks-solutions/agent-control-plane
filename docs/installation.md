@@ -13,12 +13,22 @@ This guide walks you through deploying the AI Control Plane to your Databricks w
 
 The Control Plane uses Lakebase (PostgreSQL) for fast dashboard reads.
 
+Lakebase comes in two modes: **Autoscaling** (the default for all new instances, scales to zero) and **Provisioned** (always-on). This app supports both. Autoscaling is recommended — the workload is bursty (workflow writes every 30 min + intermittent dashboard reads), so scale-to-zero is a natural fit.
+
+### Autoscaling (recommended)
+
 1. In your workspace, go to **SQL** > **Lakebase** > **Create Instance**
 2. Name it (e.g., `ai-control-plane-db`)
-3. Note these values:
-   - **Instance name**: `ai-control-plane-db`
-   - **DNS hostname**: shown on the instance detail page (e.g., `instance-xxxx.database.cloud.databricks.com`)
-   - **Database name**: `control_plane` (default)
+3. Note these values from the instance detail page:
+   - **DNS hostname** — e.g., `ep-xxxxxxxx.database.us-east-1.cloud.databricks.com`
+   - **Endpoint path** — shape: `projects/<name>/branches/<branch>/endpoints/<endpoint>`. The default branch is `production` and default endpoint is `primary`, so for an instance named `ai-control-plane-db` the path is `projects/ai-control-plane-db/branches/production/endpoints/primary`.
+   - **Database name** — create `control_plane` in the instance
+
+### Provisioned (legacy)
+
+Still supported for existing deployments. Note the **Instance name** (e.g., `ai-control-plane-db`), **DNS hostname**, and **database name**.
+
+> **Tip**: Create a **dedicated** Lakebase instance for this app. The control plane owns its own schema (`discovered_agents`, `gateway_usage_daily`, `tool_registry`, etc.) — sharing an instance with unrelated workloads is messy.
 
 ## Step 2: Create a SQL Warehouse
 
@@ -45,13 +55,18 @@ cd control-plane-app
 cp .env.example .env
 ```
 
-Edit `.env` with your values:
+Edit `.env` with your values. Set **either** `LAKEBASE_ENDPOINT_PATH` (Autoscaling) **or** `LAKEBASE_INSTANCE` (Provisioned), not both:
 
 ```env
 # From Step 1
-LAKEBASE_DNS=instance-xxxx.database.cloud.databricks.com
+LAKEBASE_DNS=ep-xxxxxxxx.database.us-east-1.cloud.databricks.com
 LAKEBASE_DATABASE=control_plane
-LAKEBASE_INSTANCE=ai-control-plane-db
+
+# Autoscaling (recommended):
+LAKEBASE_ENDPOINT_PATH=projects/ai-control-plane-db/branches/production/endpoints/primary
+
+# OR Provisioned (legacy):
+# LAKEBASE_INSTANCE=ai-control-plane-db
 
 # Your workspace URL (auto-detected inside Databricks Apps — only needed for local dev)
 DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
@@ -67,10 +82,11 @@ DATABRICKS_ACCOUNT_ID=your-account-id
 # Make sure you're authenticated
 databricks auth login --host https://your-workspace.cloud.databricks.com
 
-# Set env vars and run setup
-export LAKEBASE_DNS=instance-xxxx.database.cloud.databricks.com
+# Set env vars and run setup (Autoscaling example)
+export LAKEBASE_DNS=ep-xxxxxxxx.database.us-east-1.cloud.databricks.com
 export LAKEBASE_DATABASE=control_plane
-export LAKEBASE_INSTANCE=ai-control-plane-db
+export LAKEBASE_ENDPOINT_PATH=projects/ai-control-plane-db/branches/production/endpoints/primary
+# For Provisioned instead: export LAKEBASE_INSTANCE=ai-control-plane-db
 
 cd ..  # back to repo root
 pip install psycopg2-binary databricks-sdk requests
@@ -97,6 +113,19 @@ The deploy script will:
 2. Generate `app.yaml` from your `.env` values
 3. Upload `dist/` and `backend/` to the workspace
 4. Deploy the Databricks App
+5. Register the app's service principal as a Lakebase Postgres role and grant it the required privileges on the `control_plane` database (`grant_sp_lakebase.py`)
+
+> **Lakebase SP access**: Step 5 is the one piece the app can't do for itself. The deploy script runs `grant_sp_lakebase.py` which uses your (admin) identity to register the app's SP in Lakebase and grant it Postgres privileges (`CONNECT`, `USAGE`/`CREATE` on `public`, `ALL` on tables and sequences). It's idempotent — safe to re-run. If it fails, run it manually:
+>
+> ```bash
+> cd control-plane-app
+> DATABRICKS_CONFIG_PROFILE=<profile> \
+>   APP_NAME=<app-name> \
+>   LAKEBASE_DNS=... \
+>   LAKEBASE_DATABASE=control_plane \
+>   LAKEBASE_ENDPOINT_PATH=projects/<name>/branches/<branch>/endpoints/<endpoint> \
+>   python grant_sp_lakebase.py
+> ```
 
 ## Step 7: Deploy the Discovery Workflows
 
@@ -109,7 +138,7 @@ cd ../workflows
 #   catalog, schema, lakebase_dns, lakebase_instance, warehouse_id, account_id
 ```
 
-Example target configuration in `databricks.yml`:
+Example target configuration in `databricks.yml` (Autoscaling):
 
 ```yaml
 targets:
@@ -119,11 +148,14 @@ targets:
     variables:
       catalog: my_catalog
       schema: control_plane
-      lakebase_dns: "instance-xxxx.database.cloud.databricks.com"
-      lakebase_instance: "ai-control-plane-db"
+      lakebase_dns: "ep-xxxxxxxx.database.us-east-1.cloud.databricks.com"
+      lakebase_endpoint_path: "projects/ai-control-plane-db/branches/production/endpoints/primary"
+      lakebase_instance: ""   # Provisioned only — leave empty for Autoscaling
       warehouse_id: "xxxxxxxxxxxx"
       account_id: "your-account-id"
 ```
+
+For Provisioned Lakebase, leave `lakebase_endpoint_path` empty and set `lakebase_instance` to the instance name.
 
 Then deploy and run:
 
@@ -168,7 +200,7 @@ User Authorization (OBO) is not enabled on the app. Go to the app settings in yo
 The workflow hasn't run yet, or `system.mlflow` access hasn't been granted. Check the workflow run output and Step 8 above.
 
 ### Lakebase connection errors
-Verify your `LAKEBASE_DNS` and `LAKEBASE_INSTANCE` are correct. The instance must be in the `AVAILABLE` state.
+Verify your `LAKEBASE_DNS` is correct and that you set exactly one of `LAKEBASE_ENDPOINT_PATH` (Autoscaling) or `LAKEBASE_INSTANCE` (Provisioned). The instance must be in the `AVAILABLE` state.
 
 ### "No SQL warehouse found"
 The workflow needs a running SQL warehouse to query system tables. Verify `warehouse_id` in `databricks.yml` points to a running warehouse.
