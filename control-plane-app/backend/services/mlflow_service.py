@@ -93,6 +93,23 @@ def ensure_observability_tables():
         )
         """,
         "CREATE INDEX IF NOT EXISTS idx_or_ws ON observability_runs (workspace_id)",
+        """
+        CREATE TABLE IF NOT EXISTS observability_trace_details (
+            workspace_id   TEXT NOT NULL,
+            request_id     TEXT NOT NULL,
+            experiment_id  TEXT,
+            trace_info     JSONB,
+            trace_data     JSONB,
+            request_raw    TEXT,
+            response_raw   TEXT,
+            size_bytes     INTEGER,
+            source_type    TEXT,
+            cached_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (workspace_id, request_id)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_otd_ws     ON observability_trace_details (workspace_id)",
+        "CREATE INDEX IF NOT EXISTS idx_otd_cached ON observability_trace_details (cached_at DESC)",
         # Add columns to existing tables (idempotent)
         "ALTER TABLE observability_experiments ADD COLUMN IF NOT EXISTS data_source TEXT DEFAULT 'system_table'",
         "ALTER TABLE observability_experiments ADD COLUMN IF NOT EXISTS tags JSONB",
@@ -516,72 +533,24 @@ def get_trace_spans(request_id: str) -> List[Dict[str, Any]]:
 
 
 def get_trace_detail(request_id: str, *, user_token: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Get full trace info with parsed metadata for a single trace."""
+    """Get full trace info with parsed metadata for a single trace.
+
+    Cache-first: UC-stored traces (request_id starts with `trace:/`) and any
+    other traces that landed in `observability_trace_details` are served from
+    Lakebase. Falls back to a live MLflow REST call for default-backend traces
+    that haven't been cached yet.
+    """
+    # UC traces are uniquely identified by their `trace:/cat.sch.tbl/<id>` URI
+    # — workspace_id is empty for them. Look up by request_id alone first.
+    cached = _get_trace_detail_from_cache_any(request_id)
+    if cached is not None:
+        return cached
+
     data = _get(f"/api/2.0/mlflow/traces/{request_id}", user_token=user_token)
     trace_info = data.get("trace", {}).get("trace_info", {})
     if not trace_info:
         return None
-
-    meta = trace_info.get("trace_metadata", {})
-    tags = trace_info.get("tags", {})
-
-    # Parse token usage
-    token_usage = {}
-    try:
-        token_usage = _json.loads(meta.get("mlflow.trace.tokenUsage", "{}"))
-    except Exception:
-        pass
-
-    # Parse size stats
-    size_stats = {}
-    try:
-        size_stats = _json.loads(meta.get("mlflow.trace.sizeStats", "{}"))
-    except Exception:
-        pass
-
-    # Parse request JSON to extract user messages
-    request_raw = trace_info.get("request", "")
-    user_message = None
-    try:
-        request_parsed = _json.loads(request_raw)
-        inputs = request_parsed.get("input", [])
-        for inp in inputs:
-            if isinstance(inp, dict) and inp.get("role") == "user":
-                content = inp.get("content", [])
-                if isinstance(content, list):
-                    for c in content:
-                        if isinstance(c, dict) and c.get("text"):
-                            user_message = c["text"]
-                            break
-                elif isinstance(content, str):
-                    user_message = content
-    except Exception:
-        pass
-
-    return {
-        "request_id": request_id,
-        "trace_name": tags.get("mlflow.traceName", "—"),
-        "experiment_id": trace_info.get("trace_location", {}).get(
-            "mlflow_experiment", {}
-        ).get("experiment_id"),
-        "state": trace_info.get("state", "—"),
-        "request_time": trace_info.get("request_time"),
-        "execution_duration": trace_info.get("execution_duration"),
-        "user_message": user_message,
-        "response": trace_info.get("response", ""),
-        "response_preview": trace_info.get("response_preview", ""),
-        "request_raw": request_raw,
-        "token_usage": token_usage,
-        "size_stats": size_stats,
-        "model_id": meta.get("mlflow.modelId"),
-        "session_id": meta.get("mlflow.trace.session"),
-        "user": meta.get("mlflow.user"),
-        "source": meta.get("mlflow.source.name"),
-        "trace_schema_version": meta.get("mlflow.trace_schema.version"),
-        "artifact_location": tags.get("mlflow.artifactLocation"),
-        "tags": tags,
-        "metadata": meta,
-    }
+    return _parse_trace_info_to_detail(trace_info, request_id)
 
 
 # ── Cross-workspace helpers ────────────────────────────────────
@@ -734,34 +703,28 @@ def search_traces_all_workspaces(
 
 # ── Cross-workspace: Trace detail ──────────────────────────────
 
-def get_trace_detail_for_workspace(
+def _parse_trace_info_to_detail(
+    trace_info: Dict[str, Any],
     request_id: str,
-    workspace_id: str,
-    *,
-    user_token: str,
-) -> Optional[Dict[str, Any]]:
-    """Get full trace detail from a specific remote workspace."""
-    data = _get_for_workspace(
-        f"/api/2.0/mlflow/traces/{request_id}", None, workspace_id, user_token,
-    )
-    trace_info = data.get("trace", {}).get("trace_info", {})
-    if not trace_info:
-        return None
+    workspace_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Shared parsing for live + cached trace detail responses."""
+    meta = trace_info.get("trace_metadata", {}) or {}
+    tags = trace_info.get("tags", {}) or {}
 
-    # Reuse the same parsing logic as get_trace_detail
-    meta = trace_info.get("trace_metadata", {})
-    tags = trace_info.get("tags", {})
-    token_usage = {}
+    token_usage: Dict[str, Any] = {}
     try:
         token_usage = _json.loads(meta.get("mlflow.trace.tokenUsage", "{}"))
     except Exception:
         pass
-    size_stats = {}
+
+    size_stats: Dict[str, Any] = {}
     try:
         size_stats = _json.loads(meta.get("mlflow.trace.sizeStats", "{}"))
     except Exception:
         pass
-    request_raw = trace_info.get("request", "")
+
+    request_raw = trace_info.get("request", "") or ""
     user_message = None
     try:
         request_parsed = _json.loads(request_raw)
@@ -779,17 +742,26 @@ def get_trace_detail_for_workspace(
     except Exception:
         pass
 
-    result = {
+    # UC-discovered traces store summary fields directly on trace_info under
+    # different keys (see workflows/07_discover_uc_otel_traces.py). Fall back
+    # to those when the standard MLflow keys are missing.
+    request_time_uc = trace_info.get("request_time_ms")
+    if request_time_uc is None and trace_info.get("start_time_unix_nano"):
+        request_time_uc = int(trace_info["start_time_unix_nano"]) // 1_000_000
+    duration_uc = trace_info.get("duration_ms")
+    if duration_uc is None and trace_info.get("start_time_unix_nano") and trace_info.get("end_time_unix_nano"):
+        duration_uc = (int(trace_info["end_time_unix_nano"]) - int(trace_info["start_time_unix_nano"])) // 1_000_000
+
+    result: Dict[str, Any] = {
         "request_id": request_id,
-        "workspace_id": workspace_id,
-        "trace_name": tags.get("mlflow.traceName", "—"),
+        "trace_name": tags.get("mlflow.traceName") or trace_info.get("name") or "—",
         "experiment_id": trace_info.get("trace_location", {}).get(
             "mlflow_experiment", {}
         ).get("experiment_id"),
         "state": trace_info.get("state", "—"),
-        "request_time": trace_info.get("request_time"),
-        "execution_duration": trace_info.get("execution_duration"),
-        "user_message": user_message,
+        "request_time": trace_info.get("request_time") or (str(request_time_uc) if request_time_uc else None),
+        "execution_duration": trace_info.get("execution_duration") or duration_uc,
+        "user_message": user_message or trace_info.get("request_preview") or None,
         "response": trace_info.get("response", ""),
         "response_preview": trace_info.get("response_preview", ""),
         "request_raw": request_raw,
@@ -804,7 +776,126 @@ def get_trace_detail_for_workspace(
         "tags": tags,
         "metadata": meta,
     }
+    if workspace_id:
+        result["workspace_id"] = workspace_id
     return result
+
+
+def _row_to_trace_detail(
+    row: Dict[str, Any], request_id: str, workspace_id: str
+) -> Optional[Dict[str, Any]]:
+    """Shared mapping from `observability_trace_details` row → detail dict."""
+    trace_info = row.get("trace_info")
+    if isinstance(trace_info, str):
+        try:
+            trace_info = _json.loads(trace_info)
+        except Exception:
+            trace_info = {}
+    if not trace_info:
+        return None
+    detail = _parse_trace_info_to_detail(trace_info, request_id, workspace_id)
+    if not detail.get("request_raw") and row.get("request_raw"):
+        detail["request_raw"] = row["request_raw"]
+    if not detail.get("response") and row.get("response_raw"):
+        detail["response"] = row["response_raw"]
+    if not detail.get("experiment_id") and row.get("experiment_id"):
+        detail["experiment_id"] = row["experiment_id"]
+    # Surface the parsed spans array for the waterfall view. trace_data is a
+    # JSONB blob with shape {spans_json: <stringified array>, ...} for UC
+    # row-per-trace traces, or {spans: [...], trace_id: ...} for OTel-spans.
+    td_raw = row.get("trace_data")
+    if isinstance(td_raw, str):
+        try:
+            td = _json.loads(td_raw)
+        except Exception:
+            td = {}
+    else:
+        td = td_raw or {}
+    spans = None
+    sj = td.get("spans_json") if isinstance(td, dict) else None
+    if isinstance(sj, str) and sj:
+        try:
+            spans = _json.loads(sj)
+        except Exception:
+            spans = None
+    if spans is None and isinstance(td, dict):
+        spans = td.get("spans")
+    if isinstance(spans, list):
+        detail["spans"] = spans
+    detail["data_source"] = "cache"
+    return detail
+
+
+def _get_trace_detail_from_cache_any(request_id: str) -> Optional[Dict[str, Any]]:
+    """Look up a cached trace detail by request_id alone.
+
+    UC-stored traces (request_id `trace:/cat.sch.tbl/<id>`) are globally
+    unique by URI and have empty workspace_id. Pick the most recent cached
+    row if multiple exist.
+    """
+    try:
+        rows = execute_query(
+            "SELECT workspace_id, trace_info, trace_data, experiment_id, request_raw, response_raw "
+            "FROM observability_trace_details "
+            "WHERE request_id = %s "
+            "ORDER BY cached_at DESC LIMIT 1",
+            (request_id,),
+        )
+    except Exception as exc:
+        logger.warning("Trace detail cache read (any) failed (rid=%s): %s",
+                       request_id, exc)
+        return None
+    if not rows:
+        return None
+    row = rows[0]
+    return _row_to_trace_detail(row, request_id, row.get("workspace_id") or "")
+
+
+def _get_trace_detail_from_cache(
+    workspace_id: str, request_id: str
+) -> Optional[Dict[str, Any]]:
+    """Read a cached trace detail from observability_trace_details. Returns None on miss."""
+    try:
+        rows = execute_query(
+            "SELECT trace_info, trace_data, experiment_id, request_raw, response_raw "
+            "FROM observability_trace_details "
+            "WHERE workspace_id = %s AND request_id = %s",
+            (workspace_id, request_id),
+        )
+    except Exception as exc:
+        logger.warning("Trace detail cache read failed (ws=%s rid=%s): %s",
+                       workspace_id, request_id, exc)
+        return None
+    if not rows:
+        return None
+    return _row_to_trace_detail(rows[0], request_id, workspace_id)
+
+
+def get_trace_detail_for_workspace(
+    request_id: str,
+    workspace_id: str,
+    *,
+    user_token: str,
+) -> Optional[Dict[str, Any]]:
+    """Get full trace detail for a specific workspace.
+
+    Cache-first: read from `observability_trace_details` (populated by the
+    `04_discover_observability` workflow). Falls back to a live OBO REST call
+    if the cache doesn't have it yet.
+    """
+    cached = _get_trace_detail_from_cache(workspace_id, request_id)
+    if cached is not None:
+        return cached
+
+    data = _get_for_workspace(
+        f"/api/2.0/mlflow/traces/{request_id}", None, workspace_id, user_token,
+    )
+    trace_info = data.get("trace", {}).get("trace_info", {})
+    if not trace_info:
+        return None
+    detail = _parse_trace_info_to_detail(trace_info, request_id, workspace_id)
+    detail["data_source"] = "live"
+    return detail
 
 
 # ── Cross-workspace: Models ────────────────────────────────────
@@ -1014,19 +1105,32 @@ def refresh_observability_cache(*, user_token: str) -> Dict[str, int]:
 
 # ── Lakebase cache: read ───────────────────────────────────────
 
-def get_cached_traces(workspace_id: Optional[str] = None, limit: int = 10000) -> List[Dict[str, Any]]:
-    """Read traces from the Lakebase cache, optionally filtered by workspace."""
+def get_cached_traces(
+    workspace_id: Optional[str] = None,
+    limit: int = 10000,
+    window_days: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Read traces from the Lakebase cache, optionally filtered by workspace and time window.
+
+    `window_days` filters by `request_time` (TEXT epoch-ms). Rows with non-numeric
+    or missing timestamps are excluded when a window is specified.
+    """
+    import time as _time
+    where_clauses = []
+    params: List[Any] = []
     if workspace_id:
-        rows = execute_query(
-            "SELECT * FROM observability_traces WHERE workspace_id = %s ORDER BY request_time DESC LIMIT %s",
-            (workspace_id, limit),
-        )
-    else:
-        rows = execute_query(
-            "SELECT * FROM observability_traces ORDER BY request_time DESC LIMIT %s",
-            (limit,),
-        )
-    return rows
+        where_clauses.append("workspace_id = %s")
+        params.append(workspace_id)
+    if window_days:
+        cutoff_ms = int((_time.time() - window_days * 86400) * 1000)
+        where_clauses.append("request_time ~ '^[0-9]+$' AND CAST(request_time AS BIGINT) >= %s")
+        params.append(cutoff_ms)
+    where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+    params.append(limit)
+    return execute_query(
+        f"SELECT * FROM observability_traces{where_sql} ORDER BY request_time DESC LIMIT %s",
+        tuple(params),
+    )
 
 
 def get_cached_experiments(workspace_id: Optional[str] = None, limit: int = 10000) -> List[Dict[str, Any]]:
