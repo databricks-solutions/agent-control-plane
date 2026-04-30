@@ -39,20 +39,11 @@ async def list_experiments(
     try:
         token = _obo_token(request)
         if workspace_id == "all":
-            # Read from Lakebase cache (populated by scheduled workflow)
-            cached = mlflow_service.get_cached_experiments(None, max_results)
-            # Also include current workspace live data
-            current = mlflow_service.search_experiments(200, user_token=token)
-            seen = set()
-            merged = []
-            # Cached cross-workspace data first, then current workspace
-            for e in cached + current:
-                eid = e.get("experiment_id", "")
-                if eid and eid not in seen:
-                    seen.add(eid)
-                    merged.append(e)
-            merged.sort(key=lambda e: int(e.get("last_update_time") or 0), reverse=True)
-            return merged
+            # Account-wide view — read from Lakebase cache only. The live
+            # MLflow REST merge against the deploy workspace was adding
+            # 1-2s of unnecessary latency (and a single point of failure)
+            # while not surfacing anything the cache doesn't already have.
+            return mlflow_service.get_cached_experiments(None, max_results)
         elif workspace_id:
             return mlflow_service.get_cached_experiments(workspace_id, max_results)
         else:

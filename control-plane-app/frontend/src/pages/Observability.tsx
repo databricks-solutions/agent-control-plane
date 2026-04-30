@@ -351,7 +351,7 @@ function TracesPanel({ workspaceUrl, workspaceId, workspaceHosts }: { workspaceU
             <>
             <div className="divide-y divide-gray-100 dark:divide-gray-700">
               {/* Header */}
-              <div className={`grid gap-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide ${workspaceId ? 'grid-cols-[2rem_1fr_1fr_5rem_5rem_4rem_4rem_4rem_4rem]' : 'grid-cols-12'}`}>
+              <div className={`grid gap-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide ${workspaceId ? 'grid-cols-[2rem_1fr_1fr_8rem_5rem_4rem_4rem_4rem_4rem]' : 'grid-cols-12'}`}>
                 <div className={workspaceId ? '' : 'col-span-1'} />
                 <div className={workspaceId ? '' : 'col-span-3'}>Request ID</div>
                 <div className={workspaceId ? '' : 'col-span-2'}>Trace Name</div>
@@ -395,7 +395,7 @@ function TracesPanel({ workspaceUrl, workspaceId, workspaceHosts }: { workspaceU
                 return (
                   <div
                     key={`${traceWsId || 'local'}-${reqId}`}
-                    className={`grid gap-3 py-2.5 items-center hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer rounded transition-colors ${workspaceId ? 'grid-cols-[2rem_1fr_1fr_5rem_5rem_4rem_4rem_4rem_4rem]' : 'grid-cols-12'}`}
+                    className={`grid gap-3 py-2.5 items-center hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer rounded transition-colors ${workspaceId ? 'grid-cols-[2rem_1fr_1fr_8rem_5rem_4rem_4rem_4rem_4rem]' : 'grid-cols-12'}`}
                     onClick={() => { setSelectedTraceId(reqId); setSelectedTraceWs(traceWsId) }}
                   >
                     <div className={`${workspaceId ? '' : 'col-span-1'} flex justify-center`}>
@@ -406,11 +406,11 @@ function TracesPanel({ workspaceUrl, workspaceId, workspaceHosts }: { workspaceU
                     </div>
                     <div className={`${workspaceId ? '' : 'col-span-2'} text-xs text-gray-500 truncate`}>{traceName}</div>
                     {workspaceId && (
-                      <div className="text-xs flex items-center gap-1">
-                        <Badge variant="default" className="text-[10px] font-mono">
+                      <div className="text-xs flex flex-col items-start gap-0.5 min-w-0">
+                        <Badge variant="default" className="text-[10px] font-mono truncate max-w-full">
                           {traceWsId ? traceWsId.substring(0, 8) + '…' : 'local'}
                         </Badge>
-                        {dataSourceBadge(t.data_source)}
+                        <div className="truncate max-w-full">{dataSourceBadge(t.data_source)}</div>
                       </div>
                     )}
                     <div className={`${workspaceId ? '' : 'col-span-2'} text-xs text-gray-500`}>{tsToDate(ts)}</div>
@@ -418,7 +418,9 @@ function TracesPanel({ workspaceUrl, workspaceId, workspaceHosts }: { workspaceU
                       {msToReadable(dur)}
                     </div>
                     <div className={`${workspaceId ? 'text-right' : 'col-span-1 text-right'} text-xs text-gray-600 dark:text-gray-300`}
-                         title={tu.input_tokens != null ? `in ${tu.input_tokens} / out ${tu.output_tokens || 0}` : ''}>
+                         title={tu.input_tokens != null
+                           ? `in ${tu.input_tokens} / out ${tu.output_tokens || 0}`
+                           : 'No token usage recorded — this trace likely isn’t a direct LLM call'}>
                       {totalTokens ? totalTokens.toLocaleString() : '—'}
                     </div>
                     <div className={`${workspaceId ? 'text-center' : 'col-span-1'} flex justify-center`}>{statusIcon(status)}</div>
@@ -472,9 +474,9 @@ function CopyButton({ text }: { text: string }) {
   )
 }
 
-function MetricTile({ icon: Icon, label, value, sub }: { icon: any; label: string; value: string | number; sub?: string }) {
+function MetricTile({ icon: Icon, label, value, sub, title }: { icon: any; label: string; value: string | number; sub?: string; title?: string }) {
   return (
-    <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-3 flex items-start gap-3">
+    <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-3 flex items-start gap-3" title={title}>
       <div className="w-8 h-8 rounded-lg bg-gray-100 dark:bg-gray-700 flex items-center justify-center flex-shrink-0">
         <Icon className="w-4 h-4 text-gray-500 dark:text-gray-400" />
       </div>
@@ -609,16 +611,19 @@ function TraceDetailView({
           label="Input Tokens"
           value={tokenUsage.input_tokens?.toLocaleString() ?? '—'}
           sub={tokenUsage.cache_read_input_tokens ? `${tokenUsage.cache_read_input_tokens} cached` : undefined}
+          title={tokenUsage.input_tokens == null ? 'No token usage recorded — this trace likely isn’t a direct LLM call' : undefined}
         />
         <MetricTile
           icon={Hash}
           label="Output Tokens"
           value={tokenUsage.output_tokens?.toLocaleString() ?? '—'}
+          title={tokenUsage.output_tokens == null ? 'No token usage recorded — this trace likely isn’t a direct LLM call' : undefined}
         />
         <MetricTile
           icon={Zap}
           label="Total Tokens"
           value={tokenUsage.total_tokens?.toLocaleString() ?? '—'}
+          title={tokenUsage.total_tokens == null ? 'No token usage recorded — this trace likely isn’t a direct LLM call' : undefined}
         />
         <MetricTile
           icon={Layers}
