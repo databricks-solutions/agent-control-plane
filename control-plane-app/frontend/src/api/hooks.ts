@@ -291,6 +291,36 @@ export function useGatewayLogSources() {
   })
 }
 
+export function useGatewayLogTimeseries(
+  windowDays: number,
+  sourceTable?: string | null,
+  bucket: 'hour' | 'day' = 'hour',
+) {
+  return useQuery({
+    queryKey: ['gateway-logs', 'timeseries', windowDays, sourceTable, bucket],
+    queryFn: async () => {
+      const params: Record<string, string> = {
+        window_days: String(windowDays),
+        bucket,
+      }
+      if (sourceTable) params.source_table = sourceTable
+      const { data } = await apiClient.get('/gateway-logs/timeseries', { params })
+      return data as Array<{
+        bucket: string
+        source_table: string
+        requests: number
+        errors: number
+        p50_ms: number | null
+        p95_ms: number | null
+        avg_ms: number | null
+        input_tokens: number
+        output_tokens: number
+        total_tokens: number
+      }>
+    },
+  })
+}
+
 export function useGatewayLogDetail(sourceTable: string | null, requestId: string | null) {
   return useQuery({
     queryKey: ['gateway-logs', 'detail', sourceTable, requestId],
