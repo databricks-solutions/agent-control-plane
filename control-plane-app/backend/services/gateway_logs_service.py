@@ -97,6 +97,47 @@ def get_gateway_log(source_table: str, request_id: str) -> Optional[Dict[str, An
     return rows[0] if rows else None
 
 
+def gateway_timeseries(
+    *,
+    source_table: Optional[str] = None,
+    window_days: int = 7,
+    bucket: str = "hour",
+) -> List[Dict[str, Any]]:
+    """Return per-bucket aggregates over `gateway_inference_logs`.
+
+    One row per (bucket, source_table). Used by the Gateway Requests panel
+    chart to plot request rate / P95 latency / error rate / token volume
+    over time. `bucket` is one of 'hour' | 'day'.
+    """
+    if bucket not in ("hour", "day"):
+        bucket = "hour"
+    where = ["request_time >= NOW() - %s::interval"]
+    params: List[Any] = [f"{int(window_days)} days"]
+    if source_table:
+        where.append("source_table = %s")
+        params.append(source_table)
+    where_sql = " WHERE " + " AND ".join(where)
+    sql = f"""
+        SELECT date_trunc('{bucket}', request_time) AS bucket,
+               source_table,
+               COUNT(*)                                   AS requests,
+               COUNT(*) FILTER (WHERE status_code >= 400) AS errors,
+               PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY execution_ms) AS p50_ms,
+               PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY execution_ms) AS p95_ms,
+               AVG(execution_ms)                          AS avg_ms,
+               COALESCE(SUM(input_tokens),  0)            AS input_tokens,
+               COALESCE(SUM(output_tokens), 0)            AS output_tokens,
+               COALESCE(SUM(total_tokens),  0)            AS total_tokens,
+               COALESCE(SUM(request_size_bytes),  0)      AS request_bytes,
+               COALESCE(SUM(response_size_bytes), 0)      AS response_bytes
+        FROM gateway_inference_logs
+        {where_sql}
+        GROUP BY bucket, source_table
+        ORDER BY bucket
+    """
+    return execute_query(sql, tuple(params))
+
+
 def list_source_tables() -> List[Dict[str, Any]]:
     """Return distinct source tables with row counts and recency stats —
     useful for a high-level breakdown by served endpoint."""

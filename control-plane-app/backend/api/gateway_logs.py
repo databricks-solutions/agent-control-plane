@@ -39,6 +39,23 @@ async def list_sources():
         raise HTTPException(status_code=502, detail=f"Lakebase query failed: {e}")
 
 
+@router.get("/timeseries")
+async def gateway_timeseries(
+    source_table: Optional[str] = Query(None),
+    window_days: int = Query(7, ge=1, le=365),
+    bucket: str = Query("hour", pattern="^(hour|day)$"),
+):
+    """Return per-bucket aggregates for the Gateway Requests time-series chart."""
+    try:
+        return gateway_logs_service.gateway_timeseries(
+            source_table=source_table,
+            window_days=window_days,
+            bucket=bucket,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Lakebase query failed: {e}")
+
+
 @router.get("/{source_table:path}/{request_id}")
 async def get_log(source_table: str, request_id: str):
     """Get a single inference-log row including the full request and response payloads."""

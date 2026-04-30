@@ -13,6 +13,7 @@ import {
   useGatewayLogs,
   useGatewayLogSources,
   useGatewayLogDetail,
+  useGatewayLogTimeseries,
 } from '@/api/hooks'
 import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
 import { RefreshButton } from '@/components/RefreshButton'
@@ -21,6 +22,14 @@ import { Badge } from '@/components/ui/badge'
 import { KpiCard } from '@/components/KpiCard'
 import { TablePagination } from '@/components/TablePagination'
 import { format } from 'date-fns'
+import {
+  LineChart as RcLineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+} from 'recharts'
 import {
   Search,
   FlaskConical,
@@ -1576,6 +1585,9 @@ function ExperimentDetailView({
         <KpiCard title="Failed" value={failedRuns} format="number" />
       </div>
 
+      {/* Metric trends across runs in this experiment */}
+      <RunMetricTrends runs={runList} />
+
       {/* Runs table */}
       <Card>
         <CardHeader className="pb-3">
@@ -1799,11 +1811,15 @@ function RunsPanel({ workspaceUrl, workspaceId, workspaceHosts }: { workspaceUrl
                     <div className="col-span-2 flex gap-1 flex-wrap items-center">
                       {r.metrics.length > 0 ? (
                         <>
-                          {r.metrics.slice(0, 2).map((m: any) => (
-                            <Badge key={m.key} variant="default" className="text-[10px]">
-                              {m.key.split('.').pop()}: {Number(m.value).toFixed(3)}
-                            </Badge>
-                          ))}
+                          {r.metrics.slice(0, 2).map((m: any, idx: number) => {
+                            const norm = normalizeMetric(m)
+                            if (!norm) return null
+                            return (
+                              <Badge key={`${norm.name}-${idx}`} variant="default" className="text-[10px]">
+                                {norm.name.split('.').pop()}: {norm.value.toFixed(3)}
+                              </Badge>
+                            )
+                          })}
                           {r.metrics.length > 2 && (
                             <Badge variant="default" className="text-[10px]">+{r.metrics.length - 2}</Badge>
                           )}
@@ -2421,6 +2437,210 @@ function ModelVersionCard({
   )
 }
 
+/* ── Run-metric trends ────────────────────────────────────────── */
+
+const TREND_COLORS = ['#dc2626', '#7c3aed', '#0ea5e9', '#16a34a', '#f59e0b', '#0891b2', '#db2777', '#6b7280']
+
+/** Normalize metric items across the two shapes we see in the cache:
+ *    - {key, value}                                     (older / REST direct)
+ *    - {metric_name, latest_value, min_value, max_value} (system-table cache)
+ */
+function normalizeMetric(m: any): { name: string; value: number } | null {
+  const name = m?.metric_name || m?.key || ''
+  const raw = m?.latest_value ?? m?.value
+  const v = typeof raw === 'number' ? raw : Number(raw)
+  if (!name || !Number.isFinite(v)) return null
+  return { name, value: v }
+}
+
+function RunMetricTrends({ runs }: { runs: any[] }) {
+  // Build {metricName → [{time, value, run_id}]} sorted by time.
+  const byMetric = new Map<string, Array<{ time: number; value: number; run_id: string; bucket_label: string }>>()
+  for (const r of runs || []) {
+    let metrics = r?.data?.metrics ?? r?.metrics ?? []
+    if (typeof metrics === 'string') {
+      try { metrics = JSON.parse(metrics) } catch { metrics = [] }
+    }
+    if (!Array.isArray(metrics)) continue
+    const start = Number(r?.info?.start_time ?? r?.start_time ?? 0)
+    if (!start) continue
+    const runId = r?.info?.run_id ?? r?.run_id ?? ''
+    for (const m of metrics) {
+      const norm = normalizeMetric(m)
+      if (!norm) continue
+      const list = byMetric.get(norm.name) || []
+      list.push({ time: start, value: norm.value, run_id: runId, bucket_label: format(new Date(start), 'MM-dd HH:mm') })
+      byMetric.set(norm.name, list)
+    }
+  }
+  for (const [k, list] of byMetric) {
+    list.sort((a, b) => a.time - b.time)
+    byMetric.set(k, list)
+  }
+
+  if (byMetric.size === 0) return null
+
+  // Cap rendered metrics to avoid grid blow-up on experiments with hundreds of metric keys.
+  const MAX = 12
+  const entries = Array.from(byMetric.entries())
+  // Sort by descending number of points first — most-tracked metrics are usually the most interesting.
+  entries.sort((a, b) => b[1].length - a[1].length)
+  const visible = entries.slice(0, MAX)
+  const truncated = entries.length - visible.length
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base flex items-center gap-2">
+          <BarChart3 className="w-4 h-4" /> Metric trends
+          <span className="text-[11px] text-gray-500 dark:text-gray-400 font-normal ml-2">
+            {byMetric.size} metric{byMetric.size === 1 ? '' : 's'} across {runs.length} runs
+            {truncated > 0 && <span className="ml-2">· showing top {MAX} (+{truncated} more)</span>}
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {visible.map(([name, series], i) => (
+            <div key={name}>
+              <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1 truncate" title={name}>
+                {name}  <span className="text-gray-400 normal-case">({series.length} pts)</span>
+              </div>
+              <MiniLineChart
+                data={series}
+                dataKey="value"
+                name={name}
+                color={TREND_COLORS[i % TREND_COLORS.length]}
+                height={120}
+                valueFormatter={(v) => v == null ? '—' : (Math.abs(Number(v)) >= 100 ? Number(v).toFixed(1) : Number(v).toFixed(3))}
+              />
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ── Gateway Requests time-series ─────────────────────────────── */
+
+/** A small line chart for one metric over time. Used in a 4-up grid above
+ *  the Gateway Requests list (request rate / P95 latency / errors / tokens).
+ *  Inline-recharts because the shared LineChart wrapper only supports a
+ *  single 'value' field. */
+function MiniLineChart({
+  data, dataKey, name, color, height = 110, valueFormatter,
+}: {
+  data: any[]
+  dataKey: string
+  name: string
+  color: string
+  height?: number
+  valueFormatter?: (v: any) => string
+}) {
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <RcLineChart data={data} margin={{ top: 4, right: 6, left: -10, bottom: 0 }}>
+        <XAxis dataKey="bucket_label" tick={{ fontSize: 10 }} interval="preserveStartEnd" />
+        <YAxis tick={{ fontSize: 10 }} width={40}
+               tickFormatter={(v: any) => valueFormatter ? valueFormatter(v) : String(v)} />
+        <Tooltip
+          contentStyle={{ borderRadius: 6, fontSize: 11, padding: '4px 8px',
+                          backgroundColor: 'var(--tooltip-bg, #fff)', color: 'var(--tooltip-text, #1f2937)' }}
+          formatter={(v: any) => valueFormatter ? valueFormatter(v) : String(v)}
+        />
+        <Line type="monotone" dataKey={dataKey} stroke={color} strokeWidth={2}
+              dot={false} name={name} isAnimationActive={false} />
+      </RcLineChart>
+    </ResponsiveContainer>
+  )
+}
+
+function GatewayTimeSeries({ windowDays, sourceTable }: { windowDays: number; sourceTable: string | null }) {
+  // Choose bucket size: hourly for 1d, daily for >7d, hourly otherwise.
+  const bucket: 'hour' | 'day' = windowDays >= 14 ? 'day' : 'hour'
+  const { data: rows, isLoading } = useGatewayLogTimeseries(windowDays, sourceTable, bucket)
+  if (isLoading) {
+    return (
+      <Card>
+        <CardContent className="py-6 text-xs text-gray-400 text-center flex items-center justify-center gap-2">
+          <Loader2 className="w-4 h-4 animate-spin" /> Loading trend data…
+        </CardContent>
+      </Card>
+    )
+  }
+  const list = rows || []
+  if (!list.length) return null
+
+  // Aggregate across endpoints when no specific filter; preserve per-endpoint
+  // when one source_table is selected. Group by bucket.
+  const byBucket = new Map<string, any>()
+  for (const r of list) {
+    const key = r.bucket
+    const cur = byBucket.get(key) || { bucket: key, requests: 0, errors: 0, total_tokens: 0, p95_acc: [], avg_acc: [] }
+    cur.requests += Number(r.requests || 0)
+    cur.errors += Number(r.errors || 0)
+    cur.total_tokens += Number(r.total_tokens || 0)
+    if (r.p95_ms != null) cur.p95_acc.push(Number(r.p95_ms))
+    if (r.avg_ms != null) cur.avg_acc.push(Number(r.avg_ms))
+    byBucket.set(key, cur)
+  }
+  const merged = Array.from(byBucket.values()).sort((a, b) => a.bucket.localeCompare(b.bucket))
+  // Take the max p95 across endpoints for that bucket — that's the worst-
+  // case latency anyone saw in that window. Avg is a simple mean.
+  for (const m of merged) {
+    m.p95_ms = m.p95_acc.length ? Math.round(Math.max(...m.p95_acc)) : null
+    m.avg_ms = m.avg_acc.length ? Math.round(m.avg_acc.reduce((s: number, n: number) => s + n, 0) / m.avg_acc.length) : null
+    m.error_rate = m.requests > 0 ? (m.errors / m.requests) * 100 : 0
+    m.bucket_label = (() => {
+      const t = Date.parse(m.bucket)
+      if (!Number.isFinite(t)) return m.bucket
+      return bucket === 'hour' ? format(new Date(t), 'MM-dd HH:mm') : format(new Date(t), 'MM-dd')
+    })()
+  }
+
+  const totalRequests = merged.reduce((s, m) => s + m.requests, 0)
+  const totalErrors = merged.reduce((s, m) => s + m.errors, 0)
+  const totalTokens = merged.reduce((s, m) => s + m.total_tokens, 0)
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base flex items-center gap-2">
+          <BarChart3 className="w-4 h-4" /> Trends
+          <span className="text-[11px] text-gray-500 dark:text-gray-400 font-normal ml-2">
+            {sourceTable ? sourceTable.split('.').pop() : 'all endpoints'} · last {windowDays}d · per {bucket}
+            <span className="ml-2">· {totalRequests.toLocaleString()} requests · {totalErrors.toLocaleString()} errors · {totalTokens.toLocaleString()} tokens</span>
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Requests</div>
+            <MiniLineChart data={merged} dataKey="requests" name="Requests" color="#dc2626" />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">P95 Latency</div>
+            <MiniLineChart data={merged} dataKey="p95_ms" name="P95 ms" color="#7c3aed"
+                           valueFormatter={(v) => v == null ? '—' : (Number(v) >= 1000 ? `${(Number(v)/1000).toFixed(1)}s` : `${v}ms`)} />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Error Rate</div>
+            <MiniLineChart data={merged} dataKey="error_rate" name="Error %" color="#f59e0b"
+                           valueFormatter={(v) => v == null ? '—' : `${Number(v).toFixed(1)}%`} />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Tokens</div>
+            <MiniLineChart data={merged} dataKey="total_tokens" name="Tokens" color="#0ea5e9"
+                           valueFormatter={(v) => Number(v).toLocaleString()} />
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
 /* ── Gateway Requests Panel (Tier 2a) ─────────────────────────── */
 
 const GATEWAY_WINDOW_OPTIONS = [1, 7, 30, 90, 180, 365] as const
@@ -2462,6 +2682,8 @@ function GatewayRequestsPanel() {
         <KpiCard title="Errors" value={errCount} format="number" />
         <KpiCard title="Avg Latency" value={avgLatency} format="duration" />
       </div>
+
+      <GatewayTimeSeries windowDays={windowDays} sourceTable={sourceFilter} />
 
       <Card>
         <CardHeader className="pb-3 flex flex-row items-center justify-between gap-3 flex-wrap">
