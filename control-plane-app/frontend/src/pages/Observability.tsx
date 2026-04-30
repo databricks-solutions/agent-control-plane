@@ -9,6 +9,10 @@ import {
   useMlflowModels,
   useMlflowModelVersions,
   useMlflowObservabilityWorkspaces,
+  useWorkspaceHosts,
+  useGatewayLogs,
+  useGatewayLogSources,
+  useGatewayLogDetail,
 } from '@/api/hooks'
 import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
 import { RefreshButton } from '@/components/RefreshButton'
@@ -67,9 +71,20 @@ function safePrettyJson(raw: string | undefined | null, maxLen = 1500): string {
 }
 
 function msToReadable(ms: number | undefined | null) {
-  if (ms == null) return '—'
-  if (ms < 1000) return `${ms}ms`
-  return `${(ms / 1000).toFixed(2)}s`
+  if (ms == null || isNaN(ms as any)) return '—'
+  const n = Number(ms)
+  if (!n) return '—'
+  if (n < 1) return `${n.toFixed(2)}ms`
+  if (n < 1000) return `${Math.round(n)}ms`
+  if (n < 60_000) return `${(n / 1000).toFixed(2)}s`
+  if (n < 3_600_000) {
+    const m = Math.floor(n / 60_000)
+    const s = Math.round((n % 60_000) / 1000)
+    return `${m}m ${s}s`
+  }
+  const h = Math.floor(n / 3_600_000)
+  const m = Math.round((n % 3_600_000) / 60_000)
+  return `${h}h ${m}m`
 }
 
 function tsToDate(ms: number | string | undefined) {
@@ -77,6 +92,18 @@ function tsToDate(ms: number | string | undefined) {
   const n = typeof ms === 'string' ? Number(ms) : ms
   if (!n || isNaN(n)) return '—'
   return format(new Date(n), 'MMM dd, HH:mm:ss')
+}
+
+/** Resolve the right workspace host for a record. Falls back to the deploy
+ *  workspace URL when the registry doesn't have an entry (local rows or
+ *  workspaces not yet discovered). */
+function resolveWorkspaceUrl(
+  recordWorkspaceId: string | null | undefined,
+  hosts: Record<string, string> | undefined,
+  fallback: string,
+): string {
+  if (recordWorkspaceId && hosts && hosts[recordWorkspaceId]) return hosts[recordWorkspaceId]
+  return fallback
 }
 
 function statusIcon(s: string) {
@@ -121,6 +148,7 @@ function dataSourceBadge(source: string | undefined) {
 /* ── tab definitions ─────────────────────────────────────────── */
 const tabs = [
   { id: 'traces', label: 'Traces', icon: Search },
+  { id: 'gateway', label: 'Gateway Requests', icon: Activity },
   { id: 'experiments', label: 'Experiments', icon: FlaskConical },
   { id: 'runs', label: 'Evaluation Runs', icon: Activity },
   { id: 'models', label: 'Model Registry', icon: Database },
@@ -141,6 +169,7 @@ export default function ObservabilityPage() {
   const mlflowUpdatedAt = queryClient.getQueryState(['mlflow', 'traces'])?.dataUpdatedAt
   const mlflowLastSynced = mlflowUpdatedAt ? new Date(mlflowUpdatedAt).toISOString() : null
   const { data: obsWorkspaces } = useMlflowObservabilityWorkspaces()
+  const { data: workspaceHosts } = useWorkspaceHosts()
 
   // The workspace_id value to pass to hooks: undefined means current workspace (no param sent)
   const wsParam = selectedWs || undefined
@@ -217,42 +246,51 @@ export default function ObservabilityPage() {
       </div>
 
       {/* Tab content */}
-      {activeTab === 'traces' && <TracesPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} />}
-      {activeTab === 'experiments' && <ExperimentsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} />}
-      {activeTab === 'runs' && <RunsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} />}
-      {activeTab === 'models' && <ModelsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} />}
+      {activeTab === 'traces' && <TracesPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
+      {activeTab === 'gateway' && <GatewayRequestsPanel />}
+      {activeTab === 'experiments' && <ExperimentsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
+      {activeTab === 'runs' && <RunsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
+      {activeTab === 'models' && <ModelsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
     </div>
   )
 }
 
 /* ── Traces Panel ────────────────────────────────────────────── */
 
-function TracesPanel({ workspaceUrl, workspaceId }: { workspaceUrl: string; workspaceId?: string }) {
-  const { data: traces, isLoading } = useMlflowTraces(workspaceId)
+const TRACE_WINDOW_OPTIONS = [7, 14, 30, 90, 180, 365] as const
+type TraceWindow = (typeof TRACE_WINDOW_OPTIONS)[number]
+
+function TracesPanel({ workspaceUrl, workspaceId, workspaceHosts }: { workspaceUrl: string; workspaceId?: string; workspaceHosts?: Record<string,string> }) {
+  const [windowDays, setWindowDays] = useState<TraceWindow>(30)
+  const { data: traces, isLoading } = useMlflowTraces(workspaceId, windowDays)
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null)
   const [selectedTraceWs, setSelectedTraceWs] = useState<string | undefined>(undefined)
   const [tracePage, setTracePage] = useState(0)
   const [tracePageSize, setTracePageSize] = useState(10)
 
   const traceList = traces || []
-  const okCount = traceList.filter((t: any) => (t.status || t.info?.status) === 'OK').length
-  const errCount = traceList.filter((t: any) => {
-    const s = t.status || t.info?.status
-    return s === 'ERROR'
-  }).length
+  // The Lakebase-cached row uses {state, execution_duration, request_time}.
+  // Live MLflow REST hits (cross-workspace) use info.{status, execution_time_ms, timestamp_ms}.
+  // Read both shapes so KPIs work regardless of which path served the data.
+  const traceState = (t: any) => t.state || t.status || t.info?.status || ''
+  const traceDur = (t: any) => Number(t.execution_duration ?? t.execution_time_ms ?? t.info?.execution_time_ms ?? 0)
+  const traceTs = (t: any) => t.request_time ?? t.timestamp_ms ?? t.info?.timestamp_ms
+  const okCount = traceList.filter((t: any) => traceState(t) === 'OK').length
+  const errCount = traceList.filter((t: any) => traceState(t) === 'ERROR').length
   const avgDur =
     traceList.length > 0
-      ? traceList.reduce((sum: number, t: any) => {
-          return sum + (t.execution_time_ms || t.info?.execution_time_ms || 0)
-        }, 0) / traceList.length
+      ? traceList.reduce((sum: number, t: any) => sum + (traceDur(t) || 0), 0) / traceList.length
       : 0
 
-  // If a trace is selected, show the detail view
+  // If a trace is selected, show the detail view. The "View in MLflow" link
+  // inside the detail must point at the trace's owning workspace, not the
+  // deploy workspace, so resolve through the registry first.
   if (selectedTraceId) {
+    const traceWorkspaceUrl = resolveWorkspaceUrl(selectedTraceWs, workspaceHosts, workspaceUrl)
     return (
       <TraceDetailView
         requestId={selectedTraceId}
-        workspaceUrl={workspaceUrl}
+        workspaceUrl={traceWorkspaceUrl}
         workspaceId={selectedTraceWs}
         onBack={() => { setSelectedTraceId(null); setSelectedTraceWs(undefined) }}
       />
@@ -271,8 +309,24 @@ function TracesPanel({ workspaceUrl, workspaceId }: { workspaceUrl: string; work
 
       {/* Trace table */}
       <Card>
-        <CardHeader className="pb-3">
+        <CardHeader className="pb-3 flex flex-row items-center justify-between gap-3">
           <CardTitle className="text-base">Agent Traces</CardTitle>
+          <div className="inline-flex items-center gap-1 text-xs">
+            <span className="text-gray-500 dark:text-gray-400 mr-1">Window:</span>
+            {TRACE_WINDOW_OPTIONS.map((d) => (
+              <button
+                key={d}
+                onClick={() => { setWindowDays(d); setTracePage(0) }}
+                className={`px-2 py-1 rounded font-medium transition-colors ${
+                  windowDays === d
+                    ? 'bg-db-red text-white'
+                    : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'
+                }`}
+              >
+                {d}d
+              </button>
+            ))}
+          </div>
         </CardHeader>
         <CardContent>
           {isLoading ? (
@@ -287,15 +341,16 @@ function TracesPanel({ workspaceUrl, workspaceId }: { workspaceUrl: string; work
             <>
             <div className="divide-y divide-gray-100 dark:divide-gray-700">
               {/* Header */}
-              <div className={`grid gap-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide ${workspaceId ? 'grid-cols-[2rem_1fr_1fr_5rem_5rem_4rem_4rem_5rem]' : 'grid-cols-12'}`}>
+              <div className={`grid gap-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide ${workspaceId ? 'grid-cols-[2rem_1fr_1fr_5rem_5rem_4rem_4rem_4rem_4rem]' : 'grid-cols-12'}`}>
                 <div className={workspaceId ? '' : 'col-span-1'} />
                 <div className={workspaceId ? '' : 'col-span-3'}>Request ID</div>
                 <div className={workspaceId ? '' : 'col-span-2'}>Trace Name</div>
                 {workspaceId && <div>Workspace</div>}
                 <div className={workspaceId ? '' : 'col-span-2'}>Timestamp</div>
                 <div className={workspaceId ? 'text-right' : 'col-span-1 text-right'}>Duration</div>
+                <div className={workspaceId ? 'text-right' : 'col-span-1 text-right'}>Tokens</div>
                 <div className={workspaceId ? 'text-center' : 'col-span-1 text-center'}>Status</div>
-                <div className={workspaceId ? 'text-right' : 'col-span-2 text-right'}>Actions</div>
+                <div className={workspaceId ? 'text-right' : 'col-span-1 text-right'}>Actions</div>
               </div>
               {(() => {
                 const totalPages = Math.max(1, Math.ceil(traceList.length / tracePageSize))
@@ -304,17 +359,33 @@ function TracesPanel({ workspaceUrl, workspaceId }: { workspaceUrl: string; work
                 return paged
               })().map((t: any) => {
                 const reqId = t.request_id || t.info?.request_id || '—'
-                const status = t.status || t.info?.status || '—'
-                const dur = t.execution_time_ms || t.info?.execution_time_ms
-                const ts = t.timestamp_ms || t.info?.timestamp_ms
-                const traceName = t.tags?.['mlflow.traceName'] || t.info?.tags?.['mlflow.traceName'] || '—'
+                const status = traceState(t) || '—'
+                const dur = traceDur(t)
+                const ts = traceTs(t)
+                // tags arrives as a JSON string from JSONB or an array of {key,value} from REST.
+                const tagsParsed = (() => {
+                  const raw = t.tags ?? t.info?.tags
+                  if (!raw) return {}
+                  if (typeof raw === 'string') { try { return JSON.parse(raw) } catch { return {} } }
+                  if (Array.isArray(raw)) return Object.fromEntries(raw.map((x: any) => [x.key, x.value]))
+                  return raw
+                })()
+                const traceName = t.trace_name || tagsParsed['mlflow.traceName'] || '—'
                 const experimentId = t.experiment_id || t.info?.experiment_id
                 const traceWsId = t.workspace_id
+                // token_usage arrives as parsed JSON from JSONB or as a JSON string.
+                const tu = (() => {
+                  const raw = t.token_usage
+                  if (!raw) return {}
+                  if (typeof raw === 'string') { try { return JSON.parse(raw) } catch { return {} } }
+                  return raw
+                })()
+                const totalTokens = tu.total_tokens ?? ((tu.input_tokens || 0) + (tu.output_tokens || 0))
 
                 return (
                   <div
                     key={`${traceWsId || 'local'}-${reqId}`}
-                    className={`grid gap-3 py-2.5 items-center hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer rounded transition-colors ${workspaceId ? 'grid-cols-[2rem_1fr_1fr_5rem_5rem_4rem_4rem_5rem]' : 'grid-cols-12'}`}
+                    className={`grid gap-3 py-2.5 items-center hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer rounded transition-colors ${workspaceId ? 'grid-cols-[2rem_1fr_1fr_5rem_5rem_4rem_4rem_4rem_4rem]' : 'grid-cols-12'}`}
                     onClick={() => { setSelectedTraceId(reqId); setSelectedTraceWs(traceWsId) }}
                   >
                     <div className={`${workspaceId ? '' : 'col-span-1'} flex justify-center`}>
@@ -336,19 +407,27 @@ function TracesPanel({ workspaceUrl, workspaceId }: { workspaceUrl: string; work
                     <div className={`${workspaceId ? 'text-right' : 'col-span-1 text-right'} text-xs font-medium`}>
                       {msToReadable(dur)}
                     </div>
+                    <div className={`${workspaceId ? 'text-right' : 'col-span-1 text-right'} text-xs text-gray-600 dark:text-gray-300`}
+                         title={tu.input_tokens != null ? `in ${tu.input_tokens} / out ${tu.output_tokens || 0}` : ''}>
+                      {totalTokens ? totalTokens.toLocaleString() : '—'}
+                    </div>
                     <div className={`${workspaceId ? 'text-center' : 'col-span-1'} flex justify-center`}>{statusIcon(status)}</div>
-                    <div className={`${workspaceId ? 'text-right' : 'col-span-2 text-right'}`}>
-                      {workspaceUrl && experimentId && !traceWsId && (
-                        <a
-                          href={`${workspaceUrl}/ml/experiments/${experimentId}?searchFilter=request_id%3D%27${reqId}%27&compareRunsMode=TRACES`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-600 hover:text-blue-800 text-xs inline-flex items-center gap-1"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          MLflow <ExternalLink className="w-3 h-3" />
-                        </a>
-                      )}
+                    <div className={`${workspaceId ? 'text-right' : 'col-span-1 text-right'}`}>
+                      {experimentId && (() => {
+                        const base = resolveWorkspaceUrl(traceWsId, workspaceHosts, workspaceUrl)
+                        if (!base) return null
+                        return (
+                          <a
+                            href={`${base}/ml/experiments/${experimentId}?searchFilter=request_id%3D%27${reqId}%27&compareRunsMode=TRACES`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 hover:text-blue-800 text-xs inline-flex items-center gap-1"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            MLflow <ExternalLink className="w-3 h-3" />
+                          </a>
+                        )
+                      })()}
                     </div>
                   </div>
                 )
@@ -438,7 +517,10 @@ function TraceDetailView({
 
   const tokenUsage = detail.token_usage || {}
   const sizeStats = detail.size_stats || {}
-  const durationStr = detail.execution_duration || '—'
+  const durationMs = typeof detail.execution_duration === 'string'
+    ? Number(detail.execution_duration)
+    : detail.execution_duration
+  const durationStr = msToReadable(typeof durationMs === 'number' && !isNaN(durationMs) ? durationMs : null)
 
   return (
     <div className="space-y-4">
@@ -474,7 +556,7 @@ function TraceDetailView({
               </div>
             </div>
             <div className="text-right text-xs text-gray-500">
-              {detail.request_time ? format(new Date(detail.request_time), 'MMM dd, yyyy HH:mm:ss') : '—'}
+              {tsToDate(detail.request_time)}
             </div>
           </div>
         </CardContent>
@@ -640,6 +722,20 @@ function TraceDetailView({
         </Card>
       </div>
 
+      {/* Span waterfall — hierarchical timeline of all spans in this trace */}
+      {Array.isArray((detail as any).spans) && (detail as any).spans.length > 0 && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Layers className="w-4 h-4" /> Span Waterfall
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <SpanWaterfall spans={(detail as any).spans} />
+          </CardContent>
+        </Card>
+      )}
+
       {/* Raw request JSON (collapsible) */}
       <Card>
         <CardHeader className="pb-2">
@@ -712,9 +808,316 @@ function SpanSizeBar({ stats }: { stats: any }) {
   )
 }
 
+/* ── Span waterfall view ─────────────────────────────────────── */
+
+type Span = {
+  span_id?: string
+  parent_id?: string | null
+  parent_span_id?: string | null
+  name?: string
+  span_type?: string
+  kind?: string
+  status?: any
+  status_code?: any
+  start_time_unix_nano?: number | string
+  end_time_unix_nano?: number | string
+  start_time?: number | string
+  end_time?: number | string
+  inputs?: any
+  outputs?: any
+  attributes?: any
+}
+
+/** MLflow trace_logs spans nest these as JSON-encoded string values, e.g.
+ *  attributes["mlflow.spanType"] === '"AGENT"'. Unwrap once. */
+function unwrapAttr(v: any): any {
+  if (typeof v !== 'string') return v
+  try { return JSON.parse(v) } catch { return v }
+}
+
+function spanAttributes(s: Span): Record<string, any> {
+  const a = s.attributes
+  if (!a) return {}
+  if (typeof a === 'string') {
+    try { return JSON.parse(a) } catch { return {} }
+  }
+  return a
+}
+
+function spanIdOf(s: Span): string {
+  return String(s.span_id ?? Math.random())
+}
+
+function spanParentOf(s: Span): string | null {
+  // Prefer top-level fields; trace_logs spans may carry parent in attributes
+  // under various MLflow keys.
+  const a = spanAttributes(s)
+  const p =
+    s.parent_id ??
+    s.parent_span_id ??
+    unwrapAttr(a['mlflow.parentSpanId']) ??
+    unwrapAttr(a['parent_span_id']) ??
+    null
+  return p ? String(p) : null
+}
+
+/** Returns ms since epoch. Handles unix_nano, unix_ms, and ISO strings. */
+function spanStartMs(s: Span): number {
+  if (s.start_time_unix_nano != null) {
+    const n = Number(s.start_time_unix_nano)
+    return Number.isFinite(n) ? n / 1_000_000 : 0
+  }
+  const v = s.start_time
+  if (v == null) return 0
+  if (typeof v === 'number') return v >= 1e15 ? v / 1_000_000 : v // heuristic ns → ms
+  // ISO string
+  const t = Date.parse(v)
+  return Number.isFinite(t) ? t : Number(v) || 0
+}
+
+function spanEndMs(s: Span): number {
+  if (s.end_time_unix_nano != null) {
+    const n = Number(s.end_time_unix_nano)
+    return Number.isFinite(n) ? n / 1_000_000 : 0
+  }
+  const v = s.end_time
+  if (v == null) return 0
+  if (typeof v === 'number') return v >= 1e15 ? v / 1_000_000 : v
+  const t = Date.parse(v)
+  return Number.isFinite(t) ? t : Number(v) || 0
+}
+
+function spanKind(s: Span): string {
+  const a = spanAttributes(s)
+  const raw = (
+    s.span_type ||
+    s.kind ||
+    unwrapAttr(a['mlflow.spanType']) ||
+    unwrapAttr(a['span_type']) ||
+    ''
+  ).toString().toUpperCase()
+  if (raw.includes('LLM') || raw === 'CHAT_MODEL' || raw === 'CHAT' || raw === 'COMPLETION') return 'LLM'
+  if (raw.includes('TOOL')) return 'TOOL'
+  if (raw.includes('AGENT')) return 'AGENT'
+  if (raw.includes('CHAIN')) return 'CHAIN'
+  if (raw.includes('RETRIEVER') || raw.includes('RAG')) return 'RETRIEVER'
+  if (raw.includes('PARSER')) return 'PARSER'
+  if (raw.includes('EMBEDDING')) return 'EMBEDDING'
+  return raw || 'SPAN'
+}
+
+const KIND_COLORS: Record<string, string> = {
+  LLM: '#7c3aed',       // violet
+  TOOL: '#0ea5e9',      // sky
+  AGENT: '#dc2626',     // db-red
+  CHAIN: '#16a34a',     // green
+  RETRIEVER: '#f59e0b', // amber
+  PARSER: '#0891b2',    // cyan
+  EMBEDDING: '#db2777', // pink
+  SPAN: '#6b7280',      // slate
+}
+
+function spanStatusOk(s: Span): 'OK' | 'ERROR' | 'UNKNOWN' {
+  // Top-level status_code (trace_logs format) or nested status (OTel format)
+  const codeRaw = s.status_code ?? (s.status && (s.status.status_code || s.status.code))
+  if (codeRaw != null) {
+    const u = String(codeRaw).toUpperCase()
+    if (u.includes('OK') || u === '1') return 'OK'
+    if (u.includes('ERROR') || u === '2') return 'ERROR'
+  }
+  if (typeof s.status === 'string') {
+    const u = s.status.toUpperCase()
+    return u.includes('OK') ? 'OK' : u.includes('ERROR') ? 'ERROR' : 'UNKNOWN'
+  }
+  return 'UNKNOWN'
+}
+
+/** When spans don't carry parent IDs (e.g. trace_logs format), infer
+ *  hierarchy via temporal containment: a span A is the parent of B if A's
+ *  interval [start, end] contains B's interval. The closest containing span
+ *  (smallest enclosing) is the immediate parent. Stable for properly
+ *  instrumented traces; falls back to flat ordering for ambiguous cases. */
+function inferParentByContainment(
+  spans: Span[],
+  starts: number[],
+  ends: number[],
+): (string | null)[] {
+  const n = spans.length
+  const parents: (string | null)[] = new Array(n).fill(null)
+  for (let i = 0; i < n; i++) {
+    let best = -1
+    let bestSpan = Infinity
+    for (let j = 0; j < n; j++) {
+      if (i === j) continue
+      // j must strictly contain i (allow equal endpoints, but j ≠ i)
+      if (starts[j] <= starts[i] && ends[j] >= ends[i]) {
+        const span = ends[j] - starts[j]
+        // Prefer the smallest span that still contains i
+        if (span < bestSpan) {
+          best = j; bestSpan = span
+        }
+      }
+    }
+    if (best >= 0) parents[i] = spanIdOf(spans[best])
+  }
+  return parents
+}
+
+function SpanWaterfall({ spans }: { spans: Span[] }) {
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+
+  const flat = spans || []
+  if (!flat.length) return <div className="text-sm text-gray-400 text-center py-6">No spans available.</div>
+
+  // Cache normalized timestamps once (ms since epoch).
+  const startsMs = flat.map(spanStartMs)
+  const endsMs = flat.map(spanEndMs)
+
+  // Build parent map. Use explicit parent_id when present; otherwise infer
+  // by temporal containment so the trace_logs-format spans (which don't
+  // carry parent IDs) still render as a hierarchy.
+  const byId = new Map<string, Span>()
+  for (const s of flat) byId.set(spanIdOf(s), s)
+  const explicitParents = flat.map(spanParentOf)
+  const haveAnyExplicit = explicitParents.some((p) => p && byId.has(p))
+  const parents: (string | null)[] = haveAnyExplicit
+    ? explicitParents.map((p) => (p && byId.has(p) ? p : null))
+    : inferParentByContainment(flat, startsMs, endsMs)
+
+  const childrenOf = new Map<string, Span[]>()
+  for (let i = 0; i < flat.length; i++) {
+    const key = parents[i] ?? '__root__'
+    const list = childrenOf.get(key) || []
+    list.push(flat[i])
+    childrenOf.set(key, list)
+  }
+  // Sort each level by start time (using cached starts via id lookup)
+  const startById = new Map<string, number>()
+  for (let i = 0; i < flat.length; i++) startById.set(spanIdOf(flat[i]), startsMs[i])
+  for (const [k, list] of childrenOf) {
+    list.sort((a, b) => (startById.get(spanIdOf(a)) || 0) - (startById.get(spanIdOf(b)) || 0))
+    childrenOf.set(k, list)
+  }
+
+  const minStart = Math.min(...startsMs.filter((n) => n > 0))
+  const maxEnd = Math.max(...endsMs.filter((n) => n > 0))
+  const totalMs = Math.max(1, maxEnd - minStart)
+
+  // Flatten into render order with a depth counter.
+  const ordered: Array<{ s: Span; depth: number }> = []
+  function walk(parentKey: string, depth: number) {
+    for (const s of (childrenOf.get(parentKey) || [])) {
+      ordered.push({ s, depth })
+      walk(spanIdOf(s), depth + 1)
+    }
+  }
+  walk('__root__', 0)
+
+  const selected = selectedId ? byId.get(selectedId) : null
+
+  return (
+    <div className="space-y-3">
+      <div className="text-xs text-gray-500 dark:text-gray-400">
+        {ordered.length} spans · click a row for details
+      </div>
+      <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+        <div className="grid grid-cols-[minmax(0,1fr)_4rem_minmax(0,1.5fr)] gap-2 px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800/50 border-b border-gray-200 dark:border-gray-700">
+          <div>Span</div>
+          <div className="text-right">Duration</div>
+          <div>Timeline</div>
+        </div>
+        <div className="max-h-[60vh] overflow-y-auto">
+          {ordered.map(({ s, depth }) => {
+            const sid = spanIdOf(s)
+            const startMs = startById.get(sid) || 0
+            const endMs = spanEndMs(s)
+            const dur = endMs > startMs ? Math.round(endMs - startMs) : 0
+            const offsetPct = totalMs > 0 ? Math.max(0, ((startMs - minStart) / totalMs) * 100) : 0
+            const widthPct = totalMs > 0 ? Math.max(0.5, ((endMs - startMs) / totalMs) * 100) : 0
+            const k = spanKind(s)
+            const color = KIND_COLORS[k] || KIND_COLORS.SPAN
+            const status = spanStatusOk(s)
+            const isSel = selectedId === sid
+            return (
+              <button
+                key={sid}
+                onClick={() => setSelectedId(isSel ? null : sid)}
+                className={`grid grid-cols-[minmax(0,1fr)_4rem_minmax(0,1.5fr)] gap-2 px-3 py-1.5 w-full text-left text-xs items-center border-b border-gray-100 dark:border-gray-800 last:border-0 hover:bg-gray-50 dark:hover:bg-gray-800/40 ${isSel ? 'bg-blue-50 dark:bg-blue-900/20' : ''}`}
+              >
+                <div className="flex items-center gap-2 min-w-0" style={{ paddingLeft: depth * 16 }}>
+                  <span
+                    className="inline-block w-1.5 h-1.5 rounded-full flex-shrink-0"
+                    style={{ backgroundColor: color }}
+                  />
+                  <span className="text-[10px] font-mono text-gray-500 dark:text-gray-400 flex-shrink-0">{k}</span>
+                  <span className="truncate font-medium text-gray-700 dark:text-gray-200" title={s.name || ''}>
+                    {s.name || sid.slice(0, 8)}
+                  </span>
+                  {status === 'ERROR' && <XCircle className="w-3 h-3 text-red-500 flex-shrink-0" />}
+                </div>
+                <div className="text-right font-medium text-gray-600 dark:text-gray-300">
+                  {dur > 0 ? msToReadable(dur) : '—'}
+                </div>
+                <div className="relative h-3 bg-gray-100 dark:bg-gray-700 rounded">
+                  <div
+                    className="absolute inset-y-0 rounded"
+                    style={{ left: `${offsetPct}%`, width: `${widthPct}%`, backgroundColor: color, opacity: 0.85 }}
+                  />
+                </div>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      {selected && (() => {
+        const attrs = spanAttributes(selected)
+        const rawIn = selected.inputs ?? attrs['mlflow.spanInputs'] ?? attrs['inputs']
+        const rawOut = selected.outputs ?? attrs['mlflow.spanOutputs'] ?? attrs['outputs']
+        const inJson = typeof rawIn === 'string' ? rawIn : (rawIn != null ? JSON.stringify(rawIn) : '')
+        const outJson = typeof rawOut === 'string' ? rawOut : (rawOut != null ? JSON.stringify(rawOut) : '')
+        const sStart = startById.get(spanIdOf(selected)) || 0
+        const sEnd = spanEndMs(selected)
+        const sDur = sEnd > sStart ? Math.round(sEnd - sStart) : 0
+        return (
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm flex items-center gap-2 flex-wrap">
+                <span className="font-mono">{selected.name || spanIdOf(selected)}</span>
+                <Badge variant="default" className="text-[10px]">{spanKind(selected)}</Badge>
+                {spanStatusOk(selected) === 'ERROR' && <Badge variant="error" className="text-[10px]">error</Badge>}
+                <span className="text-[11px] text-gray-500 dark:text-gray-400 font-normal">
+                  {sDur > 0 ? msToReadable(sDur) : '—'}
+                </span>
+                <span className="text-[11px] text-gray-400 dark:text-gray-500 font-mono font-normal">{spanIdOf(selected)}</span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 text-xs">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Inputs</div>
+                  <pre className="bg-gray-50 dark:bg-gray-800 rounded p-2 overflow-auto max-h-72 whitespace-pre-wrap">
+                    {safePrettyJson(inJson, 4000) || '—'}
+                  </pre>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Outputs</div>
+                  <pre className="bg-gray-50 dark:bg-gray-800 rounded p-2 overflow-auto max-h-72 whitespace-pre-wrap">
+                    {safePrettyJson(outJson, 4000) || '—'}
+                  </pre>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )
+      })()}
+    </div>
+  )
+}
+
 /* ── Experiments Panel ───────────────────────────────────────── */
 
-function ExperimentsPanel({ workspaceUrl, workspaceId }: { workspaceUrl: string; workspaceId?: string }) {
+function ExperimentsPanel({ workspaceUrl, workspaceId, workspaceHosts }: { workspaceUrl: string; workspaceId?: string; workspaceHosts?: Record<string,string> }) {
   const { data: experiments, isLoading } = useMlflowExperiments(workspaceId)
   const [selectedExpId, setSelectedExpId] = useState<string | null>(null)
   const [expPage, setExpPage] = useState(0)
@@ -723,11 +1126,14 @@ function ExperimentsPanel({ workspaceUrl, workspaceId }: { workspaceUrl: string;
 
   if (selectedExpId) {
     const exp = expList.find((e: any) => e.experiment_id === selectedExpId)
+    // Route the "Open in MLflow" link to the experiment's owning workspace.
+    const expWorkspaceUrl = resolveWorkspaceUrl(exp?.workspace_id, workspaceHosts, workspaceUrl)
     return (
       <ExperimentDetailView
         experiment={exp}
         experimentId={selectedExpId}
-        workspaceUrl={workspaceUrl}
+        workspaceUrl={expWorkspaceUrl}
+        workspaceHosts={workspaceHosts}
         onBack={() => setSelectedExpId(null)}
       />
     )
@@ -836,11 +1242,13 @@ function ExperimentDetailView({
   experiment,
   experimentId,
   workspaceUrl,
+  workspaceHosts,
   onBack,
 }: {
   experiment: any
   experimentId: string
   workspaceUrl: string
+  workspaceHosts?: Record<string,string>
   onBack: () => void
 }) {
   const { data: runs, isLoading: runsLoading } = useMlflowRuns(experimentId)
@@ -858,7 +1266,9 @@ function ExperimentDetailView({
   const finishedRuns = runList.filter((r: any) => r.info?.status === 'FINISHED').length
   const failedRuns = runList.filter((r: any) => r.info?.status === 'FAILED').length
 
-  // If a run is selected, show run detail
+  // If a run is selected, show run detail. workspaceUrl was already resolved
+  // to the experiment's workspace in the parent panel, and runs in an
+  // experiment share that workspace, so reuse it here.
   if (selectedRunId) {
     const run = runList.find((r: any) => r.info?.run_id === selectedRunId)
     return (
@@ -1072,7 +1482,7 @@ function normalizeRun(r: any) {
   }
 }
 
-function RunsPanel({ workspaceUrl, workspaceId }: { workspaceUrl: string; workspaceId?: string }) {
+function RunsPanel({ workspaceUrl, workspaceId, workspaceHosts }: { workspaceUrl: string; workspaceId?: string; workspaceHosts?: Record<string,string> }) {
   const { data: runs, isLoading } = useMlflowRuns(undefined, workspaceId)
   const runList = (runs || []).map(normalizeRun)
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
@@ -1092,10 +1502,12 @@ function RunsPanel({ workspaceUrl, workspaceId }: { workspaceUrl: string; worksp
 
   if (selectedRunId) {
     const run = (runs || []).find((r: any) => (r.info?.run_id || r.run_id) === selectedRunId)
+    // Resolve link base URL using the run's owning workspace.
+    const runWorkspaceUrl = resolveWorkspaceUrl(run?.workspace_id, workspaceHosts, workspaceUrl)
     return (
       <RunDetailView
         run={run}
-        workspaceUrl={workspaceUrl}
+        workspaceUrl={runWorkspaceUrl}
         onBack={() => setSelectedRunId(null)}
       />
     )
@@ -1427,7 +1839,7 @@ function RunDetailView({
 
 /* ── Models Panel ────────────────────────────────────────────── */
 
-function ModelsPanel({ workspaceUrl, workspaceId }: { workspaceUrl: string; workspaceId?: string }) {
+function ModelsPanel({ workspaceUrl, workspaceId, workspaceHosts }: { workspaceUrl: string; workspaceId?: string; workspaceHosts?: Record<string,string> }) {
   const { data: models, isLoading } = useMlflowModels(workspaceId)
   const modelList = models || []
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
@@ -1436,11 +1848,15 @@ function ModelsPanel({ workspaceUrl, workspaceId }: { workspaceUrl: string; work
 
   if (selectedModel) {
     const model = modelList.find((m: any) => m.name === selectedModel)
+    // UC registered models are account-wide objects (catalog.schema.name);
+    // any workspace with grants can browse them. Use the deploy workspace
+    // URL by default; if the model row carries a workspace_id, prefer that.
+    const modelWorkspaceUrl = resolveWorkspaceUrl(model?.workspace_id, workspaceHosts, workspaceUrl)
     return (
       <ModelDetailView
         model={model}
         modelName={selectedModel}
-        workspaceUrl={workspaceUrl}
+        workspaceUrl={modelWorkspaceUrl}
         onBack={() => setSelectedModel(null)}
       />
     )
@@ -1778,6 +2194,242 @@ function ModelVersionCard({
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+/* ── Gateway Requests Panel (Tier 2a) ─────────────────────────── */
+
+const GATEWAY_WINDOW_OPTIONS = [1, 7, 30, 90, 180, 365] as const
+type GatewayWindow = (typeof GATEWAY_WINDOW_OPTIONS)[number]
+
+function GatewayRequestsPanel() {
+  const [windowDays, setWindowDays] = useState<GatewayWindow>(7)
+  const [sourceFilter, setSourceFilter] = useState<string | null>(null)
+  const [selected, setSelected] = useState<{ source_table: string; request_id: string } | null>(null)
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
+
+  const { data: rows, isLoading } = useGatewayLogs(windowDays, sourceFilter)
+  const { data: sources } = useGatewayLogSources()
+
+  const list = rows || []
+  const okCount = list.filter((r: any) => r.status_code != null && r.status_code < 400).length
+  const errCount = list.filter((r: any) => r.status_code != null && r.status_code >= 400).length
+  const avgLatency =
+    list.length > 0
+      ? list.reduce((sum: number, r: any) => sum + (Number(r.execution_ms) || 0), 0) / list.length
+      : 0
+
+  if (selected) {
+    return (
+      <GatewayRequestDetailView
+        sourceTable={selected.source_table}
+        requestId={selected.request_id}
+        onBack={() => setSelected(null)}
+      />
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+        <KpiCard title="Total Requests" value={list.length} format="number" />
+        <KpiCard title="Successful" value={okCount} format="number" />
+        <KpiCard title="Errors" value={errCount} format="number" />
+        <KpiCard title="Avg Latency" value={avgLatency} format="duration" />
+      </div>
+
+      <Card>
+        <CardHeader className="pb-3 flex flex-row items-center justify-between gap-3 flex-wrap">
+          <CardTitle className="text-base">AI Gateway / Inference Requests</CardTitle>
+          <div className="flex items-center gap-3">
+            <select
+              value={sourceFilter || ''}
+              onChange={(e) => { setSourceFilter(e.target.value || null); setPage(0) }}
+              className="text-xs px-2 py-1 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800"
+            >
+              <option value="">All endpoints ({(sources || []).length})</option>
+              {(sources || []).map((s: any) => (
+                <option key={s.source_table} value={s.source_table}>
+                  {s.source_table.split('.').pop()} ({s.row_count})
+                </option>
+              ))}
+            </select>
+            <div className="inline-flex items-center gap-1 text-xs">
+              <span className="text-gray-500 dark:text-gray-400 mr-1">Window:</span>
+              {GATEWAY_WINDOW_OPTIONS.map((d) => (
+                <button
+                  key={d}
+                  onClick={() => { setWindowDays(d); setPage(0) }}
+                  className={`px-2 py-1 rounded font-medium transition-colors ${
+                    windowDays === d
+                      ? 'bg-db-red text-white'
+                      : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'
+                  }`}
+                >
+                  {d}d
+                </button>
+              ))}
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="flex items-center justify-center py-12 text-gray-400">
+              <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading inference logs…
+            </div>
+          ) : list.length === 0 ? (
+            <div className="text-sm text-gray-400 text-center py-12">
+              No gateway/inference logs found. Enable AI Gateway request logging on your endpoints, or pick a wider window.
+            </div>
+          ) : (
+            <>
+              <div className="divide-y divide-gray-100 dark:divide-gray-700">
+                <div className="grid grid-cols-12 gap-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+                  <div className="col-span-2">Endpoint</div>
+                  <div className="col-span-2">Request ID</div>
+                  <div className="col-span-2">Time</div>
+                  <div className="col-span-2">Model</div>
+                  <div>Status</div>
+                  <div className="text-right">Latency</div>
+                  <div className="text-right">Tokens</div>
+                  <div>Requester</div>
+                </div>
+                {(() => {
+                  const totalPages = Math.max(1, Math.ceil(list.length / pageSize))
+                  const safePage = Math.min(page, totalPages - 1)
+                  const paged = list.slice(safePage * pageSize, (safePage + 1) * pageSize)
+                  return paged.map((r: any) => {
+                    const rid = r.request_id || ''
+                    const endpoint = (r.source_table || '').split('.').pop() || ''
+                    const status = r.status_code
+                    const isErr = status != null && status >= 400
+                    const modelShort = r.model ? (r.model.length > 22 ? r.model.slice(0, 22) + '…' : r.model) : '—'
+                    return (
+                      <div
+                        key={`${r.source_table}::${rid}`}
+                        className="grid grid-cols-12 gap-3 py-3 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/40"
+                        onClick={() => setSelected({ source_table: r.source_table, request_id: rid })}
+                      >
+                        <div className="col-span-2 truncate font-mono text-xs" title={r.source_table}>{endpoint}</div>
+                        <div className="col-span-2 truncate font-mono text-xs">{rid.slice(0, 36)}</div>
+                        <div className="col-span-2 text-xs text-gray-500">
+                          {r.request_time ? format(new Date(r.request_time), 'yyyy-MM-dd HH:mm:ss') : '—'}
+                        </div>
+                        <div className="col-span-2 truncate text-xs text-gray-600 dark:text-gray-300" title={r.model || ''}>{modelShort}</div>
+                        <div>
+                          <Badge variant={isErr ? 'error' : status != null ? 'success' : 'default'} className="text-[10px]">
+                            {status ?? '—'}
+                          </Badge>
+                        </div>
+                        <div className="text-xs text-right">{r.execution_ms != null ? msToReadable(Number(r.execution_ms)) : '—'}</div>
+                        <div className="text-xs text-right text-gray-600 dark:text-gray-300"
+                             title={r.input_tokens != null ? `in ${r.input_tokens} / out ${r.output_tokens || 0}` : ''}>
+                          {r.total_tokens != null ? Number(r.total_tokens).toLocaleString() : '—'}
+                        </div>
+                        <div className="truncate text-xs text-gray-500" title={r.requester || ''}>
+                          {r.requester || '—'}
+                        </div>
+                      </div>
+                    )
+                  })
+                })()}
+              </div>
+              <TablePagination page={page} totalItems={list.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+            </>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+function GatewayRequestDetailView({
+  sourceTable, requestId, onBack,
+}: { sourceTable: string; requestId: string; onBack: () => void }) {
+  const { data: detail, isLoading } = useGatewayLogDetail(sourceTable, requestId)
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-12 text-gray-400">
+        <Loader2 className="w-6 h-6 animate-spin mr-3" /> Loading request detail…
+      </div>
+    )
+  }
+  if (!detail) {
+    return (
+      <div className="space-y-4">
+        <button onClick={onBack} className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+          <ArrowLeft className="w-4 h-4" /> Back to gateway requests
+        </button>
+        <Card><CardContent className="py-12 text-center text-gray-400">
+          Request detail not found.
+        </CardContent></Card>
+      </div>
+    )
+  }
+
+  const statusCode = (detail as any).status_code
+  const isErr = statusCode != null && statusCode >= 400
+
+  return (
+    <div className="space-y-4">
+      <button onClick={onBack} className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+        <ArrowLeft className="w-4 h-4" /> Back to gateway requests
+      </button>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <span className="font-mono text-sm">{(detail as any).request_id}</span>
+            <Badge variant={isErr ? 'error' : 'success'} className="text-[10px]">
+              {statusCode ?? '—'}
+            </Badge>
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+            <MetadataRow label="Endpoint" value={(detail as any).source_table} />
+            <MetadataRow label="Model" value={(detail as any).model || '—'} />
+            <MetadataRow label="Latency" value={(detail as any).execution_ms != null ? msToReadable(Number((detail as any).execution_ms)) : '—'} />
+            <MetadataRow label="Time" value={(detail as any).request_time ? format(new Date((detail as any).request_time), 'yyyy-MM-dd HH:mm:ss') : '—'} />
+            <MetadataRow label="Total Tokens" value={(detail as any).total_tokens != null ? Number((detail as any).total_tokens).toLocaleString() : '—'} />
+            <MetadataRow label="Input / Output" value={(detail as any).input_tokens != null ? `${(detail as any).input_tokens} / ${(detail as any).output_tokens || 0}` : '—'} />
+            <MetadataRow label="Finish Reason" value={(detail as any).finish_reason || '—'} />
+            <MetadataRow label="Tool Calls" value={(detail as any).tool_call_count != null ? String((detail as any).tool_call_count) : '—'} />
+            <MetadataRow label="Requester" value={(detail as any).requester || '—'} />
+            <MetadataRow label="Served Entity" value={(detail as any).served_entity_id || '—'} />
+            <MetadataRow label="Client Request ID" value={(detail as any).client_request_id || '—'} />
+            <MetadataRow label="Request Size" value={(detail as any).request_size_bytes != null ? `${(detail as any).request_size_bytes} B` : '—'} />
+            <MetadataRow label="Response Size" value={(detail as any).response_size_bytes != null ? `${(detail as any).response_size_bytes} B` : '—'} />
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2"><CardTitle className="text-base">Request payload</CardTitle></CardHeader>
+        <CardContent>
+          <pre className="text-xs font-mono overflow-auto max-h-96 bg-gray-50 dark:bg-gray-800 p-3 rounded">
+            {(() => {
+              const v = (detail as any).request_payload || ''
+              try { return JSON.stringify(JSON.parse(v), null, 2) } catch { return v || '(empty)' }
+            })()}
+          </pre>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2"><CardTitle className="text-base">Response payload</CardTitle></CardHeader>
+        <CardContent>
+          <pre className="text-xs font-mono overflow-auto max-h-96 bg-gray-50 dark:bg-gray-800 p-3 rounded">
+            {(() => {
+              const v = (detail as any).response_payload || ''
+              try { return JSON.stringify(JSON.parse(v), null, 2) } catch { return v || '(empty)' }
+            })()}
+          </pre>
+        </CardContent>
+      </Card>
     </div>
   )
 }

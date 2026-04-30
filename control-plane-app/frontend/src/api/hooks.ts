@@ -218,8 +218,10 @@ export function useMlflowExperiments(workspaceId?: string | null) {
   return useQuery({
     queryKey: ['mlflow', 'experiments', workspaceId],
     queryFn: async () => {
-      const params: Record<string, string> = {}
-      if (workspaceId) params.workspace_id = workspaceId
+      // Default to account-wide cache when no specific workspace is selected,
+      // otherwise the local-MLflow REST path returns 0 rows even though the
+      // Lakebase cache is populated by the discovery workflow.
+      const params: Record<string, string> = { workspace_id: workspaceId || 'all' }
       const { data } = await apiClient.get('/mlflow/experiments', { params })
       return data as any[]
     },
@@ -230,21 +232,21 @@ export function useMlflowRuns(experimentIds?: string, workspaceId?: string | nul
   return useQuery({
     queryKey: ['mlflow', 'runs', experimentIds, workspaceId],
     queryFn: async () => {
-      const params: Record<string, string> = {}
+      const params: Record<string, string> = { workspace_id: workspaceId || 'all' }
       if (experimentIds) params.experiment_ids = experimentIds
-      if (workspaceId) params.workspace_id = workspaceId
       const { data } = await apiClient.get('/mlflow/runs', { params })
       return data as any[]
     },
   })
 }
 
-export function useMlflowTraces(workspaceId?: string | null) {
+export function useMlflowTraces(workspaceId?: string | null, windowDays?: number | null) {
   return useQuery({
-    queryKey: ['mlflow', 'traces', workspaceId],
+    queryKey: ['mlflow', 'traces', workspaceId, windowDays],
     queryFn: async () => {
       const params: Record<string, string> = {}
       if (workspaceId) params.workspace_id = workspaceId
+      if (windowDays) params.window_days = String(windowDays)
       const { data } = await apiClient.get('/mlflow/traces', { params })
       return data as any[]
     },
@@ -264,12 +266,49 @@ export function useMlflowTraceDetail(requestId: string | null, workspaceId?: str
   })
 }
 
+// ── Gateway inference logs (Tier 2a) ──────────────────────────────
+
+export function useGatewayLogs(windowDays?: number | null, sourceTable?: string | null) {
+  return useQuery({
+    queryKey: ['gateway-logs', 'list', windowDays, sourceTable],
+    queryFn: async () => {
+      const params: Record<string, string> = {}
+      if (windowDays) params.window_days = String(windowDays)
+      if (sourceTable) params.source_table = sourceTable
+      const { data } = await apiClient.get('/gateway-logs', { params })
+      return data as any[]
+    },
+  })
+}
+
+export function useGatewayLogSources() {
+  return useQuery({
+    queryKey: ['gateway-logs', 'sources'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway-logs/sources')
+      return data as any[]
+    },
+  })
+}
+
+export function useGatewayLogDetail(sourceTable: string | null, requestId: string | null) {
+  return useQuery({
+    queryKey: ['gateway-logs', 'detail', sourceTable, requestId],
+    queryFn: async () => {
+      const { data } = await apiClient.get(
+        `/gateway-logs/${encodeURIComponent(sourceTable!)}/${encodeURIComponent(requestId!)}`
+      )
+      return data
+    },
+    enabled: !!sourceTable && !!requestId,
+  })
+}
+
 export function useMlflowModels(workspaceId?: string | null) {
   return useQuery({
     queryKey: ['mlflow', 'models', workspaceId],
     queryFn: async () => {
-      const params: Record<string, string> = {}
-      if (workspaceId) params.workspace_id = workspaceId
+      const params: Record<string, string> = { workspace_id: workspaceId || 'all' }
       const { data } = await apiClient.get('/mlflow/models', { params })
       return data as any[]
     },
@@ -295,6 +334,20 @@ export function useMlflowObservabilityWorkspaces() {
       return data as Array<{ workspace_id: string; trace_count: number; last_synced: string }>
     },
     staleTime: 60_000,
+  })
+}
+
+/** Map of workspace_id → host URL (e.g., 'https://my-ws.cloud.databricks.com').
+ *  Used to build "Open in MLflow" links that route to each record's owning
+ *  workspace rather than the deploy workspace. */
+export function useWorkspaceHosts() {
+  return useQuery({
+    queryKey: ['mlflow', 'workspace-hosts'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/mlflow/workspace-hosts')
+      return (data || {}) as Record<string, string>
+    },
+    staleTime: 5 * 60_000,
   })
 }
 

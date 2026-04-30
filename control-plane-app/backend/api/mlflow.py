@@ -113,22 +113,19 @@ async def list_traces(
     filter_string: str = Query(""),
     max_results: int = Query(10000, le=100000),
     workspace_id: Optional[str] = Query(None, description="Workspace ID, 'all' for all workspaces"),
+    window_days: Optional[int] = Query(None, ge=1, le=365, description="Time window in days (e.g. 7/14/30/90)"),
 ):
     """Search MLflow traces. All data comes from Lakebase cache (populated by scheduled workflow)."""
     try:
-        if workspace_id == "all" or not workspace_id:
-            # All workspaces (including current) — read everything from cache
-            return mlflow_service.get_cached_traces(None, max_results)
-        else:
-            # Specific workspace
-            return mlflow_service.get_cached_traces(workspace_id, max_results)
+        ws = None if (workspace_id == "all" or not workspace_id) else workspace_id
+        return mlflow_service.get_cached_traces(ws, max_results, window_days=window_days)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"MLflow API error: {e}")
 
 
-@router.get("/traces/{request_id}")
+@router.get("/traces/{request_id:path}")
 async def get_trace_detail(
     request_id: str,
     request: Request,
@@ -195,6 +192,20 @@ async def list_observability_workspaces():
         return mlflow_service.get_observability_workspaces()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"MLflow API error: {e}")
+
+
+@router.get("/workspace-hosts")
+async def list_workspace_hosts():
+    """Return the workspace_id → host URL map from the registry.
+
+    Used by the frontend to build "Open in MLflow" links that route to the
+    correct workspace, not the deploy workspace.
+    """
+    try:
+        from backend.services.workspace_registry import get_all_workspace_hosts
+        return get_all_workspace_hosts()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Workspace registry error: {e}")
 
 
 @router.post("/refresh-cache")
