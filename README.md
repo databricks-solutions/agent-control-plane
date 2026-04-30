@@ -45,7 +45,33 @@ Combined monitoring for Vector Search and Lakebase. Overview tab shows total cos
 
 ### Observability
 
-Cross-workspace MLflow experiments, evaluation runs, and traces. Queries `system.mlflow.experiments_latest` and `system.mlflow.runs_latest` for account-wide visibility. Filter by workspace, view trace details, and identify which data source (system table or REST API) each record came from.
+Cross-workspace MLflow experiments, evaluation runs, and agent traces. Queries `system.mlflow.experiments_latest` and `system.mlflow.runs_latest` for account-wide visibility. Filter by workspace, view trace details, and identify which source each record came from.
+
+Trace discovery uses three complementary paths so coverage doesn't depend on a single backend:
+
+| Tier | Source | What it covers |
+|------|--------|----------------|
+| **1. Local default-backend MLflow** | MLflow tracking REST in the deploy workspace | Traces written to the workspace's default control-plane backend |
+| **2a. AI Gateway / Model Serving inference logs** | Unity Catalog SQL on `*_payload` tables | Request/response payloads + latency/status from any served endpoint with inference logging enabled, account-wide |
+| **2b. UC-stored MLflow traces** | Unity Catalog SQL on `*_otel_spans` and `trace_logs_*` tables | MLflow traces stored directly in UC (both OTel-spans and Databricks-native row-per-trace formats), account-wide |
+
+Tier 2a/2b are the cross-workspace path — UC governance is the only auth boundary, so a single discovery run can pull traces from any workspace whose tables are in the same metastore.
+
+**Tier 3 (cross-workspace REST fan-out for default-backend traces)** is on the roadmap and currently disabled. It would extend Tier 1 to remote workspaces by calling each workspace's MLflow tracking REST API directly, and is required for default-backend traces in workspaces other than where the discovery job runs.
+
+#### What your agents need to do for traces to exist
+
+The discovery tiers find what's already being written. To populate them, opt agents into the relevant Databricks feature:
+
+| Tier | What to enable on your agent / endpoint |
+|------|-----------------------------------------|
+| **1** | Use MLflow tracing in your agent code (`mlflow.trace`/autolog). Traces land in the deploy workspace's default MLflow tracking backend automatically. |
+| **2a** | Enable **inference table logging** on your Model Serving endpoint (or the equivalent **AI Gateway request logging** if the endpoint sits behind AI Gateway). Both write request/response payloads to a `<endpoint>_payload` Delta table in Unity Catalog. |
+| **2b** | Either (i) bind your MLflow experiment to a Unity Catalog trace location so traces materialize as `*_otel_spans` tables, or (ii) use Databricks-managed MLflow with a UC-bound experiment, which writes `trace_logs_<experiment_id>` tables. Either format is picked up automatically. |
+
+If none of these are enabled for an agent, no trace data will exist for the workflow to discover — the gap is upstream of the control plane.
+
+> **Coverage depends on what the discovery principal can read.** The Tier 2 paths use `system.information_schema.tables`, which is principal-filtered: a table only appears if the principal has at least `BROWSE`/`USE` along the catalog → schema → table chain. Reading rows additionally requires `SELECT` (or ownership). For account-wide coverage that auto-extends to new catalogs, run the discovery workflow as a **metastore admin** (or as a service principal that's a member of the metastore admin group). See [installation guide → Step 7](docs/installation.md#step-7-deploy-the-discovery-workflows) for the run-as configuration.
 
 ![Observability](docs/gifs/observability.gif)
 

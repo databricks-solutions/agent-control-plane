@@ -159,6 +159,37 @@ targets:
 
 For Provisioned Lakebase, leave `lakebase_endpoint_path` empty and set `lakebase_instance` to the instance name.
 
+#### Choose the discovery run-as principal
+
+Trace and gateway-log discovery (Tiers 2a and 2b) use Unity Catalog as the auth boundary. The workflow only sees catalogs, schemas, and tables that its **run-as principal** has been granted on, and `system.information_schema.tables` is principal-filtered — tables in catalogs without any grant are invisible.
+
+| Run-as principal | What it sees | When to use |
+|------------------|--------------|-------------|
+| **Metastore admin user / service principal** | All catalogs and tables in the metastore (metadata) + any tables the principal has `SELECT` on | Recommended. New catalogs auto-covered without per-catalog grants. |
+| **Regular user / service principal** | Only catalogs and schemas the principal has been explicitly granted on | Use when metastore-admin is not appropriate. Requires per-catalog `USE CATALOG + USE SCHEMA + SELECT` grants. |
+
+By default, the bundle runs the workflow as the deploying user. To run as a service principal instead, add a `run_as` block at the job level in `databricks.yml`:
+
+```yaml
+resources:
+  jobs:
+    agent_discovery:
+      run_as:
+        service_principal_name: <application-id-of-your-discovery-sp>
+```
+
+Then make sure that service principal is either:
+
+1. **A member of the metastore admin group** (recommended — covers new catalogs automatically). Add via the Account Console → Unity Catalog → Metastore → Admin group, or via SCIM/Terraform.
+2. **OR** explicitly granted on each catalog you want covered:
+   ```sql
+   GRANT USE CATALOG ON CATALOG <c> TO `<sp-application-id>`;
+   GRANT USE SCHEMA ON CATALOG <c> TO `<sp-application-id>`;
+   GRANT SELECT ON CATALOG <c> TO `<sp-application-id>`;
+   ```
+
+> **Important**: Metastore admin grants metadata visibility (you can see every catalog) and the ability to grant yourself privileges, but it does **not** auto-confer `SELECT` on data. To actually read traces, the principal still needs `SELECT` along the chain — the simplest path is for the metastore admin group to own the catalogs that should be covered, or to grant the group `SELECT ON CATALOG` for each.
+
 Then deploy and run:
 
 ```bash
@@ -214,6 +245,14 @@ After redeploy, add scopes in the UI and refresh — they should persist.
 
 ### Empty Observability page
 The workflow hasn't run yet, or `system.mlflow` access hasn't been granted. Check the workflow run output and Step 8 above.
+
+### Fewer traces than expected
+Trace coverage is bounded by two things: (a) which trace-producing features are enabled on the agents themselves, and (b) what the discovery run-as principal can see and read in Unity Catalog (see Step 7 → "Choose the discovery run-as principal"). Common causes:
+
+- **The agent isn't producing the kind of trace you expect.** Check the README's *"What your agents need to do for traces to exist"* table — Tier 1 needs MLflow tracing in code, Tier 2a needs inference-table or AI Gateway request logging on the endpoint, Tier 2b needs the experiment bound to a UC trace location. If none are enabled for an agent, no trace data exists for the workflow to find.
+- The run-as principal is not a metastore admin and has no grants on the catalog where the missing traces live. Either add it to the metastore admin group or grant explicit `USE CATALOG + USE SCHEMA + SELECT`.
+- Traces fall outside the retention window (`trace_retention_days`, default 90). Bump it via the bundle variable.
+- Traces live in a different workspace's default MLflow backend (not in Unity Catalog). Cross-workspace REST fan-out (Tier 3) is on the roadmap; until then, those traces are only visible from within their owning workspace.
 
 ### Lakebase connection errors
 Verify your `LAKEBASE_DNS` is correct and that you set exactly one of `LAKEBASE_ENDPOINT_PATH` (Autoscaling) or `LAKEBASE_INSTANCE` (Provisioned). The instance must be in the `AVAILABLE` state.

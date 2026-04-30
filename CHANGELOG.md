@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Trace discovery: Tier 2a (AI Gateway / Model Serving inference logs from `*_payload` UC tables) and Tier 2b (UC-stored MLflow traces from both `*_otel_spans` and `trace_logs_*` table formats), both account-wide via Unity Catalog SQL
+- Gateway Requests panel in Observability with payload deep-dive
+- Trace deep-dive view now serves UC-stored traces from the Lakebase cache (no MLflow REST round-trip)
+- Trace and gateway-log time-window selectors extended to 180d / 365d
+
+### Changed
+- Trace discovery's visibility model and run-as principal recommendation documented in README and installation guide
+- `observability_trace_details` lookup falls back to request_id-only when workspace_id is empty (UC traces have no owning workspace)
+
+### Notes
+- Tier 3 (cross-workspace MLflow REST fan-out for default-backend traces) is on the roadmap. Until then, default-backend traces are visible only from within their owning workspace; UC-stored traces and AI Gateway logs are covered account-wide.
+
 ## [0.2.0] - 2026-04-13
 
 ### Added
