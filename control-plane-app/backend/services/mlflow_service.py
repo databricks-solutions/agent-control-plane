@@ -709,8 +709,20 @@ def _parse_trace_info_to_detail(
     workspace_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Shared parsing for live + cached trace detail responses."""
-    meta = trace_info.get("trace_metadata", {}) or {}
-    tags = trace_info.get("tags", {}) or {}
+    # MLflow returns metadata + tags in two shapes depending on source:
+    #   - dict: {"key": "value", ...}                     (UC, MLflow 3.x cache)
+    #   - list: [{"key": "k", "value": "v"}, ...]         (MLflow REST raw)
+    # And there are two key names for the metadata bag: `trace_metadata`
+    # (older / cache) and `request_metadata` (MLflow REST). Normalize all
+    # variants to a flat dict before any `.get(...)` calls.
+    def _to_dict(v):
+        if isinstance(v, dict): return v
+        if isinstance(v, list):
+            return {p.get("key", ""): p.get("value", "") for p in v if isinstance(p, dict)}
+        return {}
+
+    meta = _to_dict(trace_info.get("trace_metadata") or trace_info.get("request_metadata"))
+    tags = _to_dict(trace_info.get("tags"))
 
     token_usage: Dict[str, Any] = {}
     try:
@@ -752,6 +764,46 @@ def _parse_trace_info_to_detail(
     if duration_uc is None and trace_info.get("start_time_unix_nano") and trace_info.get("end_time_unix_nano"):
         duration_uc = (int(trace_info["end_time_unix_nano"]) - int(trace_info["start_time_unix_nano"])) // 1_000_000
 
+    # Normalize timestamp + duration to ms — MLflow returns these in three
+    # different shapes across versions: numeric ms (search hit), ISO string
+    # (3.x detail), or "0.374s" duration string (3.x detail). Pick the
+    # numeric shape when present, parse the strings otherwise.
+    def _ts_to_ms(v):
+        if v is None or v == "": return None
+        if isinstance(v, (int, float)): return int(v)
+        if isinstance(v, str):
+            try: return int(v)
+            except ValueError: pass
+            try:
+                from datetime import datetime as _dt
+                return int(_dt.fromisoformat(v.replace("Z", "+00:00")).timestamp() * 1000)
+            except Exception: return None
+        return None
+
+    def _dur_to_ms(v):
+        if v is None or v == "": return None
+        if isinstance(v, (int, float)): return int(v)
+        if isinstance(v, str):
+            try: return int(v)
+            except ValueError: pass
+            # "0.374s" / "1.2s"
+            if v.endswith("s"):
+                try: return int(float(v[:-1]) * 1000)
+                except Exception: return None
+        return None
+
+    # Prefer the numeric search-hit fields over the string detail fields.
+    ts_ms = (
+        _ts_to_ms(trace_info.get("timestamp_ms"))
+        or _ts_to_ms(trace_info.get("request_time"))
+        or request_time_uc
+    )
+    dur_ms = (
+        _dur_to_ms(trace_info.get("execution_time_ms"))
+        or _dur_to_ms(trace_info.get("execution_duration"))
+        or duration_uc
+    )
+
     result: Dict[str, Any] = {
         "request_id": request_id,
         "trace_name": tags.get("mlflow.traceName") or trace_info.get("name") or "—",
@@ -759,8 +811,8 @@ def _parse_trace_info_to_detail(
             "mlflow_experiment", {}
         ).get("experiment_id"),
         "state": trace_info.get("state", "—"),
-        "request_time": trace_info.get("request_time") or (str(request_time_uc) if request_time_uc else None),
-        "execution_duration": trace_info.get("execution_duration") or duration_uc,
+        "request_time": str(ts_ms) if ts_ms is not None else None,
+        "execution_duration": dur_ms,
         "user_message": user_message or trace_info.get("request_preview") or None,
         "response": trace_info.get("response", ""),
         "response_preview": trace_info.get("response_preview", ""),
@@ -822,6 +874,17 @@ def _row_to_trace_detail(
         spans = td.get("spans")
     if isinstance(spans, list):
         detail["spans"] = spans
+    # Surface assessments (LLM-judge / human evaluators) — collected by the
+    # Tier 2b discovery into trace_data.assessments_json.
+    if isinstance(td, dict):
+        aj = td.get("assessments_json") or td.get("assessments")
+        if isinstance(aj, str) and aj:
+            try:
+                aj = _json.loads(aj)
+            except Exception:
+                aj = None
+        if isinstance(aj, list):
+            detail["assessments"] = aj
     detail["data_source"] = "cache"
     return detail
 

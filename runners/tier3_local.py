@@ -253,6 +253,70 @@ def get_trace_detail(ws_host, token, request_id):
     return None, (code, str(body)[:200])
 
 
+# Span fetching uses the MLflow Python client because the basic REST trace
+# endpoint only returns trace_info; spans live in artifact storage and only
+# the client knows how to assemble them. The client reads auth from env
+# vars (DATABRICKS_HOST / DATABRICKS_TOKEN), which is global state — guard
+# with a lock so concurrent workspace workers don't clobber each other.
+_mlflow_lock = threading.Lock()
+
+
+def fetch_span_data(ws_host: str, token: str, request_id: str):
+    """Return (spans_list, request_str, response_str, error_str) for a trace.
+
+    Uses mlflow.MlflowClient.get_trace which transparently handles MLflow's
+    artifact-store fetch. Returns ([], "", "", err) on missing data — that
+    case is normal (failed agents may not persist spans)."""
+    try:
+        from mlflow.tracking import MlflowClient
+    except ImportError:
+        return [], "", "", "mlflow not installed"
+    with _mlflow_lock:
+        prev_host = os.environ.get("DATABRICKS_HOST")
+        prev_tok = os.environ.get("DATABRICKS_TOKEN")
+        prev_uri = os.environ.get("MLFLOW_TRACKING_URI")
+        os.environ["DATABRICKS_HOST"] = ws_host
+        os.environ["DATABRICKS_TOKEN"] = token
+        os.environ["MLFLOW_TRACKING_URI"] = "databricks"
+        try:
+            client = MlflowClient(tracking_uri="databricks")
+            try:
+                trace = client.get_trace(request_id)
+            except Exception as e:
+                return [], "", "", str(e)[:120]
+            if not trace or not getattr(trace, "data", None):
+                return [], "", "", "empty"
+            data = trace.data
+            spans = []
+            for s in (getattr(data, "spans", None) or []):
+                # Span objects expose to_dict() in MLflow 3.x; fall back to
+                # a hand-rolled projection of the public attributes.
+                if hasattr(s, "to_dict"):
+                    try:
+                        spans.append(s.to_dict()); continue
+                    except Exception: pass
+                spans.append({
+                    "name": getattr(s, "name", None),
+                    "span_id": getattr(s, "span_id", None),
+                    "parent_id": getattr(s, "parent_id", None),
+                    "start_time_ns": getattr(s, "start_time_ns", None),
+                    "end_time_ns": getattr(s, "end_time_ns", None),
+                    "span_type": getattr(s, "span_type", None),
+                    "status": str(getattr(s, "status", None)),
+                    "inputs": getattr(s, "inputs", None),
+                    "outputs": getattr(s, "outputs", None),
+                    "attributes": getattr(s, "attributes", None),
+                })
+            req = getattr(data, "request", "") or ""
+            resp = getattr(data, "response", "") or ""
+            return spans, req, resp, None
+        finally:
+            # Restore env vars so other (non-MLflow) code paths aren't poisoned.
+            for k, v in (("DATABRICKS_HOST", prev_host), ("DATABRICKS_TOKEN", prev_tok), ("MLFLOW_TRACKING_URI", prev_uri)):
+                if v is None: os.environ.pop(k, None)
+                else: os.environ[k] = v
+
+
 # ── Lakebase write ────────────────────────────────────────────────
 
 def get_lakebase_creds(profile=None):
@@ -364,10 +428,14 @@ def trace_to_rows(workspace_id, ws_name, exp_id, trace_obj, detail_obj):
     response_raw = ""
     response_preview = ""
     user_message = ""
+    # MLflow detail response is one of two shapes — `{trace_info, trace_data}`
+    # at top level (3.x) or `{trace: {trace_info, trace_data}}` (older). Try
+    # both so we don't drop spans for no good reason.
+    td_outer = {}
     if detail_obj:
-        td = detail_obj.get("trace_data") or {}
-        request_raw = info.get("request") or td.get("request") or ""
-        response_raw = info.get("response") or td.get("response") or ""
+        td_outer = detail_obj.get("trace_data") or (detail_obj.get("trace") or {}).get("trace_data") or {}
+        request_raw = info.get("request") or td_outer.get("request") or ""
+        response_raw = info.get("response") or td_outer.get("response") or ""
         response_preview = info.get("response_preview") or ""
 
     # MLflow REST exposes request/response as values inside request_metadata
@@ -410,7 +478,7 @@ def trace_to_rows(workspace_id, ws_name, exp_id, trace_obj, detail_obj):
     detail_row = None
     if detail_obj:
         ti_json = json.dumps(info)
-        td_json = json.dumps(detail_obj.get("trace_data") or {})
+        td_json = json.dumps(td_outer or {})
         size_bytes = len(ti_json) + len(td_json)
         detail_row = {
             "workspace_id": str(workspace_id),
@@ -538,12 +606,32 @@ def process_workspace(w, args, progress, sp_client_id, sp_client_secret):
             continue
         # Fetch detail (best-effort; on error we still include the slim row)
         detail, derr = get_trace_detail(ws_host, token, rid)
-        tr, dr = trace_to_rows(ws_id, ws_name, exp_id, t, detail or {})
+        # Fetch full span data via the MLflow Python client. Failures here
+        # are expected for traces whose agent crashed before persisting
+        # spans — emit a slim row anyway.
+        spans, req_full, resp_full, span_err = fetch_span_data(ws_host, token, rid)
+        # Splice the spans into the detail's trace_data so trace_to_rows /
+        # the existing detail-row builder picks them up uniformly.
+        if detail is None:
+            detail = {}
+        # Both shapes — top-level trace_data and nested under 'trace':
+        td_top = detail.get("trace_data") or {}
+        if not isinstance(td_top, dict): td_top = {}
+        if spans:
+            td_top["spans"] = spans
+        if req_full and not td_top.get("request"): td_top["request"] = req_full
+        if resp_full and not td_top.get("response"): td_top["response"] = resp_full
+        detail["trace_data"] = td_top
+        tr, dr = trace_to_rows(ws_id, ws_name, exp_id, t, detail)
         trace_rows.append(tr)
         if dr:
             detail_rows.append(dr)
         if derr:
             errors.append((ws_name, f"detail {derr[0]} for {rid[:24]}"))
+        if span_err and span_err not in ("empty",):
+            # Don't flood logs with the routine "missing span data" message.
+            if "missing span data" not in span_err:
+                errors.append((ws_name, f"spans: {span_err[:80]}"))
 
     written_t, written_d = (0, 0)
     if not args.dry_run and trace_rows:

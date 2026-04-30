@@ -52,6 +52,7 @@ import {
   Server,
   Calendar,
   Info,
+  Wrench,
 } from 'lucide-react'
 import { DB_RED_SHADES } from '@/lib/brand'
 
@@ -529,16 +530,41 @@ function TraceDetailView({
         <button onClick={onBack} className="inline-flex items-center gap-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 transition-colors">
           <ArrowLeft className="w-4 h-4" /> Back to traces
         </button>
-        {workspaceUrl && detail.experiment_id && (
-          <a
-            href={`${workspaceUrl}/ml/experiments/${detail.experiment_id}?searchFilter=request_id%3D%27${requestId}%27&compareRunsMode=TRACES`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800"
-          >
-            View in MLflow <ExternalLink className="w-3 h-3" />
-          </a>
-        )}
+        <div className="flex items-center gap-3">
+          {/* Source notebook link — uses metadata.mlflow.databricks.webappURL
+              (a direct host URL) if present, else builds from the registry.
+              Renders only when notebook id + workspace are known. */}
+          {(() => {
+            const meta = (detail as any).metadata || {}
+            const nbId = meta['mlflow.databricks.notebookID']
+            const sourceWsId = meta['mlflow.databricks.workspaceID'] || (detail as any).workspace_id
+            const direct = meta['mlflow.databricks.webappURL']
+            const base = direct || workspaceUrl
+            if (!nbId || !base) return null
+            const wsParam = sourceWsId ? `?o=${sourceWsId}` : ''
+            return (
+              <a
+                href={`${String(base).replace(/\/$/, '')}${wsParam}#notebook/${nbId}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800"
+                title={meta['mlflow.source.name'] || ''}
+              >
+                View source notebook <ExternalLink className="w-3 h-3" />
+              </a>
+            )
+          })()}
+          {workspaceUrl && detail.experiment_id && (
+            <a
+              href={`${workspaceUrl}/ml/experiments/${detail.experiment_id}?searchFilter=request_id%3D%27${requestId}%27&compareRunsMode=TRACES`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800"
+            >
+              View in MLflow <ExternalLink className="w-3 h-3" />
+            </a>
+          )}
+        </div>
       </div>
 
       {/* Header card */}
@@ -721,6 +747,16 @@ function TraceDetailView({
           </CardContent>
         </Card>
       </div>
+
+      {/* Assessments — only renders when the trace has eval/quality data */}
+      {Array.isArray((detail as any).assessments) && (detail as any).assessments.length > 0 && (
+        <AssessmentsCard assessments={(detail as any).assessments} />
+      )}
+
+      {/* Tool-call breakdown — only renders when the trace has TOOL spans */}
+      {Array.isArray((detail as any).spans) && (detail as any).spans.length > 0 && (
+        <ToolCallBreakdown spans={(detail as any).spans} />
+      )}
 
       {/* Span waterfall — hierarchical timeline of all spans in this trace */}
       {Array.isArray((detail as any).spans) && (detail as any).spans.length > 0 && (
@@ -1112,6 +1148,193 @@ function SpanWaterfall({ spans }: { spans: Span[] }) {
         )
       })()}
     </div>
+  )
+}
+
+/* ── Tool-call breakdown ─────────────────────────────────────── */
+
+/** Aggregate spans where kind=TOOL by name and render a sortable summary
+ *  table. Renders nothing when the trace has no tool spans (so we don't
+ *  reserve an empty card for retrieval-only or LLM-only traces).
+ *
+ *  The "% of trace" bar is the tool's total wall-clock time divided by the
+ *  trace's wall-clock duration (max end - min start across all spans).
+ *  Tool spans can run in parallel so per-row bars may sum past 100% — that's
+ *  meaningful and we show it without clamping. */
+function ToolCallBreakdown({ spans }: { spans: Span[] }) {
+  const toolSpans = (spans || []).filter((s) => spanKind(s) === 'TOOL')
+  if (!toolSpans.length) return null
+
+  // Trace wall-clock from all spans (not just tools) so the % reflects the
+  // tool's share of the user-visible latency.
+  const allStarts = (spans || []).map(spanStartMs).filter((n) => n > 0)
+  const allEnds = (spans || []).map(spanEndMs).filter((n) => n > 0)
+  const traceMs = allStarts.length && allEnds.length ? Math.max(...allEnds) - Math.min(...allStarts) : 0
+
+  type Row = { name: string; count: number; totalMs: number; errors: number }
+  const groups = new Map<string, Row>()
+  let totalErrs = 0
+  for (const s of toolSpans) {
+    const name = (s.name && String(s.name)) || 'unknown'
+    const start = spanStartMs(s)
+    const end = spanEndMs(s)
+    const dur = end > start ? end - start : 0
+    const isErr = spanStatusOk(s) === 'ERROR'
+    if (isErr) totalErrs += 1
+    const g = groups.get(name) || { name, count: 0, totalMs: 0, errors: 0 }
+    g.count += 1
+    g.totalMs += dur
+    if (isErr) g.errors += 1
+    groups.set(name, g)
+  }
+  const rows = Array.from(groups.values()).sort((a, b) => b.totalMs - a.totalMs)
+  const totalToolMs = rows.reduce((s, r) => s + r.totalMs, 0)
+  const color = KIND_COLORS.TOOL
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base flex items-center gap-2">
+          <Wrench className="w-4 h-4" /> Tool Calls ({toolSpans.length})
+          <span className="text-[11px] text-gray-500 dark:text-gray-400 font-normal ml-2">
+            {rows.length} unique · {msToReadable(totalToolMs)} total
+            {totalErrs > 0 && <span className="ml-2 text-red-500">· {totalErrs} error{totalErrs===1?'':'s'}</span>}
+            {traceMs > 0 && <span className="ml-2">· {((totalToolMs / traceMs) * 100).toFixed(0)}% of trace wall time</span>}
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-[minmax(0,1.5fr)_3rem_4.5rem_4.5rem_3rem_minmax(0,2fr)] gap-2 px-1 py-1.5 text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
+          <div>Tool</div>
+          <div className="text-right">Count</div>
+          <div className="text-right">Total</div>
+          <div className="text-right">Avg</div>
+          <div className="text-right">Err</div>
+          <div>% of trace</div>
+        </div>
+        {rows.map((r) => {
+          const avg = r.count > 0 ? r.totalMs / r.count : 0
+          const pct = traceMs > 0 ? (r.totalMs / traceMs) * 100 : 0
+          // Cap visual bar at 100% but keep numeric label exact.
+          const barPct = Math.min(100, pct)
+          return (
+            <div
+              key={r.name}
+              className="grid grid-cols-[minmax(0,1.5fr)_3rem_4.5rem_4.5rem_3rem_minmax(0,2fr)] gap-2 px-1 py-1.5 text-xs border-b border-gray-100 dark:border-gray-800 last:border-0 items-center"
+            >
+              <div className="truncate font-medium text-gray-800 dark:text-gray-200" title={r.name}>{r.name}</div>
+              <div className="text-right">{r.count}</div>
+              <div className="text-right font-medium">{msToReadable(r.totalMs)}</div>
+              <div className="text-right text-gray-500 dark:text-gray-400">{msToReadable(Math.round(avg))}</div>
+              <div className="text-right">
+                {r.errors > 0 ? <span className="text-red-500 font-medium">{r.errors}</span> : <span className="text-gray-400">—</span>}
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="relative h-2 bg-gray-100 dark:bg-gray-700 rounded flex-1">
+                  <div className="absolute inset-y-0 left-0 rounded" style={{ width: `${barPct}%`, backgroundColor: color, opacity: 0.85 }} />
+                </div>
+                <span className="text-[10px] text-gray-500 dark:text-gray-400 tabular-nums w-9 text-right">{pct.toFixed(0)}%</span>
+              </div>
+            </div>
+          )
+        })}
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ── Assessments / eval-quality card ─────────────────────────── */
+
+type Assessment = {
+  assessment_id?: string
+  name?: string
+  source?: { source_id?: string; source_type?: string }
+  feedback?: { value?: any; numeric_value?: any }
+  expectation?: any
+  rationale?: string
+  create_time?: string
+  last_update_time?: string
+  metadata?: any
+  error?: any
+}
+
+/** Render quality / eval data attached to a trace. MLflow stores assessments
+ *  as an array per trace — each entry is a name + score (numeric or
+ *  categorical) + rationale + source (LLM judge, human, etc.). */
+function AssessmentsCard({ assessments }: { assessments: Assessment[] }) {
+  const list = (assessments || []).filter((a) => a && a.name)
+  if (!list.length) return null
+
+  // Group by source type for at-a-glance summary
+  const bySource: Record<string, number> = {}
+  for (const a of list) {
+    const st = a.source?.source_type || 'UNKNOWN'
+    bySource[st] = (bySource[st] || 0) + 1
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4" /> Assessments ({list.length})
+          <span className="text-[11px] text-gray-500 dark:text-gray-400 font-normal ml-2">
+            {Object.entries(bySource).map(([k, v]) => `${v} ${k}`).join(' · ')}
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-2">
+          {list.map((a, i) => {
+            // Feedback can be string ("yes"/"no"), number, or JSON-encoded.
+            let scoreText: string = '—'
+            const fbVal = a.feedback?.value
+            const fbNum = a.feedback?.numeric_value
+            if (fbNum != null) scoreText = String(fbNum)
+            else if (fbVal != null) {
+              if (typeof fbVal === 'string') {
+                // MLflow sometimes wraps strings in extra quotes.
+                try { const p = JSON.parse(fbVal); scoreText = String(p) } catch { scoreText = fbVal }
+              } else {
+                scoreText = JSON.stringify(fbVal)
+              }
+            } else if (a.expectation != null) {
+              scoreText = typeof a.expectation === 'string' ? a.expectation : JSON.stringify(a.expectation).slice(0, 60)
+            }
+            const isErr = a.error || (typeof scoreText === 'string' && /^"?(no|fail|failed|error)"?$/i.test(scoreText.trim()))
+            const isPass = !isErr && (typeof scoreText === 'string' && /^"?(yes|pass|true|ok)"?$/i.test(scoreText.trim()))
+            const badgeVariant: any = isErr ? 'error' : isPass ? 'success' : 'default'
+            return (
+              <div key={a.assessment_id || i} className="border border-gray-200 dark:border-gray-700 rounded-md p-2.5">
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <span className="font-medium text-sm text-gray-900 dark:text-gray-200 truncate" title={a.name}>{a.name}</span>
+                    <Badge variant={badgeVariant} className="text-[10px] flex-shrink-0">{scoreText}</Badge>
+                    {a.source?.source_type && (
+                      <span className="text-[10px] text-gray-400 uppercase tracking-wide flex-shrink-0">
+                        {a.source.source_type}
+                      </span>
+                    )}
+                  </div>
+                  {a.create_time && (
+                    <span className="text-[10px] text-gray-400 flex-shrink-0">
+                      {(() => {
+                        const t = Date.parse(a.create_time)
+                        return Number.isFinite(t) ? format(new Date(t), 'MMM dd HH:mm') : ''
+                      })()}
+                    </span>
+                  )}
+                </div>
+                {a.rationale && (
+                  <div className="text-xs text-gray-600 dark:text-gray-300 whitespace-pre-wrap leading-relaxed">
+                    {a.rationale.length > 400 ? a.rationale.slice(0, 400) + '…' : a.rationale}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 
