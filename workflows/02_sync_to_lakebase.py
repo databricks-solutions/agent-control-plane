@@ -508,18 +508,61 @@ except Exception as exc:
 # COMMAND ----------
 
 TRACES_DELTA = f"{CATALOG}.{SCHEMA}.observability_traces"
+TRACE_DETAILS_DELTA = f"{CATALOG}.{SCHEMA}.observability_trace_details"
+TRACES_UC_OTEL_DELTA = f"{CATALOG}.{SCHEMA}.observability_traces_uc_otel"
+TRACE_DETAILS_UC_OTEL_DELTA = f"{CATALOG}.{SCHEMA}.observability_trace_details_uc_otel"
 trace_count = 0
+trace_detail_count = 0
 
 print(f"▸ Reading traces from Delta: {TRACES_DELTA} ...")
 try:
     traces_df = spark.read.table(TRACES_DELTA)
     delta_trace_count = traces_df.count()
-    print(f"  ✅ {delta_trace_count} traces in Delta table")
+    print(f"  ✅ {delta_trace_count} traces in Delta table (default-backend, REST)")
     delta_traces = traces_df.collect()
 except Exception as exc:
     print(f"  ⚠️  Could not read traces Delta table: {exc}")
     delta_traces = []
     delta_trace_count = 0
+
+print(f"▸ Reading UC-OTel traces from Delta: {TRACES_UC_OTEL_DELTA} ...")
+try:
+    uc_traces_df = spark.read.table(TRACES_UC_OTEL_DELTA)
+    delta_uc_trace_count = uc_traces_df.count()
+    print(f"  ✅ {delta_uc_trace_count} traces in Delta table (Tier 2b: UC OTel)")
+    delta_uc_traces = uc_traces_df.collect()
+except Exception as exc:
+    print(f"  ⚠️  Could not read UC OTel traces Delta table: {exc}")
+    delta_uc_traces = []
+    delta_uc_trace_count = 0
+
+print(f"▸ Reading trace details from Delta: {TRACE_DETAILS_DELTA} ...")
+try:
+    details_df = spark.read.table(TRACE_DETAILS_DELTA)
+    delta_detail_count = details_df.count()
+    print(f"  ✅ {delta_detail_count} trace details in Delta table (default-backend, REST)")
+    delta_trace_details = details_df.collect()
+except Exception as exc:
+    print(f"  ⚠️  Could not read trace details Delta table: {exc}")
+    delta_trace_details = []
+    delta_detail_count = 0
+
+print(f"▸ Reading UC-OTel trace details from Delta: {TRACE_DETAILS_UC_OTEL_DELTA} ...")
+try:
+    uc_details_df = spark.read.table(TRACE_DETAILS_UC_OTEL_DELTA)
+    delta_uc_detail_count = uc_details_df.count()
+    print(f"  ✅ {delta_uc_detail_count} trace details in Delta table (Tier 2b: UC OTel)")
+    delta_uc_trace_details = uc_details_df.collect()
+except Exception as exc:
+    print(f"  ⚠️  Could not read UC OTel trace details Delta table: {exc}")
+    delta_uc_trace_details = []
+    delta_uc_detail_count = 0
+
+# Combine REST and UC OTel rows for the upsert path below — both go to the
+# same Lakebase tables, with `data_source`/`source_type` distinguishing them.
+delta_traces = list(delta_traces) + list(delta_uc_traces)
+delta_trace_details = list(delta_trace_details) + list(delta_uc_trace_details)
+print(f"▸ Combined: {len(delta_traces)} trace rows, {len(delta_trace_details)} detail rows for Lakebase upsert")
 
 # COMMAND ----------
 
@@ -572,6 +615,15 @@ with obs_conn.cursor() as cur:
         "CREATE INDEX IF NOT EXISTS idx_ot_ws ON observability_traces (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_ot_time ON observability_traces (request_time DESC)",
         "ALTER TABLE observability_traces ADD COLUMN IF NOT EXISTS data_source TEXT DEFAULT 'rest_api'",
+        """CREATE TABLE IF NOT EXISTS observability_trace_details (
+            workspace_id TEXT NOT NULL, request_id TEXT NOT NULL,
+            experiment_id TEXT, trace_info JSONB, trace_data JSONB,
+            request_raw TEXT, response_raw TEXT,
+            size_bytes INTEGER, source_type TEXT,
+            cached_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (workspace_id, request_id))""",
+        "CREATE INDEX IF NOT EXISTS idx_otd_ws     ON observability_trace_details (workspace_id)",
+        "CREATE INDEX IF NOT EXISTS idx_otd_cached ON observability_trace_details (cached_at DESC)",
     ]:
         try:
             cur.execute(ddl)
@@ -688,13 +740,68 @@ print(f"✅ Upserted {run_count} runs (system_table)")
 # COMMAND ----------
 
 # Upsert traces (from Delta table populated by discover_observability task)
+# We enrich each slim trace row with fields parsed from the matching detail
+# row's trace_info JSON — token_usage, user_message, response_preview — so the
+# list endpoint surfaces them without an extra JSONB read per row.
 trace_count = 0
+
+# Build a lookup of detail rows by request_id (UC traces have empty workspace_id,
+# default-backend traces are scoped — request_id is unique enough either way).
+details_by_rid: dict = {}
+for d in delta_trace_details:
+    if d.request_id:
+        details_by_rid[d.request_id] = d
+
+
+def _enrich_from_trace_info(rid: str) -> tuple:
+    """Return (token_usage_json, user_message, response_preview) for a trace."""
+    d = details_by_rid.get(rid)
+    if not d:
+        return ("{}", "", "")
+    ti_raw = d.trace_info or "{}"
+    try:
+        ti = json.loads(ti_raw) if isinstance(ti_raw, str) else (ti_raw or {})
+    except Exception:
+        ti = {}
+    meta = ti.get("trace_metadata") or {}
+    # token_usage lives under trace_metadata as a JSON-string value
+    tu_str = meta.get("mlflow.trace.tokenUsage") or "{}"
+    try:
+        tu_obj = json.loads(tu_str) if isinstance(tu_str, str) else (tu_str or {})
+    except Exception:
+        tu_obj = {}
+    tu_json = json.dumps(tu_obj) if isinstance(tu_obj, dict) else "{}"
+    # Best-effort user message + response preview — populated by the parser for
+    # default-backend traces (request_preview tag) and explicitly for UC traces.
+    user_msg = ti.get("request_preview") or ""
+    if not user_msg:
+        # Fallback: pull first user-role text from the parsed request payload
+        req_raw = d.request_raw or ""
+        try:
+            req_parsed = json.loads(req_raw) if req_raw else {}
+            for inp in (req_parsed.get("input") or []):
+                if isinstance(inp, dict) and inp.get("role") == "user":
+                    c = inp.get("content")
+                    if isinstance(c, str):
+                        user_msg = c; break
+                    if isinstance(c, list):
+                        for piece in c:
+                            if isinstance(piece, dict) and piece.get("text"):
+                                user_msg = piece["text"]; break
+                        if user_msg: break
+        except Exception:
+            pass
+    resp_preview = ti.get("response_preview") or ""
+    return (tu_json, user_msg or "", resp_preview or "")
+
+
 if delta_traces:
     trace_values = []
     for r in delta_traces:
         rid = r.request_id
         if not rid:
             continue
+        token_usage_json, user_msg, resp_preview = _enrich_from_trace_info(rid)
         trace_values.append((
             rid,
             r.workspace_id or "",
@@ -703,7 +810,9 @@ if delta_traces:
             r.state or "",
             r.request_time or "",
             r.execution_duration,
-            json.dumps({}),  # token_usage
+            user_msg,
+            resp_preview,
+            token_usage_json,
             r.model_id or "",
             r.session_id or "",
             r.trace_user or "",
@@ -717,12 +826,14 @@ if delta_traces:
             cur,
             """INSERT INTO observability_traces
                (request_id, workspace_id, experiment_id, trace_name, state,
-                request_time, execution_duration, token_usage, model_id,
-                session_id, trace_user, source, tags, data_source, last_synced)
+                request_time, execution_duration, user_message, response_preview,
+                token_usage, model_id, session_id, trace_user, source, tags,
+                data_source, last_synced)
                VALUES %s
                ON CONFLICT (workspace_id, request_id) DO UPDATE SET
                    trace_name = EXCLUDED.trace_name, state = EXCLUDED.state,
                    request_time = EXCLUDED.request_time, execution_duration = EXCLUDED.execution_duration,
+                   user_message = EXCLUDED.user_message, response_preview = EXCLUDED.response_preview,
                    token_usage = EXCLUDED.token_usage, model_id = EXCLUDED.model_id,
                    session_id = EXCLUDED.session_id, trace_user = EXCLUDED.trace_user,
                    source = EXCLUDED.source, tags = EXCLUDED.tags,
@@ -731,7 +842,217 @@ if delta_traces:
         )
         obs_conn.commit()
         trace_count = len(trace_values)
-print(f"✅ Upserted {trace_count} traces (from Delta)")
+print(f"✅ Upserted {trace_count} traces (from Delta, enriched from trace_info)")
+
+# COMMAND ----------
+
+# Upsert trace details (full spans + payloads) for cross-workspace cache.
+# Note: UC-OTel traces have empty workspace_id (UC data is account-level, not
+# workspace-scoped); we accept empty workspace_id here since the URI-form
+# request_id is globally unique on its own.
+if delta_trace_details:
+    detail_values = []
+    for r in delta_trace_details:
+        rid = r.request_id
+        if not rid:
+            continue
+        ws_id = r.workspace_id or ""
+        detail_values.append((
+            ws_id,
+            rid,
+            r.experiment_id or "",
+            r.trace_info or "{}",
+            r.trace_data or "{}",
+            r.request_raw or "",
+            r.response_raw or "",
+            int(r.size_bytes or 0),
+            r.source_type or "mlflow_rest",
+            now,
+        ))
+    if detail_values:
+        with obs_conn.cursor() as cur:
+            execute_values(
+                cur,
+                """INSERT INTO observability_trace_details
+                   (workspace_id, request_id, experiment_id, trace_info, trace_data,
+                    request_raw, response_raw, size_bytes, source_type, cached_at)
+                   VALUES %s
+                   ON CONFLICT (workspace_id, request_id) DO UPDATE SET
+                       experiment_id = EXCLUDED.experiment_id,
+                       trace_info = EXCLUDED.trace_info,
+                       trace_data = EXCLUDED.trace_data,
+                       request_raw = EXCLUDED.request_raw,
+                       response_raw = EXCLUDED.response_raw,
+                       size_bytes = EXCLUDED.size_bytes,
+                       source_type = EXCLUDED.source_type,
+                       cached_at = EXCLUDED.cached_at""",
+                detail_values, page_size=50,
+            )
+            obs_conn.commit()
+            trace_detail_count = len(detail_values)
+print(f"✅ Upserted {trace_detail_count} trace details (from Delta)")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Phase 2c: Sync AI Gateway / Inference Logs (Tier 2a, Delta → Lakebase)
+
+# COMMAND ----------
+
+GATEWAY_LOGS_DELTA = f"{CATALOG}.{SCHEMA}.gateway_inference_logs"
+gw_log_count = 0
+
+print(f"▸ Reading inference logs from Delta: {GATEWAY_LOGS_DELTA} ...")
+try:
+    gw_logs_df = spark.read.table(GATEWAY_LOGS_DELTA)
+    gw_log_delta_count = gw_logs_df.count()
+    print(f"  ✅ {gw_log_delta_count} inference-log rows in Delta")
+    gw_log_rows = gw_logs_df.collect()
+except Exception as exc:
+    print(f"  ⚠️  Could not read inference logs Delta: {exc}")
+    gw_log_rows = []
+    gw_log_delta_count = 0
+
+# Ensure Lakebase target table
+with obs_conn.cursor() as cur:
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS gateway_inference_logs (
+            request_id          TEXT NOT NULL,
+            source_table        TEXT NOT NULL,
+            client_request_id   TEXT,
+            request_time        TIMESTAMP WITH TIME ZONE,
+            status_code         INTEGER,
+            execution_ms        BIGINT,
+            request_payload     TEXT,
+            response_payload    TEXT,
+            request_size_bytes  BIGINT,
+            response_size_bytes BIGINT,
+            served_entity_id    TEXT,
+            requester           TEXT,
+            last_synced         TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (source_table, request_id)
+        )
+    """)
+    # Extracted-payload columns — populated at sync time by parsing the JSON
+    # payload bodies. Best-effort across vendor shapes (OpenAI/Anthropic/etc.).
+    for col_ddl in (
+        "ALTER TABLE gateway_inference_logs ADD COLUMN IF NOT EXISTS model TEXT",
+        "ALTER TABLE gateway_inference_logs ADD COLUMN IF NOT EXISTS input_tokens BIGINT",
+        "ALTER TABLE gateway_inference_logs ADD COLUMN IF NOT EXISTS output_tokens BIGINT",
+        "ALTER TABLE gateway_inference_logs ADD COLUMN IF NOT EXISTS total_tokens BIGINT",
+        "ALTER TABLE gateway_inference_logs ADD COLUMN IF NOT EXISTS finish_reason TEXT",
+        "ALTER TABLE gateway_inference_logs ADD COLUMN IF NOT EXISTS tool_call_count INTEGER",
+    ):
+        try: cur.execute(col_ddl)
+        except Exception as e: print(f"  gw col DDL warn: {e}")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_gil_time   ON gateway_inference_logs (request_time DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_gil_source ON gateway_inference_logs (source_table)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_gil_status ON gateway_inference_logs (status_code)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_gil_model  ON gateway_inference_logs (model)")
+    obs_conn.commit()
+
+
+def _parse_gateway_payload(req_raw: str, resp_raw: str) -> dict:
+    """Best-effort extraction of model + token usage + finish reason.
+
+    Handles OpenAI-style (`response.model`, `response.usage.{prompt,completion,total}_tokens`)
+    and Anthropic-passthrough variants (`completion_tokens` ↔ `output_tokens`).
+    Returns dict with keys: model, input_tokens, output_tokens, total_tokens,
+    finish_reason, tool_call_count. Any field missing is None.
+    """
+    out = {"model": None, "input_tokens": None, "output_tokens": None,
+           "total_tokens": None, "finish_reason": None, "tool_call_count": None}
+    try:
+        rj = json.loads(req_raw) if req_raw else {}
+    except Exception:
+        rj = {}
+    try:
+        sj = json.loads(resp_raw) if resp_raw else {}
+    except Exception:
+        sj = {}
+    # Model: response.model > request.model
+    out["model"] = sj.get("model") or rj.get("model")
+    # Usage: support both OpenAI shape and Anthropic-passthrough shape
+    usage = sj.get("usage") or {}
+    if isinstance(usage, dict):
+        out["input_tokens"]  = usage.get("prompt_tokens") or usage.get("input_tokens")
+        out["output_tokens"] = usage.get("completion_tokens") or usage.get("output_tokens")
+        out["total_tokens"]  = usage.get("total_tokens")
+        if out["total_tokens"] is None and (out["input_tokens"] or out["output_tokens"]):
+            out["total_tokens"] = (out["input_tokens"] or 0) + (out["output_tokens"] or 0)
+    # Finish reason + tool call count from first choice
+    choices = sj.get("choices")
+    if isinstance(choices, list) and choices:
+        c0 = choices[0] or {}
+        out["finish_reason"] = c0.get("finish_reason")
+        msg = c0.get("message") or {}
+        tcs = msg.get("tool_calls") or []
+        if isinstance(tcs, list):
+            out["tool_call_count"] = len(tcs)
+    return out
+
+if gw_log_rows:
+    values = []
+    for r in gw_log_rows:
+        rid = r.request_id
+        src = r.source_table
+        if not rid or not src:
+            continue
+        parsed = _parse_gateway_payload(r.request_payload or "", r.response_payload or "")
+        values.append((
+            rid, src,
+            r.client_request_id,
+            r.request_time,
+            int(r.status_code) if r.status_code is not None else None,
+            int(r.execution_ms) if r.execution_ms is not None else None,
+            r.request_payload,
+            r.response_payload,
+            int(r.request_size_bytes) if r.request_size_bytes is not None else None,
+            int(r.response_size_bytes) if r.response_size_bytes is not None else None,
+            r.served_entity_id,
+            r.requester,
+            parsed["model"],
+            parsed["input_tokens"],
+            parsed["output_tokens"],
+            parsed["total_tokens"],
+            parsed["finish_reason"],
+            parsed["tool_call_count"],
+            now,
+        ))
+    if values:
+        with obs_conn.cursor() as cur:
+            execute_values(
+                cur,
+                """INSERT INTO gateway_inference_logs
+                   (request_id, source_table, client_request_id, request_time,
+                    status_code, execution_ms, request_payload, response_payload,
+                    request_size_bytes, response_size_bytes, served_entity_id,
+                    requester, model, input_tokens, output_tokens, total_tokens,
+                    finish_reason, tool_call_count, last_synced)
+                   VALUES %s
+                   ON CONFLICT (source_table, request_id) DO UPDATE SET
+                       client_request_id = EXCLUDED.client_request_id,
+                       request_time = EXCLUDED.request_time,
+                       status_code = EXCLUDED.status_code,
+                       execution_ms = EXCLUDED.execution_ms,
+                       request_payload = EXCLUDED.request_payload,
+                       response_payload = EXCLUDED.response_payload,
+                       request_size_bytes = EXCLUDED.request_size_bytes,
+                       response_size_bytes = EXCLUDED.response_size_bytes,
+                       served_entity_id = EXCLUDED.served_entity_id,
+                       requester = EXCLUDED.requester,
+                       model = EXCLUDED.model,
+                       input_tokens = EXCLUDED.input_tokens,
+                       output_tokens = EXCLUDED.output_tokens,
+                       total_tokens = EXCLUDED.total_tokens,
+                       finish_reason = EXCLUDED.finish_reason,
+                       tool_call_count = EXCLUDED.tool_call_count,
+                       last_synced = EXCLUDED.last_synced""",
+                values, page_size=200,
+            )
+            obs_conn.commit()
+            gw_log_count = len(values)
+print(f"✅ Upserted {gw_log_count} gateway inference-log rows (from Delta, payload-enriched)")
 
 # COMMAND ----------
 
@@ -1158,7 +1479,13 @@ result = {
     "observability_experiments": exp_count,
     "observability_runs": run_count,
     "observability_traces": trace_count,
-    "traces_from_delta": delta_trace_count,
+    "observability_trace_details": trace_detail_count,
+    "traces_from_delta_default": delta_trace_count,
+    "traces_from_delta_uc_otel": delta_uc_trace_count,
+    "trace_details_from_delta_default": delta_detail_count,
+    "trace_details_from_delta_uc_otel": delta_uc_detail_count,
+    "gateway_inference_logs": gw_log_count,
+    "gateway_inference_logs_from_delta": gw_log_delta_count,
     "vs_endpoints": vs_ep_count,
     "vs_indexes": vs_idx_count,
     "lakebase_instances": lb_inst_count,

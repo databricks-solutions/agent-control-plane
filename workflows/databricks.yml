@@ -23,6 +23,24 @@ variables:
     description: Databricks account ID for cross-workspace operations (find in your workspace URL or account console)
   warehouse_id:
     description: SQL warehouse ID for system table queries
+  trace_retention_days:
+    default: "90"
+    description: "Time window (days) for trace detail caching. UI offers 7/14/30/90; this is the upper bound the discovery workflow caches."
+  enable_cross_workspace_rest_fanout:
+    default: "false"
+    description: "Tier 3 prototype (parked). When 'true', the observability discovery task fans out MLflow REST calls across all workspaces using SP creds. Off by default — destination workspaces reject these calls today (HTTP 403 cert validation). Cross-workspace observability is served by UC SQL paths instead (Tier 2)."
+  gateway_log_retention_days:
+    default: "30"
+    description: "Time window (days) for AI Gateway / inference-log payload caching."
+  gateway_log_max_rows_per_table:
+    default: "10000"
+    description: "Per-source-table cap on rows pulled per inference-log discovery run."
+  discovery_sp_secret_scope:
+    default: ""
+    description: "Databricks secret scope holding the discovery SP's OAuth creds (keys: client_id, client_secret). Empty disables SP-based cross-workspace auth."
+  narrow_test_workspace_id:
+    default: ""
+    description: "If set, observability discovery only fans out to this single workspace_id. Use during SP rollout testing; leave empty for full fan-out."
 
 resources:
   jobs:
@@ -50,7 +68,7 @@ resources:
           environment_key: default
 
         - task_key: discover_observability
-          description: "Discover MLflow traces cross-workspace via SDK → Delta table"
+          description: "Tier 1: discover local-workspace MLflow traces (default backend) via REST → Delta. Cross-workspace fan-out is parked (Tier 3); see enable_cross_workspace_rest_fanout."
           notebook_task:
             notebook_path: ./04_discover_observability.py
             base_parameters:
@@ -62,6 +80,10 @@ resources:
               lakebase_database: ${var.lakebase_database}
               lakebase_instance: ${var.lakebase_instance}
               lakebase_endpoint_path: ${var.lakebase_endpoint_path}
+              trace_retention_days: ${var.trace_retention_days}
+              enable_cross_workspace_rest_fanout: ${var.enable_cross_workspace_rest_fanout}
+              discovery_sp_secret_scope: ${var.discovery_sp_secret_scope}
+              narrow_test_workspace_id: ${var.narrow_test_workspace_id}
           environment_key: default
 
         - task_key: discover_knowledge_bases
@@ -94,6 +116,27 @@ resources:
               warehouse_id: ${var.warehouse_id}
           environment_key: default
 
+        - task_key: discover_uc_otel_traces
+          description: "Discover UC-stored MLflow OTel traces account-wide via SQL (Tier 2b) → Delta"
+          notebook_task:
+            notebook_path: ./07_discover_uc_otel_traces.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              trace_retention_days: ${var.trace_retention_days}
+          environment_key: default
+
+        - task_key: discover_gateway_inference_logs
+          description: "Discover AI Gateway / Model Serving inference-log payload tables account-wide via SQL (Tier 2a) → Delta"
+          notebook_task:
+            notebook_path: ./08_discover_gateway_inference_logs.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              retention_days: ${var.gateway_log_retention_days}
+              max_rows_per_table: ${var.gateway_log_max_rows_per_table}
+          environment_key: default
+
         - task_key: sync_to_lakebase
           description: "Sync all discovery data (Delta → Lakebase) + system table billing"
           depends_on:
@@ -102,6 +145,8 @@ resources:
             - task_key: discover_knowledge_bases
             - task_key: discover_user_analytics
             - task_key: discover_gateway_usage
+            - task_key: discover_uc_otel_traces
+            - task_key: discover_gateway_inference_logs
           notebook_task:
             notebook_path: ./02_sync_to_lakebase.py
             base_parameters:
