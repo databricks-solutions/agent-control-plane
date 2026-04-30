@@ -29,8 +29,11 @@ blocked by the destination workspace's SNP filter; an external runner is not.
    ```
 4. **Python deps.**
    ```
-   pip install psycopg2-binary databricks-sdk requests
+   pip install psycopg2-binary databricks-sdk requests mlflow
    ```
+   The `mlflow` Python client is used to fetch full span data per trace —
+   the basic MLflow REST endpoint only returns trace_info, while spans
+   live in artifact storage and only the client knows how to assemble them.
 
 ### Usage
 
