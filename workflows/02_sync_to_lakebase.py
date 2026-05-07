@@ -625,9 +625,17 @@ with obs_conn.cursor() as cur:
         "CREATE INDEX IF NOT EXISTS idx_otd_ws     ON observability_trace_details (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_otd_cached ON observability_trace_details (cached_at DESC)",
     ]:
+        # Each statement in its own savepoint — protects against the case
+        # where the workflow runs as a non-owner of pre-existing tables (the
+        # app's startup helpers create these as the SP). A failure rolls back
+        # to the savepoint instead of poisoning the surrounding transaction.
         try:
+            cur.execute("SAVEPOINT obs_ddl_sp")
             cur.execute(ddl)
+            cur.execute("RELEASE SAVEPOINT obs_ddl_sp")
         except Exception as e:
+            try: cur.execute("ROLLBACK TO SAVEPOINT obs_ddl_sp")
+            except Exception: pass
             print(f"  DDL warning: {e}")
     obs_conn.commit()
 print("✅ Observability tables ensured")
@@ -955,10 +963,24 @@ with obs_conn.cursor() as cur:
             try: cur.execute("ROLLBACK TO SAVEPOINT gw_col_sp")
             except Exception: pass
             print(f"  gw col DDL warn: {e}")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_gil_time   ON gateway_inference_logs (request_time DESC)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_gil_source ON gateway_inference_logs (source_table)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_gil_status ON gateway_inference_logs (status_code)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_gil_model  ON gateway_inference_logs (model)")
+    # CREATE INDEX IF NOT EXISTS still requires table ownership in PG, even
+    # when the index already exists. Wrap each in a savepoint so a non-owner
+    # workflow run doesn't fail when the indexes were pre-created (typically
+    # by the app's startup ensure_*_table() helpers running as the SP).
+    for idx_ddl in (
+        "CREATE INDEX IF NOT EXISTS idx_gil_time   ON gateway_inference_logs (request_time DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_gil_source ON gateway_inference_logs (source_table)",
+        "CREATE INDEX IF NOT EXISTS idx_gil_status ON gateway_inference_logs (status_code)",
+        "CREATE INDEX IF NOT EXISTS idx_gil_model  ON gateway_inference_logs (model)",
+    ):
+        try:
+            cur.execute("SAVEPOINT gw_idx_sp")
+            cur.execute(idx_ddl)
+            cur.execute("RELEASE SAVEPOINT gw_idx_sp")
+        except Exception as e:
+            try: cur.execute("ROLLBACK TO SAVEPOINT gw_idx_sp")
+            except Exception: pass
+            print(f"  gw idx DDL warn: {e}")
     obs_conn.commit()
 
 
