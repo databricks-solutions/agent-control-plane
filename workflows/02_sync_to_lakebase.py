@@ -935,6 +935,10 @@ with obs_conn.cursor() as cur:
     """)
     # Extracted-payload columns — populated at sync time by parsing the JSON
     # payload bodies. Best-effort across vendor shapes (OpenAI/Anthropic/etc.).
+    # Each ALTER runs in its own savepoint so a single column failure
+    # doesn't poison the surrounding transaction (psycopg2 does not auto-
+    # rollback on caught exceptions, and any subsequent statement on the
+    # same cursor would otherwise hit InFailedSqlTransaction).
     for col_ddl in (
         "ALTER TABLE gateway_inference_logs ADD COLUMN IF NOT EXISTS model TEXT",
         "ALTER TABLE gateway_inference_logs ADD COLUMN IF NOT EXISTS input_tokens BIGINT",
@@ -943,8 +947,14 @@ with obs_conn.cursor() as cur:
         "ALTER TABLE gateway_inference_logs ADD COLUMN IF NOT EXISTS finish_reason TEXT",
         "ALTER TABLE gateway_inference_logs ADD COLUMN IF NOT EXISTS tool_call_count INTEGER",
     ):
-        try: cur.execute(col_ddl)
-        except Exception as e: print(f"  gw col DDL warn: {e}")
+        try:
+            cur.execute("SAVEPOINT gw_col_sp")
+            cur.execute(col_ddl)
+            cur.execute("RELEASE SAVEPOINT gw_col_sp")
+        except Exception as e:
+            try: cur.execute("ROLLBACK TO SAVEPOINT gw_col_sp")
+            except Exception: pass
+            print(f"  gw col DDL warn: {e}")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_gil_time   ON gateway_inference_logs (request_time DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_gil_source ON gateway_inference_logs (source_table)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_gil_status ON gateway_inference_logs (status_code)")
