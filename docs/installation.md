@@ -97,6 +97,8 @@ python setup_lakebase_tables.py
 
 ## Step 6: Deploy the App
 
+> **Recommended order on a fresh Lakebase**: deploy the discovery workflow (Step 7) and trigger one run **before** deploying the app. The workflow's `CREATE TABLE IF NOT EXISTS` statements run as the deploying user, so the user owns every observability/agent table and the workflow can `ALTER`/`CREATE INDEX` on its own tables in future runs. If you deploy the app first, the app's startup helpers create those tables as the app's service principal — the workflow then can't modify them and new columns get rejected with `must be owner` errors. Step ordering only matters once (on first setup); subsequent re-deploys against an existing Lakebase are order-insensitive.
+
 ```bash
 cd control-plane-app
 
@@ -116,6 +118,8 @@ The deploy script will:
 3. Upload `dist/` and `backend/` to the workspace
 4. Deploy the Databricks App
 5. Register the app's service principal as a Lakebase Postgres role and grant it the required privileges on the `control_plane` database (`grant_sp_lakebase.py`)
+
+> **Lakebase role registration (Provisioned mode)**: the SP must be registered with `identity_type=SERVICE_PRINCIPAL` (via `POST /api/2.0/database/instances/{name}/roles`) so the Databricks-OAuth credentials the app mints at runtime are validated correctly. `grant_sp_lakebase.py` handles this in both Autoscaling and Provisioned modes. **Do not** use raw psql `CREATE ROLE "<sp>" WITH LOGIN` — that creates a `PG_ONLY` role that authenticates only against direct PG passwords, and the app's OAuth-minted credentials will fail with `password authentication failed for user '<sp>'`.
 
 > **Lakebase SP access**: Step 5 is the one piece the app can't do for itself. The deploy script runs `grant_sp_lakebase.py` which uses your (admin) identity to register the app's SP in Lakebase and grant it Postgres privileges (`CONNECT`, `USAGE`/`CREATE` on `public`, `ALL` on tables and sequences). It's idempotent — safe to re-run. If it fails, run it manually:
 >
@@ -256,6 +260,15 @@ Trace coverage is bounded by two things: (a) which trace-producing features are 
 
 ### Lakebase connection errors
 Verify your `LAKEBASE_DNS` is correct and that you set exactly one of `LAKEBASE_ENDPOINT_PATH` (Autoscaling) or `LAKEBASE_INSTANCE` (Provisioned). The instance must be in the `AVAILABLE` state.
+
+### All app pages empty / `password authentication failed for user '<sp-application-id>'`
+The app's service principal exists as a Lakebase role but with the wrong identity type — almost always because someone created it via raw psql `CREATE ROLE "<sp>" WITH LOGIN` instead of the Databricks Roles API. Fix by re-running `grant_sp_lakebase.py` from the `control-plane-app/` directory; it will detect the wrong `identity_type`, drop the stale role, recreate it as `SERVICE_PRINCIPAL`, and reapply Postgres grants. The app may need to be stopped+started afterward to drop stale connections in its pool.
+
+### App pages empty but workflow runs are green
+First check `databricks apps get <app-name>`: if `app_status.state` is `UNAVAILABLE` or `active_deployment.deployment_id` is `None`, the app's source code was wiped from the workspace (sometimes happens after stop/start cycles). Re-run `bash deploy.sh` — the workflow is unaffected and the existing Lakebase data is preserved.
+
+### Workflow sync fails with `must be owner of table <X>`
+The workflow runs as the user and is trying to `ALTER` or `CREATE INDEX` on a table owned by the app SP. This happens when the app was deployed before the workflow on a fresh Lakebase (app's startup helpers created tables as SP first). Fix: see the "Recommended order on a fresh Lakebase" note in Step 6 — workflows before app. For an existing deployment in this state, either re-create the Lakebase instance and redeploy in the right order, or use the SP's OBO PAT to run the missing DDL once as the SP (see commit history around `722ca7c` for the savepoint hardening that makes this tolerable).
 
 ### "No SQL warehouse found"
 The workflow needs a running SQL warehouse to query system tables. Verify `warehouse_id` in `databricks.yml` points to a running warehouse.

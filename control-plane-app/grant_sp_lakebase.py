@@ -80,8 +80,42 @@ def main() -> int:
             )
             print("  OK")
     else:
-        # Provisioned mode: the Permissions API handles SP access grants
-        print("Provisioned mode — use the Databricks UI or Permissions API to grant the SP access to the Lakebase instance")
+        # Provisioned mode: register the SP as a SERVICE_PRINCIPAL-typed role
+        # so it can authenticate via Databricks-OAuth-minted credentials.
+        # NOTE: a raw `CREATE ROLE "<sp>" WITH LOGIN` in psql creates a PG_ONLY
+        # role which fails OAuth credential auth — must go through this API.
+        host = w.config.host.rstrip("/")
+        token = w.config.authenticate().get("Authorization", "").replace("Bearer ", "")
+        list_r = requests.get(
+            f"{host}/api/2.0/database/instances/{instance_name}/roles",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        list_r.raise_for_status()
+        existing = [
+            r for r in (list_r.json().get("database_instance_roles") or [])
+            if r.get("name") == sp_client_id
+        ]
+        if existing and existing[0].get("identity_type") == "SERVICE_PRINCIPAL":
+            print(f"SP role already registered on {instance_name}")
+        else:
+            if existing:
+                # Wrong identity_type (e.g. legacy PG_ONLY from a raw CREATE ROLE)
+                # — delete and recreate so OAuth-minted passwords validate.
+                print(f"Replacing existing {existing[0].get('identity_type')} role with SERVICE_PRINCIPAL ...")
+                requests.delete(
+                    f"{host}/api/2.0/database/instances/{instance_name}/roles/{sp_client_id}",
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=15,
+                ).raise_for_status()
+            print(f"Registering SP as SERVICE_PRINCIPAL role on {instance_name} ...")
+            requests.post(
+                f"{host}/api/2.0/database/instances/{instance_name}/roles",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"name": sp_client_id, "identity_type": "SERVICE_PRINCIPAL"},
+                timeout=15,
+            ).raise_for_status()
+            print("  OK")
 
     # 2. Generate a credential for the current user (Lakebase admin)
     me = w.current_user.me()

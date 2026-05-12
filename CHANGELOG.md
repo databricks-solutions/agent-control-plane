@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Trace discovery's visibility model and run-as principal recommendation documented in README and installation guide
 - `observability_trace_details` lookup falls back to request_id-only when workspace_id is empty (UC traces have no owning workspace)
 
+### Fixed
+- `grant_sp_lakebase.py` now registers the app SP correctly on Provisioned Lakebase via `POST /api/2.0/database/instances/{name}/roles` with `identity_type=SERVICE_PRINCIPAL`. The previous Provisioned-mode branch only printed a TODO message and skipped role registration, leaving operators to do it by hand — and raw psql `CREATE ROLE` produced a `PG_ONLY` role that couldn't validate Databricks-OAuth-minted passwords (every app Lakebase read failed with `password authentication failed`)
+- `02_sync_to_lakebase.py` wraps all DDL (ALTER, CREATE INDEX) in PostgreSQL savepoints so the workflow tolerates non-owner-runs without poisoning the surrounding transaction (caught failures roll back to the savepoint and the run continues)
+- Installation guide documents the workflow-before-app deploy order to avoid the SP-ownership trap on fresh Lakebase instances
+
 ### Notes
 - Tier 3 (cross-workspace MLflow REST fan-out for default-backend traces) is on the roadmap. Until then, default-backend traces are visible only from within their owning workspace; UC-stored traces and AI Gateway logs are covered account-wide.
 
