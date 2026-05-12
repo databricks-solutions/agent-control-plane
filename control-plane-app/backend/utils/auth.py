@@ -12,7 +12,9 @@ OAuth token.  This module:
 """
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional
@@ -77,18 +79,62 @@ def _probe_account_admin(_host: str, _token: str) -> bool:
     return True
 
 
+def _decode_jwt_payload(token: str) -> Dict[str, object]:
+    """Best-effort decode of a JWT's claims. No signature verification —
+    the Apps proxy already validated the token before forwarding it."""
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return {}
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:
+        return {}
+
+
 def _resolve_user(token: str) -> UserInfo:
-    """Call SCIM /Me to get the user behind the OBO token."""
+    """Call SCIM /Me to get the user behind the OBO token.
+
+    If SCIM /Me returns 403 — i.e. the caller has CAN_USE on the app but
+    isn't a provisioned member of this workspace — fall back to JWT claims
+    so they can still read data (everything in the app is served by the
+    SP-backed Lakebase pool, not by the user's token). Admin writes
+    remain blocked because ``is_admin`` stays False.
+    """
     host = get_databricks_host()
     if not host:
         raise HTTPException(status_code=503, detail="Databricks host not configured")
 
     headers = {"Authorization": f"Bearer {token}"}
 
-    # 1. Who am I?
     me_resp = httpx.get(f"{host}/api/2.0/preview/scim/v2/Me", headers=headers, timeout=10)
     if me_resp.status_code == 401:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+    if me_resp.status_code == 403:
+        claims = _decode_jwt_payload(token)
+        username = (
+            claims.get("email")
+            or claims.get("preferred_username")
+            or claims.get("sub")
+            or "unknown-user"
+        )
+        display_name = claims.get("name") or username
+        user_id = str(claims.get("sub", ""))
+        logger.info(
+            "OBO: SCIM 403 for %s — falling back to JWT claims (non-workspace member, read-only)",
+            username,
+        )
+        user = UserInfo(
+            username=str(username),
+            display_name=str(display_name),
+            user_id=user_id,
+            is_admin=False,
+            is_account_admin=False,
+            groups=[],
+            token=token,
+        )
+        _put_cache(token, user)
+        return user
     me_resp.raise_for_status()
 
     me = me_resp.json()
