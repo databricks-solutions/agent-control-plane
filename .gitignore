@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Internal-only helper scripts (not part of the OSS distribution)
+control-plane-app/scripts/
+
 # Databricks bundle state
 .databricks/
 
