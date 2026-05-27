@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Per-user / per-group **token budgets** (behind `FEATURE_BUDGETS_ENABLED`, defaults off). Admins set a token cap per principal scoped optionally to an endpoint and a period (day / month / quarter / year). The new "Budgets" sub-tab on AI Gateway shows real-time spent vs cap with `ok` / `warning` / `breached` status pills, a breached-count header banner, and a token-amount input that accepts K / M / B suffixes. Spend is computed on read from `gateway_usage_daily` (input + output tokens) — no separate cache, no dollar conversion. For authoritative billed dollars, the Governance tab remains the source of truth.
+- New Lakebase table `gateway_budgets` (created by `setup_lakebase_tables.py`); new REST surface `GET/POST/PATCH/DELETE /api/v1/gateway/budgets` plus `GET /api/v1/gateway/budgets/alerts`; admin gating via the existing `require_admin` dependency.
+
 ## [0.2.0] - 2026-05-27
 
 ### Added

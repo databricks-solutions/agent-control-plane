@@ -2,12 +2,17 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiClient } from './client'
 
 // Config
+export interface AppConfig {
+  databricks_host: string
+  features?: { budgets_enabled?: boolean }
+}
+
 export function useAppConfig() {
   return useQuery({
     queryKey: ['app-config'],
     queryFn: async () => {
       const { data } = await apiClient.get('/config')
-      return data as { databricks_host: string }
+      return data as AppConfig
     },
     staleTime: 300_000, // 5 min — host won't change often
   })
@@ -592,6 +597,95 @@ export function useGatewayMetrics(hours = 24) {
       return data
     },
     staleTime: GW_STALE,
+  })
+}
+
+// ── Per-user budgets (feature-flagged via FEATURE_BUDGETS_ENABLED) ──
+
+export interface GatewayBudget {
+  budget_id: string
+  principal: string
+  principal_type: 'user' | 'group' | 'service_principal'
+  endpoint_name: string | null
+  workspace_id: string | null
+  budget_tokens: number
+  period: 'day' | 'month' | 'quarter' | 'year'
+  alert_at_percent: number
+  is_active: boolean
+  created_by: string
+  created_at: string
+  updated_at: string
+  // computed
+  spent_tokens: number
+  percent_of_cap: number
+  alert_status: 'ok' | 'warning' | 'breached'
+  period_start: string
+}
+
+export function useGatewayBudgets(enabled = true) {
+  return useQuery({
+    queryKey: ['gateway', 'budgets'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/budgets')
+      return Array.isArray(data) ? (data as GatewayBudget[]) : []
+    },
+    staleTime: 60_000, // budgets read live spend — keep cache short
+    enabled,
+  })
+}
+
+export function useGatewayBudgetAlerts(enabled = true) {
+  return useQuery({
+    queryKey: ['gateway', 'budgets', 'alerts'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/budgets/alerts')
+      return Array.isArray(data) ? (data as GatewayBudget[]) : []
+    },
+    staleTime: 60_000,
+    enabled,
+  })
+}
+
+export interface BudgetCreateBody {
+  principal: string
+  principal_type: 'user' | 'group' | 'service_principal'
+  budget_tokens: number
+  endpoint_name?: string | null
+  workspace_id?: string | null
+  period?: 'day' | 'month' | 'quarter' | 'year'
+  alert_at_percent?: number
+}
+
+export function useCreateBudget() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (body: BudgetCreateBody) => {
+      const { data } = await apiClient.post('/gateway/budgets', body)
+      return data as GatewayBudget
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['gateway', 'budgets'] }),
+  })
+}
+
+export function useUpdateBudget() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ budget_id, ...body }: { budget_id: string } & Partial<BudgetCreateBody> & { is_active?: boolean }) => {
+      const { data } = await apiClient.patch(`/gateway/budgets/${budget_id}`, body)
+      return data as GatewayBudget
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['gateway', 'budgets'] }),
+  })
+}
+
+export function useDeleteBudget() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (budget_id: string) => {
+      const { data } = await apiClient.delete(`/gateway/budgets/${budget_id}`)
+      return data
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['gateway', 'budgets'] }),
   })
 }
 

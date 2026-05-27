@@ -15,6 +15,13 @@ import {
   useGatewayMetrics,
   useAppConfig,
   useRefreshGateway,
+  useCurrentUser,
+  useGatewayBudgets,
+  useCreateBudget,
+  useUpdateBudget,
+  useDeleteBudget,
+  type GatewayBudget,
+  type BudgetCreateBody,
 } from '@/api/hooks'
 import { RefreshButton } from '@/components/RefreshButton'
 import { SortableHeader, useSort, sortRows } from '@/components/SortableTable'
@@ -46,17 +53,18 @@ import {
   CheckCircle,
   AlertCircle,
   Pencil,
+  Wallet,
 } from 'lucide-react'
 
 /* ── tab definitions ─────────────────────────────────────────── */
-const tabs = [
+const baseTabs = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'metrics', label: 'Metrics', icon: Cpu },
   { id: 'permissions', label: 'Permissions', icon: Shield },
   { id: 'rate-limits', label: 'Rate Limits & Guardrails', icon: ShieldAlert },
 ] as const
 
-type TabId = (typeof tabs)[number]['id']
+type TabId = 'overview' | 'metrics' | 'permissions' | 'rate-limits' | 'budgets'
 
 export default function AIGatewayPage() {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
@@ -71,6 +79,15 @@ export default function AIGatewayPage() {
   const workspaceUrl = rawHost && !rawHost.startsWith('http') ? `https://${rawHost}` : rawHost
   const refreshGateway = useRefreshGateway()
   const isFetchingGateway = useIsFetching({ queryKey: ['gateway'] }) > 0
+
+  const budgetsEnabled = !!config?.features?.budgets_enabled
+  const tabs = useMemo(
+    () =>
+      budgetsEnabled
+        ? [...baseTabs, { id: 'budgets' as const, label: 'Budgets', icon: Wallet }]
+        : baseTabs,
+    [budgetsEnabled],
+  )
 
   return (
     <div className="space-y-6">
@@ -153,6 +170,7 @@ export default function AIGatewayPage() {
       {activeTab === 'metrics' && <MetricsSection />}
       {activeTab === 'permissions' && <PermissionsSection />}
       {activeTab === 'rate-limits' && <RateLimitsAndGuardrailsSection />}
+      {activeTab === 'budgets' && budgetsEnabled && <BudgetsSection />}
     </div>
   )
 }
@@ -1177,6 +1195,328 @@ function RateLimitsAndGuardrailsSection() {
           )}
         </CardContent>
       </Card>
+    </div>
+  )
+}
+
+/* ── Budgets Section ──────────────────────────────────────────── */
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(n % 1_000_000_000 === 0 ? 0 : 2)}B`
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 2)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n % 1_000 === 0 ? 0 : 1)}K`
+  return n.toLocaleString()
+}
+
+function parseTokens(s: string): number {
+  const trimmed = s.trim().toUpperCase().replace(/[, ]/g, '')
+  const m = trimmed.match(/^([\d.]+)([KMB])?$/)
+  if (!m) return NaN
+  const n = parseFloat(m[1])
+  const suffix = m[2] || ''
+  if (suffix === 'B') return Math.round(n * 1_000_000_000)
+  if (suffix === 'M') return Math.round(n * 1_000_000)
+  if (suffix === 'K') return Math.round(n * 1_000)
+  return Math.round(n)
+}
+
+function statusBadgeProps(status: GatewayBudget['alert_status']) {
+  if (status === 'breached') return { variant: 'error' as const, label: 'Breached' }
+  if (status === 'warning') return { variant: 'warning' as const, label: 'Warning' }
+  return { variant: 'success' as const, label: 'OK' }
+}
+
+function BudgetsSection() {
+  const { data: user } = useCurrentUser()
+  const isAdmin = !!user?.is_admin
+
+  const { data: budgets, isLoading } = useGatewayBudgets()
+  const createMut = useCreateBudget()
+  const updateMut = useUpdateBudget()
+  const deleteMut = useDeleteBudget()
+
+  const [showModal, setShowModal] = useState(false)
+  const [editing, setEditing] = useState<GatewayBudget | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const breached = useMemo(() => (budgets ?? []).filter(b => b.alert_status === 'breached'), [budgets])
+
+  const openCreate = () => {
+    setEditing(null)
+    setError(null)
+    setShowModal(true)
+  }
+
+  const openEdit = (b: GatewayBudget) => {
+    setEditing(b)
+    setError(null)
+    setShowModal(true)
+  }
+
+  const handleSubmit = async (body: BudgetCreateBody) => {
+    setError(null)
+    try {
+      if (editing) {
+        await updateMut.mutateAsync({ budget_id: editing.budget_id, ...body })
+      } else {
+        await createMut.mutateAsync(body)
+      }
+      setShowModal(false)
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || e?.message || 'Save failed')
+    }
+  }
+
+  const handleDelete = async (b: GatewayBudget) => {
+    if (!confirm(`Archive budget for ${b.principal}? (Soft-delete — can be restored.)`)) return
+    try {
+      await deleteMut.mutateAsync(b.budget_id)
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || e?.message || 'Delete failed')
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Helper banner */}
+      <div className="rounded-lg border border-blue-200 bg-blue-50 dark:bg-blue-950/30 dark:border-blue-800 px-4 py-3 text-sm text-blue-900 dark:text-blue-200">
+        Budgets are measured in <strong>tokens</strong> (input + output combined) and computed in real time from <code>gateway_usage_daily</code>.
+        For authoritative dollar spend, see the <strong>Governance</strong> tab.
+      </div>
+
+      {/* Breached banner */}
+      {breached.length > 0 && (
+        <div className="rounded-lg border border-red-200 bg-red-50 dark:bg-red-950/30 dark:border-red-800 px-4 py-3 text-sm text-red-900 dark:text-red-200 flex items-center gap-2">
+          <AlertCircle className="w-4 h-4" />
+          <span>
+            <strong>{breached.length}</strong> budget{breached.length === 1 ? '' : 's'} breached this period.
+          </span>
+        </div>
+      )}
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle className="flex items-center gap-2">
+            <Wallet className="w-5 h-5" /> Token Budgets
+          </CardTitle>
+          {isAdmin && (
+            <button
+              onClick={openCreate}
+              className="inline-flex items-center gap-1 px-3 py-1.5 bg-db-red text-white text-sm rounded-md hover:bg-db-red/90"
+            >
+              <Plus className="w-4 h-4" /> Add budget
+            </button>
+          )}
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="text-gray-400 text-center py-8">Loading budgets…</div>
+          ) : (budgets ?? []).length === 0 ? (
+            <div className="text-gray-400 dark:text-gray-500 text-center py-8">
+              No budgets configured yet.
+              {isAdmin && <> Click <strong>Add budget</strong> to create one.</>}
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                    <th className="py-2 pr-4 font-medium">Principal</th>
+                    <th className="py-2 pr-4 font-medium">Scope</th>
+                    <th className="py-2 pr-4 font-medium">Period</th>
+                    <th className="py-2 pr-4 font-medium text-right">Cap</th>
+                    <th className="py-2 pr-4 font-medium text-right">Spent</th>
+                    <th className="py-2 pr-4 font-medium text-right">%</th>
+                    <th className="py-2 pr-4 font-medium">Status</th>
+                    {isAdmin && <th className="py-2 font-medium text-right">Actions</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(budgets ?? []).map(b => {
+                    const sb = statusBadgeProps(b.alert_status)
+                    return (
+                      <tr key={b.budget_id} className="border-b border-gray-100 dark:border-gray-800">
+                        <td className="py-2 pr-4">
+                          <div className="font-medium text-gray-900 dark:text-gray-100">{b.principal}</div>
+                          <div className="text-xs text-gray-400">{b.principal_type}</div>
+                        </td>
+                        <td className="py-2 pr-4">{b.endpoint_name || <span className="text-gray-400">all endpoints</span>}</td>
+                        <td className="py-2 pr-4 capitalize">{b.period}</td>
+                        <td className="py-2 pr-4 text-right font-mono">{formatTokens(b.budget_tokens)}</td>
+                        <td className="py-2 pr-4 text-right font-mono">{formatTokens(b.spent_tokens)}</td>
+                        <td className="py-2 pr-4 text-right">{b.percent_of_cap.toFixed(1)}%</td>
+                        <td className="py-2 pr-4">
+                          <Badge variant={sb.variant} className="text-xs">{sb.label}</Badge>
+                        </td>
+                        {isAdmin && (
+                          <td className="py-2 text-right">
+                            <button onClick={() => openEdit(b)} className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 mr-2" title="Edit">
+                              <Pencil className="w-4 h-4 inline" />
+                            </button>
+                            <button onClick={() => handleDelete(b)} className="text-gray-500 hover:text-red-600 dark:text-gray-400 dark:hover:text-red-400" title="Archive">
+                              <Trash2 className="w-4 h-4 inline" />
+                            </button>
+                          </td>
+                        )}
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {showModal && (
+        <BudgetFormModal
+          editing={editing}
+          onClose={() => setShowModal(false)}
+          onSubmit={handleSubmit}
+          isPending={createMut.isPending || updateMut.isPending}
+          error={error}
+        />
+      )}
+    </div>
+  )
+}
+
+function BudgetFormModal({
+  editing,
+  onClose,
+  onSubmit,
+  isPending,
+  error,
+}: {
+  editing: GatewayBudget | null
+  onClose: () => void
+  onSubmit: (body: BudgetCreateBody) => void
+  isPending: boolean
+  error: string | null
+}) {
+  const [principal, setPrincipal] = useState(editing?.principal ?? '')
+  const [principalType, setPrincipalType] = useState<GatewayBudget['principal_type']>(editing?.principal_type ?? 'user')
+  const [endpointName, setEndpointName] = useState(editing?.endpoint_name ?? '')
+  const [budgetInput, setBudgetInput] = useState(editing ? formatTokens(editing.budget_tokens) : '1M')
+  const [period, setPeriod] = useState<GatewayBudget['period']>(editing?.period ?? 'month')
+  const [alertPercent, setAlertPercent] = useState<number>(editing?.alert_at_percent ?? 80)
+
+  const tokens = parseTokens(budgetInput)
+  const tokensValid = Number.isFinite(tokens) && tokens > 0
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!principal.trim() || !tokensValid) return
+    onSubmit({
+      principal: principal.trim(),
+      principal_type: principalType,
+      endpoint_name: endpointName.trim() || null,
+      budget_tokens: tokens,
+      period,
+      alert_at_percent: alertPercent,
+    })
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl w-full max-w-md">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 dark:border-gray-700">
+          <h3 className="text-lg font-semibold">{editing ? 'Edit budget' : 'New budget'}</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <form onSubmit={submit} className="px-5 py-4 space-y-3 text-sm">
+          <label className="block">
+            <span className="text-gray-700 dark:text-gray-300">Principal</span>
+            <input
+              type="text"
+              required
+              value={principal}
+              onChange={e => setPrincipal(e.target.value)}
+              placeholder="alice@example.com or group name"
+              className="mt-1 w-full border dark:border-gray-600 rounded px-2 py-1.5 dark:bg-gray-800 dark:text-gray-200"
+            />
+          </label>
+          <label className="block">
+            <span className="text-gray-700 dark:text-gray-300">Type</span>
+            <select
+              value={principalType}
+              onChange={e => setPrincipalType(e.target.value as GatewayBudget['principal_type'])}
+              className="mt-1 w-full border dark:border-gray-600 rounded px-2 py-1.5 dark:bg-gray-800 dark:text-gray-200"
+            >
+              <option value="user">user</option>
+              <option value="group">group</option>
+              <option value="service_principal">service_principal</option>
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-gray-700 dark:text-gray-300">Endpoint (optional — leave blank for all)</span>
+            <input
+              type="text"
+              value={endpointName}
+              onChange={e => setEndpointName(e.target.value)}
+              placeholder="e.g. databricks-gemini-3-5-flash"
+              className="mt-1 w-full border dark:border-gray-600 rounded px-2 py-1.5 dark:bg-gray-800 dark:text-gray-200"
+            />
+          </label>
+          <label className="block">
+            <span className="text-gray-700 dark:text-gray-300">Budget (tokens — supports K / M / B)</span>
+            <input
+              type="text"
+              required
+              value={budgetInput}
+              onChange={e => setBudgetInput(e.target.value)}
+              placeholder="e.g. 5M"
+              className={`mt-1 w-full border rounded px-2 py-1.5 dark:bg-gray-800 dark:text-gray-200 ${tokensValid ? 'dark:border-gray-600' : 'border-red-400 dark:border-red-600'}`}
+            />
+            {tokensValid && (
+              <div className="text-xs text-gray-400 mt-1">{tokens.toLocaleString()} tokens</div>
+            )}
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="text-gray-700 dark:text-gray-300">Period</span>
+              <select
+                value={period}
+                onChange={e => setPeriod(e.target.value as GatewayBudget['period'])}
+                className="mt-1 w-full border dark:border-gray-600 rounded px-2 py-1.5 dark:bg-gray-800 dark:text-gray-200"
+              >
+                <option value="day">day</option>
+                <option value="month">month</option>
+                <option value="quarter">quarter</option>
+                <option value="year">year</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-gray-700 dark:text-gray-300">Alert at (%)</span>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={alertPercent}
+                onChange={e => setAlertPercent(Number(e.target.value))}
+                className="mt-1 w-full border dark:border-gray-600 rounded px-2 py-1.5 dark:bg-gray-800 dark:text-gray-200"
+              />
+            </label>
+          </div>
+          {error && (
+            <div className="text-red-600 dark:text-red-400 text-xs">{error}</div>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm rounded border dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-800">
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={!principal.trim() || !tokensValid || isPending}
+              className="px-3 py-1.5 bg-db-red text-white text-sm rounded hover:bg-db-red/90 disabled:opacity-50"
+            >
+              {isPending ? 'Saving…' : editing ? 'Save' : 'Create'}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   )
 }

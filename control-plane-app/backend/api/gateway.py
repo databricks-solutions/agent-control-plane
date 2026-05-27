@@ -1,8 +1,9 @@
 """FastAPI routes for AI Gateway — powered by real Databricks APIs."""
-from fastapi import APIRouter, Query, Depends, Request
+from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from pydantic import BaseModel
 from typing import Optional
-from backend.services import gateway_service
+from backend.config import settings
+from backend.services import budgets_service, gateway_service
 from backend.utils.auth import get_current_user, require_admin, require_account_admin, UserInfo
 
 router = APIRouter(prefix="/gateway", tags=["ai-gateway"], dependencies=[Depends(get_current_user)])
@@ -184,3 +185,95 @@ def inference_logs(
 def operational_metrics(hours: int = Query(default=24, le=168)):
     """Operational metrics from system tables."""
     return gateway_service.get_operational_metrics(hours)
+
+
+# ── Budgets (feature-flagged via FEATURE_BUDGETS_ENABLED) ────────
+
+class BudgetCreate(BaseModel):
+    principal: str
+    principal_type: str  # 'user' | 'group' | 'service_principal'
+    budget_tokens: int
+    endpoint_name: Optional[str] = None  # None = all endpoints
+    workspace_id: Optional[str] = None   # forward-compat — no-op against current gateway_usage_daily
+    period: str = "month"                # 'day' | 'month' | 'quarter' | 'year'
+    alert_at_percent: int = 80
+
+
+class BudgetUpdate(BaseModel):
+    principal: Optional[str] = None
+    principal_type: Optional[str] = None
+    endpoint_name: Optional[str] = None
+    workspace_id: Optional[str] = None
+    budget_tokens: Optional[int] = None
+    period: Optional[str] = None
+    alert_at_percent: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+def _require_budgets_enabled() -> None:
+    if not settings.feature_budgets_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
+
+
+@router.get("/budgets/alerts")
+def list_budget_alerts():
+    """Active budgets currently in warning or breached state."""
+    _require_budgets_enabled()
+    return budgets_service.list_alerts()
+
+
+@router.get("/budgets")
+def list_budgets(
+    principal: Optional[str] = Query(None),
+    endpoint_name: Optional[str] = Query(None),
+    include_inactive: bool = Query(False),
+):
+    """List budgets with computed spent tokens for the current period."""
+    _require_budgets_enabled()
+    return budgets_service.list_budgets(
+        principal=principal,
+        endpoint_name=endpoint_name,
+        include_inactive=include_inactive,
+    )
+
+
+@router.get("/budgets/{budget_id}")
+def get_budget(budget_id: str):
+    _require_budgets_enabled()
+    b = budgets_service.get_budget(budget_id)
+    if not b:
+        raise HTTPException(status_code=404, detail="Budget not found")
+    return b
+
+
+@router.post("/budgets")
+def create_budget(body: BudgetCreate, user: UserInfo = Depends(require_admin)):
+    """Admin-only: create a new token budget."""
+    _require_budgets_enabled()
+    try:
+        return budgets_service.create_budget(body.model_dump(), created_by=user.username)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.patch("/budgets/{budget_id}")
+def update_budget(budget_id: str, body: BudgetUpdate, _: UserInfo = Depends(require_admin)):
+    """Admin-only: patch fields on an existing budget."""
+    _require_budgets_enabled()
+    payload = {k: v for k, v in body.model_dump().items() if v is not None}
+    try:
+        updated = budgets_service.update_budget(budget_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Budget not found")
+    return updated
+
+
+@router.delete("/budgets/{budget_id}")
+def delete_budget(budget_id: str, _: UserInfo = Depends(require_admin)):
+    """Admin-only: soft-delete (sets is_active=false)."""
+    _require_budgets_enabled()
+    if not budgets_service.delete_budget(budget_id):
+        raise HTTPException(status_code=404, detail="Budget not found")
+    return {"status": "ok", "budget_id": budget_id}

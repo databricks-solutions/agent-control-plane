@@ -242,6 +242,9 @@ async def get_config():
     """Return public configuration for the frontend."""
     return {
         "databricks_host": get_databricks_host(),
+        "features": {
+            "budgets_enabled": settings.feature_budgets_enabled,
+        },
     }
 
 

@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # For local dev, set CORS_ORIGINS=http://localhost:3000,http://localhost:5173 in .env
     cors_origins: List[str] = []
 
+    # Feature flags — default OFF, flip via env var to dark-launch into prod.
+    feature_budgets_enabled: bool = False
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": False,

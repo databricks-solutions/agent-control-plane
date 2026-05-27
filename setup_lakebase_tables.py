@@ -177,6 +177,27 @@ def create_tables():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_agent_id ON request_logs(agent_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_user_id ON request_logs(user_id)")
 
+        print("Creating gateway_budgets table...")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS gateway_budgets (
+              budget_id VARCHAR(36) PRIMARY KEY,
+              principal VARCHAR(255) NOT NULL,
+              principal_type VARCHAR(32) NOT NULL,
+              endpoint_name VARCHAR(255),
+              workspace_id VARCHAR(64),
+              budget_tokens BIGINT NOT NULL,
+              period VARCHAR(16) NOT NULL DEFAULT 'month',
+              alert_at_percent INTEGER NOT NULL DEFAULT 80,
+              is_active BOOLEAN NOT NULL DEFAULT TRUE,
+              created_by VARCHAR(255) NOT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_gateway_budgets_principal ON gateway_budgets(principal)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_gateway_budgets_endpoint ON gateway_budgets(endpoint_name) WHERE endpoint_name IS NOT NULL")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_gateway_budgets_active ON gateway_budgets(is_active) WHERE is_active = TRUE")
+
         conn.commit()
         print("All tables created successfully")
 
