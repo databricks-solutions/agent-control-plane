@@ -134,6 +134,13 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Gateway logs startup init skipped: %s", exc)
 
+    def _init_budgets():
+        try:
+            from backend.services.budgets_service import ensure_budgets_table
+            ensure_budgets_table()
+        except Exception as exc:
+            logger.warning("Budgets startup init skipped: %s", exc)
+
     # Run all init in a background thread with a timeout so a hanging
     # DB connection doesn't prevent the server from starting.
     def _run_all_inits():
@@ -146,6 +153,7 @@ async def lifespan(app: FastAPI):
         _init_observability()
         _init_vector_search()
         _init_gateway_logs()
+        _init_budgets()
 
     t = threading.Thread(target=_run_all_inits, daemon=True)
     t.start()

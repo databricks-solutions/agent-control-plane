@@ -22,6 +22,40 @@ from backend.database import execute_one, execute_query, execute_update
 
 logger = logging.getLogger(__name__)
 
+
+# ── Schema bootstrap (called from main.py lifespan) ──────────────
+
+_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS gateway_budgets (
+      budget_id         TEXT PRIMARY KEY,
+      principal         TEXT NOT NULL,
+      principal_type    TEXT NOT NULL,
+      endpoint_name     TEXT,
+      workspace_id      TEXT,
+      budget_tokens     BIGINT NOT NULL,
+      period            TEXT NOT NULL DEFAULT 'month',
+      alert_at_percent  INTEGER NOT NULL DEFAULT 80,
+      is_active         BOOLEAN NOT NULL DEFAULT TRUE,
+      created_by        TEXT NOT NULL,
+      created_at        TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at        TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_gateway_budgets_principal ON gateway_budgets (principal)",
+    "CREATE INDEX IF NOT EXISTS idx_gateway_budgets_endpoint  ON gateway_budgets (endpoint_name) WHERE endpoint_name IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_gateway_budgets_active    ON gateway_budgets (is_active) WHERE is_active = TRUE",
+]
+
+
+def ensure_budgets_table() -> None:
+    """Idempotent DDL — runs at app startup. Safe to call multiple times."""
+    for stmt in _DDL:
+        try:
+            execute_update(stmt)
+        except Exception as exc:
+            logger.warning("gateway_budgets DDL warning: %s", exc)
+
 # ── Period helpers ───────────────────────────────────────────────
 
 _VALID_PERIODS = {"day", "month", "quarter", "year"}
