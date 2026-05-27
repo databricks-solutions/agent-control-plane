@@ -7,25 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- Trace discovery: Tier 2a (AI Gateway / Model Serving inference logs from `*_payload` UC tables) and Tier 2b (UC-stored MLflow traces from both `*_otel_spans` and `trace_logs_*` table formats), both account-wide via Unity Catalog SQL
-- Gateway Requests panel in Observability with payload deep-dive
-- Trace deep-dive view now serves UC-stored traces from the Lakebase cache (no MLflow REST round-trip)
-- Trace and gateway-log time-window selectors extended to 180d / 365d
-
-### Changed
-- Trace discovery's visibility model and run-as principal recommendation documented in README and installation guide
-- `observability_trace_details` lookup falls back to request_id-only when workspace_id is empty (UC traces have no owning workspace)
-
-### Fixed
-- `grant_sp_lakebase.py` now registers the app SP correctly on Provisioned Lakebase via `POST /api/2.0/database/instances/{name}/roles` with `identity_type=SERVICE_PRINCIPAL`. The previous Provisioned-mode branch only printed a TODO message and skipped role registration, leaving operators to do it by hand — and raw psql `CREATE ROLE` produced a `PG_ONLY` role that couldn't validate Databricks-OAuth-minted passwords (every app Lakebase read failed with `password authentication failed`)
-- `02_sync_to_lakebase.py` wraps all DDL (ALTER, CREATE INDEX) in PostgreSQL savepoints so the workflow tolerates non-owner-runs without poisoning the surrounding transaction (caught failures roll back to the savepoint and the run continues)
-- Installation guide documents the workflow-before-app deploy order to avoid the SP-ownership trap on fresh Lakebase instances
-
-### Notes
-- Tier 3 (cross-workspace MLflow REST fan-out for default-backend traces) is on the roadmap. Until then, default-backend traces are visible only from within their owning workspace; UC-stored traces and AI Gateway logs are covered account-wide.
-
-## [0.2.0] - 2026-04-13
+## [0.2.0] - 2026-05-27
 
 ### Added
 - Knowledge Bases page: unified Vector Search + Lakebase monitoring with cost attribution
@@ -36,12 +18,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 6 parallel discovery workflow tasks (agents, observability, knowledge bases, user analytics, gateway usage)
 - All billing data cached in `kb_billing_daily` Lakebase table
 - Recharts line charts for cost trends on Knowledge Bases page
+- Trace discovery: Tier 2a (AI Gateway / Model Serving inference logs from `*_payload` UC tables) and Tier 2b (UC-stored MLflow traces from both `*_otel_spans` and `trace_logs_*` table formats), both account-wide via Unity Catalog SQL
+- Gateway Requests panel in Observability with payload deep-dive
+- Trace deep-dive view now serves UC-stored traces from the Lakebase cache (no MLflow REST round-trip)
+- Trace and gateway-log time-window selectors extended to 180d / 365d
 
 ### Changed
 - Knowledge Bases billing reads from Lakebase cache (was live system table queries)
 - Gateway usage reads from Lakebase cache (was live system table queries)
 - User analytics reads from Lakebase cache (was live system table queries)
 - Sidebar nav reordered: Agents → AI Gateway → Knowledge Bases → Tools → ...
+- Trace discovery's visibility model and run-as principal recommendation documented in README and installation guide
+- `observability_trace_details` lookup falls back to request_id-only when workspace_id is empty (UC traces have no owning workspace)
+
+### Fixed
+- `grant_sp_lakebase.py` now registers the app SP correctly on Provisioned Lakebase via `POST /api/2.0/database/instances/{name}/roles` with `identity_type=SERVICE_PRINCIPAL`. The previous Provisioned-mode branch only printed a TODO message and skipped role registration, leaving operators to do it by hand — and raw psql `CREATE ROLE` produced a `PG_ONLY` role that couldn't validate Databricks-OAuth-minted passwords (every app Lakebase read failed with `password authentication failed`)
+- `02_sync_to_lakebase.py` wraps all DDL (ALTER, CREATE INDEX) in PostgreSQL savepoints so the workflow tolerates non-owner-runs without poisoning the surrounding transaction (caught failures roll back to the savepoint and the run continues)
+- Installation guide documents the workflow-before-app deploy order to avoid the SP-ownership trap on fresh Lakebase instances
+
+### Notes
+- Tier 3 (cross-workspace MLflow REST fan-out for default-backend traces) is on the roadmap. Until then, default-backend traces are visible only from within their owning workspace; UC-stored traces and AI Gateway logs are covered account-wide.
 
 ## [0.1.0] - 2026-04-09
 
