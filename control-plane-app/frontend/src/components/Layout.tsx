@@ -16,7 +16,7 @@ import {
 } from 'lucide-react'
 import DatabricksLogo from './DatabricksLogo'
 import { useTheme } from '@/context/ThemeContext'
-import { useCurrentUser } from '@/api/hooks'
+import { useAppConfig, useCurrentUser, useGatewayBudgetAlerts } from '@/api/hooks'
 
 const navItems = [
   { to: '/', label: 'Governance', icon: Shield, exact: true },
@@ -34,6 +34,15 @@ export default function Layout() {
   const { theme, toggleTheme } = useTheme()
   const isDark = theme === 'dark'
   const { data: user } = useCurrentUser()
+
+  // Per-tab alert badges. Gated on the feature flag so the hook doesn't
+  // call the API at all when budgets is off — no 404 spam.
+  const { data: config } = useAppConfig()
+  const budgetsEnabled = !!config?.features?.budgets_enabled
+  const { data: budgetAlerts } = useGatewayBudgetAlerts(budgetsEnabled)
+  const badges: Record<string, number> = {
+    '/ai-gateway': budgetAlerts?.length ?? 0,
+  }
 
   return (
     <div className="flex h-screen bg-db-gray-50 dark:bg-gray-900">
@@ -57,27 +66,47 @@ export default function Layout() {
 
         {/* Navigation */}
         <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
-          {navItems.map(({ to, label, icon: Icon, exact }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={exact}
-              className={({ isActive }) =>
-                `group relative flex items-center gap-3 rounded-lg text-sm font-medium transition-colors
-                ${collapsed ? 'justify-center px-0 py-2.5' : 'px-3 py-2'}
-                ${
-                  isActive
-                    ? 'bg-db-red text-white shadow-sm shadow-db-red/30'
-                    : 'text-db-navy-900/70 dark:text-gray-400 hover:bg-db-navy-900/8 dark:hover:bg-gray-700 hover:text-db-navy-900 dark:hover:text-gray-100'
-                }`
-              }
-            >
-              <Icon className="w-[18px] h-[18px] flex-shrink-0" />
-              {!collapsed && <span>{label}</span>}
-              {/* Tooltip when collapsed */}
-              {collapsed && <span className="sidebar-tooltip">{label}</span>}
-            </NavLink>
-          ))}
+          {navItems.map(({ to, label, icon: Icon, exact }) => {
+            const badge = badges[to] ?? 0
+            return (
+              <NavLink
+                key={to}
+                to={to}
+                end={exact}
+                className={({ isActive }) =>
+                  `group relative flex items-center gap-3 rounded-lg text-sm font-medium transition-colors
+                  ${collapsed ? 'justify-center px-0 py-2.5' : 'px-3 py-2'}
+                  ${
+                    isActive
+                      ? 'bg-db-red text-white shadow-sm shadow-db-red/30'
+                      : 'text-db-navy-900/70 dark:text-gray-400 hover:bg-db-navy-900/8 dark:hover:bg-gray-700 hover:text-db-navy-900 dark:hover:text-gray-100'
+                  }`
+                }
+              >
+                <Icon className="w-[18px] h-[18px] flex-shrink-0" />
+                {!collapsed && <span>{label}</span>}
+                {/* Alert badge — pill when expanded, dot when collapsed.
+                    Ring matches sidebar bg so it stays visible on the active red bg. */}
+                {badge > 0 && (
+                  collapsed ? (
+                    <span
+                      aria-label={`${badge} alerts`}
+                      className="absolute top-1 right-1 w-2.5 h-2.5 bg-db-red rounded-full ring-2 ring-gray-100 dark:ring-gray-800"
+                    />
+                  ) : (
+                    <span
+                      aria-label={`${badge} alerts`}
+                      className="ml-auto inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 text-[10px] font-bold rounded-full bg-db-red text-white ring-2 ring-gray-100 dark:ring-gray-800"
+                    >
+                      {badge > 99 ? '99+' : badge}
+                    </span>
+                  )
+                )}
+                {/* Tooltip when collapsed */}
+                {collapsed && <span className="sidebar-tooltip">{label}{badge > 0 ? ` (${badge})` : ''}</span>}
+              </NavLink>
+            )
+          })}
         </nav>
 
         {/* Collapse toggle */}
