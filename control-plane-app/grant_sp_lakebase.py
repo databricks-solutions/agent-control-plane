@@ -50,7 +50,12 @@ def main() -> int:
         print("Error: set LAKEBASE_ENDPOINT_PATH (Autoscaling) or LAKEBASE_INSTANCE (Provisioned)")
         return 1
 
-    w = WorkspaceClient()
+    # Explicit profile — when DATABRICKS_HOST is sourced from .env, the SDK's
+    # host-based profile lookup can hit "multiple profiles match this host" and
+    # bail. Use DATABRICKS_CONFIG_PROFILE if set, else fall back to "DEFAULT"
+    # (which is what the CLI's own auth chain does).
+    profile = os.environ.get("DATABRICKS_CONFIG_PROFILE") or "DEFAULT"
+    w = WorkspaceClient(profile=profile)
 
     app = w.apps.get(name=app_name)
     sp_client_id = app.service_principal_client_id
