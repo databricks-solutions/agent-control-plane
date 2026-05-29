@@ -29,9 +29,9 @@ async def lifespan(app: FastAPI):
 
     def _init_billing():
         try:
-            from backend.services.billing_service import ensure_billing_tables, maybe_refresh_async
+            from backend.services.billing_service import ensure_billing_tables
             ensure_billing_tables()
-            maybe_refresh_async()
+            # Refresh now runs in the discovery workflow (workflows/09_discover_billing).
         except Exception as exc:
             logger.warning("Billing startup init skipped: %s", exc)
 

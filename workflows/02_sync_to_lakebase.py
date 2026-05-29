@@ -1501,6 +1501,239 @@ gw_conn.close()
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Phase 7: Sync Billing (Delta → Lakebase)
+# MAGIC
+# MAGIC Mirrors the four billing tables populated by `09_discover_billing`:
+# MAGIC - `billing_serving_daily`
+# MAGIC - `billing_token_daily`
+# MAGIC - `billing_product_daily`
+# MAGIC - `billing_user_endpoint_daily`
+# MAGIC
+# MAGIC Also stamps `billing_cache_meta` so the app's `get_cache_status()` surfaces fresh `last_refreshed` timestamps.
+
+# COMMAND ----------
+
+BSD_TABLE  = f"{CATALOG}.{SCHEMA}.billing_serving_daily"
+BTD_TABLE  = f"{CATALOG}.{SCHEMA}.billing_token_daily"
+BPD_TABLE  = f"{CATALOG}.{SCHEMA}.billing_product_daily"
+BUED_TABLE = f"{CATALOG}.{SCHEMA}.billing_user_endpoint_daily"
+
+billing_conn = get_lakebase_connection()
+bsd_count = 0
+btd_count = 0
+bpd_count = 0
+bued_count = 0
+
+# Ensure billing tables (idempotent — also created by app's ensure_billing_tables on startup)
+with billing_conn.cursor() as cur:
+    for ddl in [
+        """CREATE TABLE IF NOT EXISTS billing_serving_daily (
+            usage_date    DATE          NOT NULL,
+            workspace_id  TEXT          NOT NULL,
+            endpoint_name TEXT          NOT NULL,
+            sku_name      TEXT          NOT NULL DEFAULT '',
+            total_dbus    NUMERIC(18,4) NOT NULL DEFAULT 0,
+            total_cost_usd NUMERIC(18,4) NOT NULL DEFAULT 0,
+            last_synced   TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (usage_date, workspace_id, endpoint_name, sku_name)
+        )""",
+        """CREATE TABLE IF NOT EXISTS billing_token_daily (
+            usage_date       DATE    NOT NULL,
+            workspace_id     TEXT    NOT NULL,
+            endpoint_name    TEXT    NOT NULL,
+            request_count    BIGINT  NOT NULL DEFAULT 0,
+            input_tokens     BIGINT  NOT NULL DEFAULT 0,
+            output_tokens    BIGINT  NOT NULL DEFAULT 0,
+            avg_input_tokens NUMERIC(12,2) NOT NULL DEFAULT 0,
+            avg_output_tokens NUMERIC(12,2) NOT NULL DEFAULT 0,
+            last_synced      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (usage_date, workspace_id, endpoint_name)
+        )""",
+        """CREATE TABLE IF NOT EXISTS billing_product_daily (
+            usage_date              DATE          NOT NULL,
+            workspace_id            TEXT          NOT NULL,
+            billing_origin_product  TEXT          NOT NULL,
+            total_dbus              NUMERIC(18,4) NOT NULL DEFAULT 0,
+            total_cost_usd          NUMERIC(18,4) NOT NULL DEFAULT 0,
+            last_synced             TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (usage_date, workspace_id, billing_origin_product)
+        )""",
+        """CREATE TABLE IF NOT EXISTS billing_user_endpoint_daily (
+            usage_date     DATE    NOT NULL,
+            workspace_id   TEXT    NOT NULL,
+            endpoint_name  TEXT    NOT NULL,
+            user_identity  TEXT    NOT NULL DEFAULT '',
+            request_count  BIGINT  NOT NULL DEFAULT 0,
+            input_tokens   BIGINT  NOT NULL DEFAULT 0,
+            output_tokens  BIGINT  NOT NULL DEFAULT 0,
+            last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (usage_date, workspace_id, endpoint_name, user_identity)
+        )""",
+        """CREATE TABLE IF NOT EXISTS billing_cache_meta (
+            cache_key      TEXT PRIMARY KEY,
+            last_refreshed TIMESTAMP WITH TIME ZONE,
+            rows_loaded    INTEGER NOT NULL DEFAULT 0
+        )""",
+        "ALTER TABLE billing_cache_meta ADD COLUMN IF NOT EXISTS value_text TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_bsd_ws  ON billing_serving_daily  (workspace_id)",
+        "CREATE INDEX IF NOT EXISTS idx_btd_ws  ON billing_token_daily    (workspace_id)",
+        "CREATE INDEX IF NOT EXISTS idx_bpd_ws  ON billing_product_daily  (workspace_id)",
+        "CREATE INDEX IF NOT EXISTS idx_bued_ws ON billing_user_endpoint_daily (workspace_id)",
+    ]:
+        try:
+            cur.execute(ddl)
+        except Exception as e:
+            print(f"  DDL warning: {e}")
+    billing_conn.commit()
+
+
+def _stamp_cache_meta(conn, cache_key: str, rows_loaded: int) -> None:
+    """Update billing_cache_meta so the app's get_cache_status sees fresh timestamps."""
+    try:
+        with conn.cursor() as c:
+            c.execute(
+                """INSERT INTO billing_cache_meta (cache_key, last_refreshed, rows_loaded)
+                   VALUES (%s, NOW(), %s)
+                   ON CONFLICT (cache_key) DO UPDATE
+                   SET last_refreshed = NOW(), rows_loaded = EXCLUDED.rows_loaded""",
+                (cache_key, rows_loaded),
+            )
+            conn.commit()
+    except Exception as exc:
+        print(f"  ⚠️  cache_meta update failed for {cache_key}: {exc}")
+
+
+# Sync billing_serving_daily
+print(f"▸ Syncing {BSD_TABLE} → billing_serving_daily ...")
+try:
+    with billing_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE billing_serving_daily")
+        billing_conn.commit()
+    bsd_rows = spark.read.table(BSD_TABLE).collect()
+    if bsd_rows:
+        values = [(r.usage_date, r.workspace_id, r.endpoint_name, r.sku_name or "",
+                   float(r.total_dbus or 0), float(r.total_cost_usd or 0))
+                  for r in bsd_rows]
+        bsd_count = len(values)
+        with billing_conn.cursor() as cur:
+            execute_values(cur,
+                """INSERT INTO billing_serving_daily
+                   (usage_date, workspace_id, endpoint_name, sku_name, total_dbus, total_cost_usd, last_synced)
+                   VALUES %s
+                   ON CONFLICT (usage_date, workspace_id, endpoint_name, sku_name) DO UPDATE SET
+                       total_dbus = EXCLUDED.total_dbus,
+                       total_cost_usd = EXCLUDED.total_cost_usd,
+                       last_synced = NOW()""",
+                [(v[0], v[1], v[2], v[3], v[4], v[5], now) for v in values],
+                page_size=500)
+            billing_conn.commit()
+    print(f"  ✅ {bsd_count} serving-cost rows synced")
+    _stamp_cache_meta(billing_conn, "serving_daily", bsd_count)
+except Exception as exc:
+    print(f"  ⚠️  billing_serving_daily sync failed: {exc}")
+
+# Sync billing_token_daily
+print(f"▸ Syncing {BTD_TABLE} → billing_token_daily ...")
+try:
+    with billing_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE billing_token_daily")
+        billing_conn.commit()
+    btd_rows = spark.read.table(BTD_TABLE).collect()
+    if btd_rows:
+        values = [(r.usage_date, r.workspace_id, r.endpoint_name,
+                   int(r.request_count or 0),
+                   int(r.input_tokens or 0), int(r.output_tokens or 0),
+                   float(r.avg_input_tokens or 0), float(r.avg_output_tokens or 0))
+                  for r in btd_rows]
+        btd_count = len(values)
+        with billing_conn.cursor() as cur:
+            execute_values(cur,
+                """INSERT INTO billing_token_daily
+                   (usage_date, workspace_id, endpoint_name, request_count,
+                    input_tokens, output_tokens, avg_input_tokens, avg_output_tokens, last_synced)
+                   VALUES %s
+                   ON CONFLICT (usage_date, workspace_id, endpoint_name) DO UPDATE SET
+                       request_count = EXCLUDED.request_count,
+                       input_tokens = EXCLUDED.input_tokens,
+                       output_tokens = EXCLUDED.output_tokens,
+                       avg_input_tokens = EXCLUDED.avg_input_tokens,
+                       avg_output_tokens = EXCLUDED.avg_output_tokens,
+                       last_synced = NOW()""",
+                [(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], now) for v in values],
+                page_size=500)
+            billing_conn.commit()
+    print(f"  ✅ {btd_count} token-usage rows synced")
+    _stamp_cache_meta(billing_conn, "token_daily", btd_count)
+except Exception as exc:
+    print(f"  ⚠️  billing_token_daily sync failed: {exc}")
+
+# Sync billing_product_daily
+print(f"▸ Syncing {BPD_TABLE} → billing_product_daily ...")
+try:
+    with billing_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE billing_product_daily")
+        billing_conn.commit()
+    bpd_rows = spark.read.table(BPD_TABLE).collect()
+    if bpd_rows:
+        values = [(r.usage_date, r.workspace_id, r.billing_origin_product,
+                   float(r.total_dbus or 0), float(r.total_cost_usd or 0))
+                  for r in bpd_rows]
+        bpd_count = len(values)
+        with billing_conn.cursor() as cur:
+            execute_values(cur,
+                """INSERT INTO billing_product_daily
+                   (usage_date, workspace_id, billing_origin_product, total_dbus, total_cost_usd, last_synced)
+                   VALUES %s
+                   ON CONFLICT (usage_date, workspace_id, billing_origin_product) DO UPDATE SET
+                       total_dbus = EXCLUDED.total_dbus,
+                       total_cost_usd = EXCLUDED.total_cost_usd,
+                       last_synced = NOW()""",
+                [(v[0], v[1], v[2], v[3], v[4], now) for v in values],
+                page_size=500)
+            billing_conn.commit()
+    print(f"  ✅ {bpd_count} product-cost rows synced")
+    _stamp_cache_meta(billing_conn, "product_daily", bpd_count)
+except Exception as exc:
+    print(f"  ⚠️  billing_product_daily sync failed: {exc}")
+
+# Sync billing_user_endpoint_daily
+print(f"▸ Syncing {BUED_TABLE} → billing_user_endpoint_daily ...")
+try:
+    with billing_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE billing_user_endpoint_daily")
+        billing_conn.commit()
+    bued_rows = spark.read.table(BUED_TABLE).collect()
+    if bued_rows:
+        values = [(r.usage_date, r.workspace_id, r.endpoint_name,
+                   r.user_identity or "unknown",
+                   int(r.request_count or 0),
+                   int(r.input_tokens or 0), int(r.output_tokens or 0))
+                  for r in bued_rows]
+        bued_count = len(values)
+        with billing_conn.cursor() as cur:
+            execute_values(cur,
+                """INSERT INTO billing_user_endpoint_daily
+                   (usage_date, workspace_id, endpoint_name, user_identity,
+                    request_count, input_tokens, output_tokens, last_synced)
+                   VALUES %s
+                   ON CONFLICT (usage_date, workspace_id, endpoint_name, user_identity) DO UPDATE SET
+                       request_count = EXCLUDED.request_count,
+                       input_tokens = EXCLUDED.input_tokens,
+                       output_tokens = EXCLUDED.output_tokens,
+                       last_synced = NOW()""",
+                [(v[0], v[1], v[2], v[3], v[4], v[5], v[6], now) for v in values],
+                page_size=500)
+            billing_conn.commit()
+    print(f"  ✅ {bued_count} user-endpoint rows synced")
+    _stamp_cache_meta(billing_conn, "user_endpoint_daily", bued_count)
+except Exception as exc:
+    print(f"  ⚠️  billing_user_endpoint_daily sync failed: {exc}")
+
+billing_conn.close()
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Final Summary
 
 # COMMAND ----------
@@ -1527,6 +1760,10 @@ result = {
     "ua_heatmap_rows": ua_heatmap_count,
     "gw_daily_rows": gw_daily_count,
     "gw_hourly_rows": gw_hourly_count,
+    "billing_serving_daily_rows": bsd_count,
+    "billing_token_daily_rows": btd_count,
+    "billing_product_daily_rows": bpd_count,
+    "billing_user_endpoint_daily_rows": bued_count,
     "synced_at": datetime.now(timezone.utc).isoformat(),
 }
 print(json.dumps(result, indent=2))

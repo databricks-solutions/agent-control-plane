@@ -35,6 +35,9 @@ variables:
   gateway_log_max_rows_per_table:
     default: "10000"
     description: "Per-source-table cap on rows pulled per inference-log discovery run."
+  billing_retention_days:
+    default: "90"
+    description: "Time window (days) for billing data caching. Pulled from system.billing.usage (~24h platform lag)."
   discovery_sp_secret_scope:
     default: ""
     description: "Databricks secret scope holding the discovery SP's OAuth creds (keys: client_id, client_secret). Empty disables SP-based cross-workspace auth."
@@ -137,6 +140,17 @@ resources:
               max_rows_per_table: ${var.gateway_log_max_rows_per_table}
           environment_key: default
 
+        - task_key: discover_billing
+          description: "Query system.billing.usage + system.serving.endpoint_usage for serving cost / token / per-user / all-product daily aggregates → Delta. Replaces the in-app refresh that used to run on app startup."
+          notebook_task:
+            notebook_path: ./09_discover_billing.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              warehouse_id: ${var.warehouse_id}
+              billing_retention_days: ${var.billing_retention_days}
+          environment_key: default
+
         - task_key: sync_to_lakebase
           description: "Sync all discovery data (Delta → Lakebase) + system table billing"
           depends_on:
@@ -147,6 +161,7 @@ resources:
             - task_key: discover_gateway_usage
             - task_key: discover_uc_otel_traces
             - task_key: discover_gateway_inference_logs
+            - task_key: discover_billing
           notebook_task:
             notebook_path: ./02_sync_to_lakebase.py
             base_parameters:

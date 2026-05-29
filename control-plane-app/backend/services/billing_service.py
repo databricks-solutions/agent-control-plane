@@ -1,21 +1,22 @@
-"""Billing / cost data cached in Lakebase, refreshed from Databricks system tables.
+"""Billing / cost data — read-only service layer over Lakebase cache.
 
 Architecture:
-  • Five Lakebase tables hold daily-grain billing data:
+  • Four Lakebase tables hold daily-grain billing data (populated by
+    ``workflows/09_discover_billing`` → Delta → ``02_sync_to_lakebase`` mirror):
       billing_serving_daily        – model-serving costs by endpoint/SKU/workspace
       billing_token_daily          – token usage by endpoint/workspace
       billing_product_daily        – all-product costs by workspace
-      billing_serving_user_daily   – model-serving costs by user/workspace
-      billing_token_user_daily     – token usage by user/workspace
-  • A metadata table (billing_cache_meta) tracks last-refresh timestamps.
-  • On first request (or when data is >24 h stale) we trigger a background
-    refresh that queries the system tables via the SQL Statement Execution API
-    and upserts results into Lakebase.
-  • All read queries hit Lakebase (< 100 ms) instead of system tables (~10+ s).
+      billing_user_endpoint_daily  – per-user token usage by endpoint. Per-user
+                                     **cost** is computed at read time by joining
+                                     with ``billing_serving_daily`` (see
+                                     ``get_serving_cost_by_user``).
+  • A metadata table (``billing_cache_meta``) tracks last-refresh timestamps,
+    stamped by the workflow's sync task.
+  • All read queries hit Lakebase (< 100 ms). No in-app refresh — the workflow
+    owns it (runs every 30 min on the same schedule as other discovery tasks).
 """
 from __future__ import annotations
 
-import threading
 import httpx
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
@@ -37,19 +38,21 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT = 120.0  # system-table queries can be slow
-_SQL_POLL_INTERVAL = 3  # seconds between polls for async statements
-_SQL_POLL_MAX = 40  # max polls (~2 min total)
-_STALE_SECONDS = 24 * 3600  # 24 hours
-_REFRESH_DAYS = 90  # how many days of history to load
-
-# ── lock to prevent concurrent refreshes ─────────────────────────
-_refresh_lock = threading.Lock()
+# Legacy global — refresh now runs in the discovery workflow, not in the app.
+# Kept as a constant False so ``get_cache_status()`` / ``get_all_page_data()``
+# keep returning the expected shape.
 _refresh_in_progress = False
+
+# SQL warehouse helper constants — used by ``_execute_system_sql`` which is
+# now a general-purpose utility (called by ``discovery_service`` and others
+# beyond just billing).
+_TIMEOUT = 120.0  # system-table queries can be slow
+_SQL_POLL_INTERVAL = 3
+_SQL_POLL_MAX = 40  # ~2 min total
 
 
 # =====================================================================
-# LOW-LEVEL: execute SQL on Databricks SQL warehouse
+# SHARED HELPERS: SQL warehouse execution (used by multiple services)
 # =====================================================================
 
 def _find_warehouse_id() -> Optional[str]:
@@ -58,10 +61,14 @@ def _find_warehouse_id() -> Optional[str]:
 
 
 def _execute_system_sql(sql: str, warehouse_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Execute SQL against Databricks system tables.
+    """Execute SQL against Databricks system tables via the SQL Statement
+    Execution API.
 
     Handles async execution: if the initial request returns PENDING or
     RUNNING, polls the statement status until it completes or times out.
+
+    Note: lives in billing_service for historical reasons; also used by
+    discovery_service and others as a general-purpose system-table helper.
     """
     import time
 
@@ -110,7 +117,6 @@ def _execute_system_sql(sql: str, warehouse_id: Optional[str] = None) -> List[Di
     status = resp_json.get("status", {}).get("state", "")
     statement_id = resp_json.get("statement_id", "")
 
-    # Poll if the statement is still running
     if status in ("PENDING", "RUNNING") and statement_id:
         poll_path = f"/api/2.0/sql/statements/{statement_id}"
         for attempt in range(_SQL_POLL_MAX):
@@ -135,7 +141,10 @@ def _execute_system_sql(sql: str, warehouse_id: Optional[str] = None) -> List[Di
             if status not in ("PENDING", "RUNNING"):
                 break
         else:
-            logger.warning("Statement %s timed out after %ss of polling", statement_id, _SQL_POLL_MAX * _SQL_POLL_INTERVAL)
+            logger.warning(
+                "Statement %s timed out after %ss of polling",
+                statement_id, _SQL_POLL_MAX * _SQL_POLL_INTERVAL,
+            )
             return []
 
     if status != "SUCCEEDED":
@@ -242,322 +251,33 @@ def ensure_billing_tables():
 
 
 # =====================================================================
-# REFRESH: system tables → Lakebase
+# REFRESH: now owned by workflows/09_discover_billing.py
 # =====================================================================
+# The in-app refresh path was removed. The discovery workflow pulls
+# from system.billing.usage + system.serving.endpoint_usage every
+# 30 min, writes to Delta, and 02_sync_to_lakebase mirrors the four
+# billing tables into Lakebase. The workflow also stamps
+# ``billing_cache_meta.last_refreshed`` after each successful sync,
+# so ``get_cache_status()`` continues to surface freshness info.
 
-def _is_stale(cache_key: str) -> bool:
-    """Check if a cache entry is stale (>24 h old or missing)."""
-    row = execute_one(
-        "SELECT last_refreshed FROM billing_cache_meta WHERE cache_key = %s",
-        (cache_key,),
-    )
-    if not row:
-        return True
-    age = (datetime.now(timezone.utc) - row["last_refreshed"].replace(tzinfo=timezone.utc)).total_seconds()
-    return age > _STALE_SECONDS
+def maybe_refresh_async() -> None:
+    """No-op stub. Refresh is now owned by the discovery workflow.
 
-
-def _update_meta(cache_key: str, rows_loaded: int):
-    execute_update(
-        """INSERT INTO billing_cache_meta (cache_key, last_refreshed, rows_loaded)
-           VALUES (%s, NOW(), %s)
-           ON CONFLICT (cache_key) DO UPDATE
-           SET last_refreshed = NOW(), rows_loaded = EXCLUDED.rows_loaded""",
-        (cache_key, rows_loaded),
-    )
-
-
-def refresh_serving_daily(days: int = _REFRESH_DAYS) -> int:
-    """Load model-serving cost data from system.billing.usage into Lakebase."""
-    sql = f"""
-    SELECT
-        CAST(u.usage_date AS STRING)              AS usage_date,
-        u.workspace_id,
-        u.usage_metadata.endpoint_name            AS endpoint_name,
-        u.sku_name,
-        ROUND(SUM(u.usage_quantity), 4)           AS total_dbus,
-        ROUND(SUM(u.usage_quantity *
-            COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
-        ), 4)                                      AS total_cost_usd
-    FROM system.billing.usage u
-    LEFT JOIN system.billing.list_prices lp
-        ON u.sku_name = lp.sku_name
-        AND u.cloud   = lp.cloud
-        AND u.usage_unit = lp.usage_unit
-        AND lp.price_end_time IS NULL
-    WHERE u.billing_origin_product = 'MODEL_SERVING'
-      AND u.usage_date >= current_date() - INTERVAL {days} DAYS
-      AND u.usage_metadata.endpoint_name IS NOT NULL
-      AND u.workspace_id IS NOT NULL
-    GROUP BY u.usage_date, u.workspace_id, u.usage_metadata.endpoint_name, u.sku_name
+    Kept as a callable so existing read functions that invoke it
+    defensively don't break. Safe to remove once all call sites are
+    cleaned up in a follow-up.
     """
-    rows = _execute_system_sql(sql)
-    if not rows:
-        _update_meta("serving_daily", 0)
-        logger.info("Refreshed billing_serving_daily: 0 rows (no new data)")
-        return 0
-
-    with DatabasePool.get_connection() as conn:
-        with conn.cursor() as cur:
-            for r in rows:
-                cur.execute(
-                    """INSERT INTO billing_serving_daily
-                       (usage_date, workspace_id, endpoint_name, sku_name, total_dbus, total_cost_usd)
-                       VALUES (%s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (usage_date, workspace_id, endpoint_name, sku_name)
-                       DO UPDATE SET total_dbus = EXCLUDED.total_dbus,
-                                     total_cost_usd = EXCLUDED.total_cost_usd""",
-                    (
-                        r["usage_date"],
-                        r["workspace_id"],
-                        r["endpoint_name"],
-                        r.get("sku_name", ""),
-                        float(r.get("total_dbus") or 0),
-                        float(r.get("total_cost_usd") or 0),
-                    ),
-                )
-            conn.commit()
-
-    _update_meta("serving_daily", len(rows))
-    logger.info("Refreshed billing_serving_daily: %s rows", len(rows))
-    return len(rows)
+    return
 
 
-def refresh_token_daily(days: int = _REFRESH_DAYS) -> int:
-    """Load token usage from system.serving.endpoint_usage into Lakebase."""
-    sql = f"""
-    SELECT
-        CAST(DATE(eu.request_time) AS STRING)     AS usage_date,
-        eu.workspace_id,
-        se.endpoint_name,
-        COUNT(*)                                   AS request_count,
-        SUM(eu.input_token_count)                  AS input_tokens,
-        SUM(eu.output_token_count)                 AS output_tokens,
-        ROUND(AVG(eu.input_token_count), 2)        AS avg_input_tokens,
-        ROUND(AVG(eu.output_token_count), 2)       AS avg_output_tokens
-    FROM system.serving.endpoint_usage eu
-    JOIN system.serving.served_entities se
-        ON eu.served_entity_id = se.served_entity_id
-    WHERE eu.request_time >= current_timestamp() - INTERVAL {days} DAYS
-      AND eu.workspace_id IS NOT NULL
-    GROUP BY DATE(eu.request_time), eu.workspace_id, se.endpoint_name
+def force_refresh_async(days: int = 90) -> None:
+    """No-op stub. Refresh is now owned by the discovery workflow.
+
+    To force a refresh, trigger ``workflows/09_discover_billing`` (or
+    its parent job) manually. The ``days`` parameter is accepted for
+    backward-compatible call sites but ignored.
     """
-    rows = _execute_system_sql(sql)
-    if not rows:
-        _update_meta("token_daily", 0)
-        logger.info("Refreshed billing_token_daily: 0 rows (no new data)")
-        return 0
-
-    with DatabasePool.get_connection() as conn:
-        with conn.cursor() as cur:
-            for r in rows:
-                cur.execute(
-                    """INSERT INTO billing_token_daily
-                       (usage_date, workspace_id, endpoint_name, request_count,
-                        input_tokens, output_tokens, avg_input_tokens, avg_output_tokens)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (usage_date, workspace_id, endpoint_name)
-                       DO UPDATE SET request_count = EXCLUDED.request_count,
-                                     input_tokens  = EXCLUDED.input_tokens,
-                                     output_tokens  = EXCLUDED.output_tokens,
-                                     avg_input_tokens  = EXCLUDED.avg_input_tokens,
-                                     avg_output_tokens  = EXCLUDED.avg_output_tokens""",
-                    (
-                        r["usage_date"],
-                        r["workspace_id"],
-                        r["endpoint_name"],
-                        int(r.get("request_count") or 0),
-                        int(r.get("input_tokens") or 0),
-                        int(r.get("output_tokens") or 0),
-                        float(r.get("avg_input_tokens") or 0),
-                        float(r.get("avg_output_tokens") or 0),
-                    ),
-                )
-            conn.commit()
-
-    _update_meta("token_daily", len(rows))
-    logger.info("Refreshed billing_token_daily: %s rows", len(rows))
-    return len(rows)
-
-
-def refresh_product_daily(days: int = _REFRESH_DAYS) -> int:
-    """Load all-product costs from system.billing.usage into Lakebase."""
-    sql = f"""
-    SELECT
-        CAST(u.usage_date AS STRING)               AS usage_date,
-        u.workspace_id,
-        u.billing_origin_product,
-        ROUND(SUM(u.usage_quantity), 4)             AS total_dbus,
-        ROUND(SUM(u.usage_quantity *
-            COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0)
-        ), 4)                                        AS total_cost_usd
-    FROM system.billing.usage u
-    LEFT JOIN system.billing.list_prices lp
-        ON u.sku_name = lp.sku_name
-        AND u.cloud   = lp.cloud
-        AND u.usage_unit = lp.usage_unit
-        AND lp.price_end_time IS NULL
-    WHERE u.usage_date >= current_date() - INTERVAL {days} DAYS
-      AND u.workspace_id IS NOT NULL
-    GROUP BY u.usage_date, u.workspace_id, u.billing_origin_product
-    """
-    rows = _execute_system_sql(sql)
-    if not rows:
-        _update_meta("product_daily", 0)
-        logger.info("Refreshed billing_product_daily: 0 rows (no new data)")
-        return 0
-
-    with DatabasePool.get_connection() as conn:
-        with conn.cursor() as cur:
-            for r in rows:
-                cur.execute(
-                    """INSERT INTO billing_product_daily
-                       (usage_date, workspace_id, billing_origin_product, total_dbus, total_cost_usd)
-                       VALUES (%s, %s, %s, %s, %s)
-                       ON CONFLICT (usage_date, workspace_id, billing_origin_product)
-                       DO UPDATE SET total_dbus = EXCLUDED.total_dbus,
-                                     total_cost_usd = EXCLUDED.total_cost_usd""",
-                    (
-                        r["usage_date"],
-                        r["workspace_id"],
-                        r["billing_origin_product"],
-                        float(r.get("total_dbus") or 0),
-                        float(r.get("total_cost_usd") or 0),
-                    ),
-                )
-            conn.commit()
-
-    _update_meta("product_daily", len(rows))
-    logger.info("Refreshed billing_product_daily: %s rows", len(rows))
-    return len(rows)
-
-
-def refresh_user_endpoint_daily(days: int = _REFRESH_DAYS) -> int:
-    """Load per-user, per-endpoint token usage from system.serving.endpoint_usage.
-
-    This uses the `requester` field (the actual user who sent the request)
-    and groups by endpoint_name so cost attribution at read time is precise:
-    each endpoint's billing cost is split across users by their exact share
-    of that endpoint's tokens.
-    """
-    sql = f"""
-    SELECT
-        CAST(DATE(eu.request_time) AS STRING)          AS usage_date,
-        eu.workspace_id,
-        se.endpoint_name,
-        COALESCE(eu.requester, 'unknown')              AS user_identity,
-        COUNT(*)                                        AS request_count,
-        COALESCE(SUM(eu.input_token_count), 0)          AS input_tokens,
-        COALESCE(SUM(eu.output_token_count), 0)         AS output_tokens
-    FROM system.serving.endpoint_usage eu
-    JOIN system.serving.served_entities se
-        ON eu.served_entity_id = se.served_entity_id
-    WHERE eu.request_time >= current_timestamp() - INTERVAL {days} DAYS
-      AND eu.workspace_id IS NOT NULL
-    GROUP BY DATE(eu.request_time), eu.workspace_id, se.endpoint_name, eu.requester
-    """
-    rows = _execute_system_sql(sql)
-    if not rows:
-        _update_meta("user_endpoint_daily", 0)
-        logger.info("Refreshed billing_user_endpoint_daily: 0 rows (no new data)")
-        return 0
-
-    with DatabasePool.get_connection() as conn:
-        with conn.cursor() as cur:
-            for r in rows:
-                cur.execute(
-                    """INSERT INTO billing_user_endpoint_daily
-                       (usage_date, workspace_id, endpoint_name, user_identity,
-                        request_count, input_tokens, output_tokens)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (usage_date, workspace_id, endpoint_name, user_identity)
-                       DO UPDATE SET request_count = EXCLUDED.request_count,
-                                     input_tokens  = EXCLUDED.input_tokens,
-                                     output_tokens  = EXCLUDED.output_tokens""",
-                    (
-                        r["usage_date"],
-                        r["workspace_id"],
-                        r["endpoint_name"],
-                        r.get("user_identity", "unknown"),
-                        int(r.get("request_count") or 0),
-                        int(r.get("input_tokens") or 0),
-                        int(r.get("output_tokens") or 0),
-                    ),
-                )
-            conn.commit()
-
-    _update_meta("user_endpoint_daily", len(rows))
-    logger.info("Refreshed billing_user_endpoint_daily: %s rows", len(rows))
-    return len(rows)
-
-
-def refresh_all(days: int = _REFRESH_DAYS) -> Dict[str, int]:
-    """Refresh all billing caches. Returns row counts per table."""
-    return {
-        "serving_daily": refresh_serving_daily(days),
-        "token_daily": refresh_token_daily(days),
-        "product_daily": refresh_product_daily(days),
-        "user_endpoint_daily": refresh_user_endpoint_daily(days),
-    }
-
-
-def _start_background_refresh(days: int = _REFRESH_DAYS):
-    """Spin up a daemon thread that refreshes all billing caches."""
-    global _refresh_in_progress
-    _refresh_in_progress = True          # set BEFORE thread start so callers see it immediately
-
-    def _do():
-        global _refresh_in_progress
-        with _refresh_lock:
-            try:
-                logger.info("Starting background billing cache refresh …")
-                result = refresh_all(days)
-                logger.info("Background refresh complete: %s", result)
-            except Exception as exc:
-                logger.warning("Background refresh failed: %s", exc)
-            finally:
-                _refresh_in_progress = False
-
-    t = threading.Thread(target=_do, daemon=True)
-    t.start()
-
-
-def _any_stale() -> bool:
-    """Single-query check for staleness across all billing cache keys."""
-    keys = ("serving_daily", "token_daily", "product_daily", "user_endpoint_daily")
-    rows = execute_query(
-        "SELECT cache_key, last_refreshed FROM billing_cache_meta WHERE cache_key = ANY(%s)",
-        (list(keys),),
-    )
-    if len(rows) < len(keys):
-        return True
-    now = datetime.now(timezone.utc)
-    return any(
-        (now - r["last_refreshed"].replace(tzinfo=timezone.utc)).total_seconds() > _STALE_SECONDS
-        for r in rows
-    )
-
-
-def maybe_refresh_async():
-    """If any cache is stale, trigger a background refresh (non-blocking)."""
-    if _refresh_in_progress:
-        return
-    try:
-        if _any_stale():
-            _start_background_refresh()
-    except Exception:
-        pass
-
-
-def force_refresh_async(days: int = _REFRESH_DAYS):
-    """Force a background refresh regardless of staleness (non-blocking).
-
-    Returns immediately.  The caller can poll ``get_cache_status()`` to
-    check progress via the ``is_refreshing`` flag.
-    """
-    if _refresh_in_progress:
-        return  # already running, skip
-    _start_background_refresh(days)
+    return
 
 
 # =====================================================================

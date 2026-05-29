@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Billing data refresh moved from app startup to the discovery workflow.** New task `workflows/09_discover_billing.py` pulls `system.billing.usage`, `system.billing.list_prices`, and `system.serving.endpoint_usage` every 30 min into four Delta tables (`billing_serving_daily`, `billing_token_daily`, `billing_product_daily`, `billing_user_endpoint_daily`). `02_sync_to_lakebase.py` (Phase 7) mirrors them to Lakebase and stamps `billing_cache_meta.last_refreshed`. The app's `billing_service.py` is now a read-only layer over the Lakebase cache — `maybe_refresh_async()`/`force_refresh_async()` are kept as no-op stubs for backward compatibility. Brings the billing pipeline in line with the project's discovery → Delta → Lakebase pattern and exposes per-endpoint cost data to Genie/analytics consumers via Delta.
+
 ### Added
 - Per-user / per-group **token budgets** (behind `FEATURE_BUDGETS_ENABLED`, defaults off). Admins set a token cap per principal scoped optionally to an endpoint and a period (day / month / quarter / year). The new "Budgets" sub-tab on AI Gateway shows real-time spent vs cap with `ok` / `warning` / `breached` status pills, a breached-count header banner, and a token-amount input that accepts K / M / B suffixes. Spend is computed on read from `gateway_usage_daily` (input + output tokens) — no separate cache, no dollar conversion. For authoritative billed dollars, the Governance tab remains the source of truth.
 - New Lakebase table `gateway_budgets` (created by `setup_lakebase_tables.py`); new REST surface `GET/POST/PATCH/DELETE /api/v1/gateway/budgets` plus `GET /api/v1/gateway/budgets/alerts`; admin gating via the existing `require_admin` dependency.
