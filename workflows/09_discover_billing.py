@@ -131,7 +131,14 @@ USER_EP_SCHEMA = StructType([
 def _execute_sql(sql: str) -> List[Dict[str, Any]]:
     """Run SQL via the Statement Execution API with EXTERNAL_LINKS disposition
     so large result sets (e.g. the all-products query that returns ~800k rows)
-    don't get silently truncated by the INLINE response size limit (~16MB)."""
+    don't get truncated by INLINE's ~16MB response cap.
+
+    Chunks are fetched by index from 0 to manifest.total_chunk_count - 1.
+    The API does NOT chain ``next_chunk_index`` reliably for multi-chunk
+    EXTERNAL_LINKS responses — we have to iterate explicitly. The initial
+    response contains chunk 0's link; chunks 1..N-1 are fetched via
+    ``/api/2.0/sql/statements/{sid}/result/chunks/{i}``.
+    """
     if not WAREHOUSE_ID:
         print("  No warehouse ID")
         return []
@@ -166,19 +173,16 @@ def _execute_sql(sql: str) -> List[Dict[str, Any]]:
         return []
 
     cols = [c["name"] for c in resp.get("manifest", {}).get("schema", {}).get("columns", [])]
-    result = resp.get("result", {}) or {}
+    total_chunks = int(resp.get("manifest", {}).get("total_chunk_count") or 0)
+    total_rows = int(resp.get("manifest", {}).get("total_row_count") or 0)
+    print(f"  manifest: {total_rows} rows in {total_chunks} chunk(s)")
 
-    # EXTERNAL_LINKS returns chunked presigned URLs in result.external_links.
-    # First chunk is in the initial response; further chunks must be fetched
-    # via subsequent GETs on /result/chunks/{chunk_index}.
     import json as _json
     import urllib.request as _ureq
     rows: List[Dict[str, Any]] = []
-    chunk = result
-    chunk_count = 0
-    while chunk is not None:
-        links = chunk.get("external_links") or []
-        for link in links:
+
+    def _download_chunk_links(chunk_obj: dict, chunk_label: str):
+        for link in chunk_obj.get("external_links") or []:
             url = link.get("external_link") or ""
             if not url:
                 continue
@@ -188,23 +192,20 @@ def _execute_sql(sql: str) -> List[Dict[str, Any]]:
                 for row in data:
                     rows.append(dict(zip(cols, row)))
             except Exception as exc:
-                print(f"  ⚠️  chunk download failed: {exc}")
-        chunk_count += 1
-        next_idx = chunk.get("next_chunk_index")
-        next_url = chunk.get("next_chunk_internal_link")
-        if next_idx is None and not next_url:
-            break
+                print(f"  ⚠️  {chunk_label} download failed: {exc}")
+
+    # Chunk 0's link is in the initial result. Re-use it.
+    _download_chunk_links(resp.get("result") or {}, "chunk 0")
+
+    # Chunks 1..N-1 must be fetched explicitly by index.
+    for i in range(1, total_chunks):
         try:
-            if next_url:
-                chunk = w.api_client.do("GET", next_url)
-            else:
-                chunk = w.api_client.do("GET", f"/api/2.0/sql/statements/{sid}/result/chunks/{next_idx}")
+            chunk = w.api_client.do("GET", f"/api/2.0/sql/statements/{sid}/result/chunks/{i}")
+            _download_chunk_links(chunk, f"chunk {i}")
         except Exception as exc:
-            print(f"  ⚠️  next chunk fetch failed: {exc}")
-            break
-        if chunk_count > 200:
-            print(f"  ⚠️  too many chunks, bailing at {chunk_count}")
-            break
+            print(f"  ⚠️  chunk {i} fetch failed: {exc}")
+
+    print(f"  collected {len(rows)}/{total_rows} rows")
     return rows
 
 # COMMAND ----------
