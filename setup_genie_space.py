@@ -99,27 +99,59 @@ def _tables(catalog: str, schema: str) -> List[str]:
 
 
 SAMPLE_QUESTIONS = [
-    # Inventory
+    # === INVENTORY ===
     "How many agents are deployed per workspace, broken down by type?",
     "List vector search endpoints with their index count",
     "Show me Genie Spaces grouped by workspace",
-    # Usage (tokens / requests)
+
+    # === USAGE (tokens / requests) ===
     "Top 10 users by token consumption this week",
     "Compare total tokens this month vs last month, broken down by endpoint",
     "Daily active users over the past 30 days",
-    # Cost ($)
+
+    # === COST ($) ===
     "Top 5 endpoints by Model Serving cost last week",
     "Show me cost trend by SKU over the past 30 days",
     "Which workspaces spent the most on Model Serving this month?",
     "Total Databricks spend last month vs this month, broken down by product",
-    # Trends / anomalies
+
+    # === TRENDS / ANOMALIES ===
     "Show me endpoints with declining token usage in the past 14 days",
     "Which users had a usage spike yesterday (> 3x their 7d average)?",
-    # Observability
+
+    # === OBSERVABILITY ===
     "Endpoints with the highest trace error rate in the last 24h",
     "Slowest traces yesterday by P95 latency",
-    # Knowledge bases
+
+    # === KNOWLEDGE BASES ===
     "Vector search endpoints by total cost last week",
+
+    # === ADOPTION / DORMANCY ===
+    "List serving endpoints with zero requests in the past 14 days",
+    "Which workspaces have agents deployed but no token usage this month?",
+    "Show vector search indexes that haven't been updated recently",
+
+    # === BEHAVIORAL PATTERNS ===
+    "What's the typical peak hour of day for token consumption?",
+    "Compare weekday vs weekend usage patterns over the past 30 days",
+    "Which users have the most consistent daily activity?",
+
+    # === PERFORMANCE / QUALITY ===
+    "Which endpoints have the highest tail latency (P99) in the past week?",
+    "Show me endpoints with more than 5% error rate in the past 7 days",
+    "Average response latency by endpoint over the last 24 hours",
+
+    # === COST EFFICIENCY ===
+    "What's the cost per 1000 tokens for each Model Serving endpoint?",
+    "Top 10 endpoints by cost per request last month",
+    "Which workspaces have the lowest cost-to-usage ratio?",
+
+    # === GROWTH / ONBOARDING ===
+    "Show me new users (first request in the past 7 days) this month",
+    "Daily new-user count over the past 60 days",
+
+    # === GOVERNANCE / CONCENTRATION ===
+    "Which 5 users account for the largest share of total tokens this quarter?",
 ]
 
 
