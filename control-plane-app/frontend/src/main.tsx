@@ -16,7 +16,6 @@ import ToolsPage from './pages/Tools'
 // import PlaygroundPage from './pages/Playground'  // hidden — embedded in Agents page
 import WorkspacesPage from './pages/Workspaces'
 import VectorSearchPage from './pages/VectorSearch'
-import AskPage from './pages/Ask'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -42,7 +41,6 @@ ReactDOM.createRoot(rootElement).render(
         <Routes>
           <Route element={<Layout />}>
             <Route path="/" element={<GovernancePage />} />
-            <Route path="/ask" element={<AskPage />} />
             <Route path="/agents" element={<AgentsPage />} />
             <Route path="/agents/detail/:agentId" element={<AgentDetailPage />} />
             <Route path="/tools" element={<ToolsPage />} />

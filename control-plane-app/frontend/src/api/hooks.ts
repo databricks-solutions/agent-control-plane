@@ -1653,3 +1653,113 @@ export function useGenieSpaceInfo(enabled = true) {
     enabled,
   })
 }
+
+// Conversation API — typed loosely on purpose. Genie's response shape is
+// {status, attachments[{query?, text?, suggested_questions?, attachment_id?}]}
+// and we want the frontend to render whatever attachments come back.
+
+export interface GenieMessage {
+  status: 'SUBMITTED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | string
+  id?: string
+  message_id?: string
+  conversation_id?: string
+  content?: string
+  attachments?: Array<{
+    attachment_id?: string
+    query?: { query?: string; description?: string }
+    text?: { content?: string } | string
+    suggested_questions?: { questions?: string[] } | string[]
+  }>
+}
+
+export interface StartConversationResp {
+  conversation: { id: string }
+  conversation_id: string
+  message: GenieMessage
+  message_id: string
+}
+
+export async function genieStartConversation(content: string, signal?: AbortSignal): Promise<StartConversationResp> {
+  const { data } = await apiClient.post('/genie/conversations', { content }, { signal })
+  return data as StartConversationResp
+}
+
+export async function genieGetMessage(
+  conversationId: string,
+  messageId: string,
+  signal?: AbortSignal,
+): Promise<GenieMessage> {
+  const { data } = await apiClient.get(
+    `/genie/conversations/${conversationId}/messages/${messageId}`,
+    { signal },
+  )
+  return data as GenieMessage
+}
+
+export async function genieFollowUp(
+  conversationId: string,
+  content: string,
+  signal?: AbortSignal,
+): Promise<GenieMessage> {
+  const { data } = await apiClient.post(
+    `/genie/conversations/${conversationId}/messages`,
+    { content },
+    { signal },
+  )
+  return data as GenieMessage
+}
+
+export interface GenieQueryResult {
+  columns: Array<{ name: string; type_text?: string }>
+  rows: any[][]
+  total_row_count?: number
+  truncated: boolean
+}
+
+/** Normalise the Databricks statement_response shape into something simple
+ *  for the chat bubble to render. Genie returns PROTOBUF_ARRAY format with
+ *  `data_typed_array` (rows of `{values: [{str|int|double|bool: ...}]}`), but
+ *  some statements come back as JSON_ARRAY with `data_array` (plain arrays). */
+function normalizeStatementRows(result: any): any[][] {
+  if (Array.isArray(result?.data_array)) return result.data_array
+  const typed = result?.data_typed_array
+  if (!Array.isArray(typed)) return []
+  return typed.map((row: any) =>
+    (row?.values ?? []).map((v: any) => {
+      if (v == null) return null
+      if (typeof v !== 'object') return v
+      // PROTOBUF_ARRAY scalar wrapper — first non-undefined value wins.
+      if ('str' in v) return v.str
+      if ('long' in v) return v.long
+      if ('int' in v) return v.int
+      if ('double' in v) return v.double
+      if ('float' in v) return v.float
+      if ('bool' in v) return v.bool
+      if ('null' in v) return null
+      const k = Object.keys(v)[0]
+      return k ? v[k] : null
+    })
+  )
+}
+
+export async function genieGetQueryResult(
+  conversationId: string,
+  messageId: string,
+  signal?: AbortSignal,
+): Promise<GenieQueryResult | null> {
+  try {
+    const { data } = await apiClient.get(
+      `/genie/conversations/${conversationId}/messages/${messageId}/query-result`,
+      { signal },
+    )
+    const sr = data?.statement_response
+    if (!sr) return null
+    const columns = sr.manifest?.schema?.columns ?? []
+    const rows = normalizeStatementRows(sr.result)
+    const total = sr.manifest?.total_row_count ?? rows.length
+    const truncated = sr.result?.next_chunk_index != null || (total != null && rows.length < total)
+    return { columns, rows, total_row_count: total, truncated }
+  } catch {
+    return null
+  }
+}
