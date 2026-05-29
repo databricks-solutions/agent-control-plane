@@ -158,6 +158,12 @@ SAMPLE_QUESTIONS = [
 # =====================================================================
 # Benchmarks — evaluate the space against expected SQL behavior
 # =====================================================================
+# Disabled by default. Flip INCLUDE_BENCHMARKS to True (or pass
+# --include-benchmarks) once we're ready to iterate on the eval set
+# — they need a tuning pass against Genie's actual generated SQL.
+
+INCLUDE_BENCHMARKS = False
+
 # Genie benchmarks accept only SQL-format expected answers (the API
 # enum BenchmarkAnswerFormat has just SQL and UNSPECIFIED — there is
 # no TEXT/PROSE format). The benchmark runner compares the model's
@@ -340,7 +346,10 @@ def build_serialized_space(catalog: str, schema: str) -> Dict[str, Any]:
                 {"id": _new_id(), "question": [q]} for q in SAMPLE_QUESTIONS
             ],
         },
-        "benchmarks": {
+    }
+
+    if INCLUDE_BENCHMARKS:
+        space["benchmarks"] = {
             "questions": [
                 {
                     "id": _new_id(),
@@ -354,8 +363,8 @@ def build_serialized_space(catalog: str, schema: str) -> Dict[str, Any]:
                 }
                 for b in _benchmark_sqls(catalog, schema)
             ],
-        },
-    }
+        }
+
     return space
 
 
