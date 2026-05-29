@@ -7,47 +7,44 @@ import {
   Tooltip,
   Legend,
   ResponsiveContainer,
-  Cell,
 } from 'recharts'
 import { LazyChart } from './LazyChart'
-import { DB_RED, DB_GRID, DB_AXIS_TEXT, DB_COLORS } from '@/lib/brand'
+import { DB_GRID, DB_AXIS_TEXT, DB_COLORS } from '@/lib/brand'
 
-interface BarChartProps {
+interface StackedBarChartProps {
+  /** Pre-pivoted data: one row per X category, with one numeric field per series. */
   data: Array<Record<string, any>>
-  dataKey: string
+  /** Field name for the X-axis category. */
   nameKey: string
-  color?: string
-  /** If true, each bar gets a unique color from the Databricks palette */
-  multiColor?: boolean
+  /** Series field names — each becomes a stacked segment. */
+  series: string[]
   height?: number
-  /** Formatter for Y-axis ticks (compact, e.g. 1.38B). */
   valueFormatter?: (v: any) => string
-  /** Formatter for tooltip values (full precision, defaults to valueFormatter). */
   tooltipFormatter?: (v: any) => string
 }
 
-export function BarChart({
+export function StackedBarChart({
   data,
-  dataKey,
   nameKey,
-  color,
-  multiColor = false,
+  series,
   height = 300,
   valueFormatter,
   tooltipFormatter,
-}: BarChartProps) {
-  const mainColor = color ?? DB_RED
+}: StackedBarChartProps) {
   const ttFmt = tooltipFormatter ?? valueFormatter
-
   return (
     <LazyChart height={height}>
       <ResponsiveContainer width="100%" height={height}>
         <RechartsBarChart data={data}>
           <CartesianGrid strokeDasharray="3 3" stroke={DB_GRID} />
           <XAxis dataKey={nameKey} tick={{ fontSize: 12, fill: DB_AXIS_TEXT }} />
-          <YAxis tick={{ fontSize: 12, fill: DB_AXIS_TEXT }} tickFormatter={valueFormatter} width={valueFormatter ? 60 : undefined} />
+          <YAxis
+            tick={{ fontSize: 12, fill: DB_AXIS_TEXT }}
+            tickFormatter={valueFormatter}
+            width={valueFormatter ? 60 : undefined}
+          />
           <Tooltip
-            cursor={{ fill: DB_RED, fillOpacity: 0.05 }}
+            cursor={{ fill: '#000', fillOpacity: 0.04 }}
             formatter={ttFmt ? (v: any) => ttFmt(v) : undefined}
             contentStyle={{
               borderRadius: 8,
@@ -58,12 +55,15 @@ export function BarChart({
             }}
           />
           <Legend wrapperStyle={{ fontSize: 13 }} />
-          <Bar dataKey={dataKey} fill={mainColor} radius={[4, 4, 0, 0]}>
-            {multiColor &&
-              data.map((_, index) => (
-                <Cell key={`cell-${index}`} fill={DB_COLORS[index % DB_COLORS.length]} />
-              ))}
-          </Bar>
+          {series.map((s, i) => (
+            <Bar
+              key={s}
+              dataKey={s}
+              stackId="x"
+              fill={DB_COLORS[i % DB_COLORS.length]}
+              radius={i === series.length - 1 ? [4, 4, 0, 0] : 0}
+            />
+          ))}
         </RechartsBarChart>
       </ResponsiveContainer>
     </LazyChart>

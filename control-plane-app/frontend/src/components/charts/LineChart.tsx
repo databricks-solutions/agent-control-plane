@@ -20,6 +20,10 @@ interface LineChartProps {
   name?: string
   color?: string
   height?: number
+  /** Formatter for Y-axis ticks (compact, e.g. 1.38B). */
+  valueFormatter?: (v: any) => string
+  /** Formatter for tooltip values (full precision, defaults to valueFormatter). */
+  tooltipFormatter?: (v: any) => string
 }
 
 export function LineChart({
@@ -29,6 +33,8 @@ export function LineChart({
   name = 'Value',
   color,
   height = 300,
+  valueFormatter,
+  tooltipFormatter,
 }: LineChartProps) {
   const chartData = data.map((item) => ({
     ...item,
@@ -36,6 +42,7 @@ export function LineChart({
   }))
 
   const mainColor = color ?? DB_RED
+  const ttFmt = tooltipFormatter ?? valueFormatter
 
   return (
     <LazyChart height={height}>
@@ -43,8 +50,10 @@ export function LineChart({
         <RechartsLineChart data={chartData}>
           <CartesianGrid strokeDasharray="3 3" stroke={DB_GRID} />
           <XAxis dataKey="time" tick={{ fontSize: 12, fill: DB_AXIS_TEXT }} />
-          <YAxis tick={{ fontSize: 12, fill: DB_AXIS_TEXT }} />
+          <YAxis tick={{ fontSize: 12, fill: DB_AXIS_TEXT }} tickFormatter={valueFormatter} width={valueFormatter ? 60 : undefined} />
           <Tooltip
+            cursor={{ stroke: DB_GRID, strokeWidth: 1 }}
+            formatter={ttFmt ? (v: any) => ttFmt(v) : undefined}
             contentStyle={{
               borderRadius: 8,
               border: `1px solid ${DB_GRID}`,

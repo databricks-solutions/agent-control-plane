@@ -12,9 +12,13 @@ import { DB_COLORS, DB_GRID } from '@/lib/brand'
 interface PieChartProps {
   data: Array<{ name: string; value: number }>
   height?: number
+  /** If true, render as a donut (hollow ring). */
+  donut?: boolean
+  /** Formatter for tooltip values + legend (e.g. $12K). */
+  valueFormatter?: (v: any) => string
 }
 
-export function PieChart({ data, height = 300 }: PieChartProps) {
+export function PieChart({ data, height = 300, donut = false, valueFormatter }: PieChartProps) {
   return (
     <LazyChart height={height}>
       <ResponsiveContainer width="100%" height={height}>
@@ -25,6 +29,7 @@ export function PieChart({ data, height = 300 }: PieChartProps) {
           cy="50%"
           labelLine={false}
           label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+          innerRadius={donut ? 50 : 0}
           outerRadius={80}
           fill={DB_COLORS[0]}
           dataKey="value"
@@ -34,6 +39,7 @@ export function PieChart({ data, height = 300 }: PieChartProps) {
           ))}
         </Pie>
         <Tooltip
+          formatter={valueFormatter ? (v: any) => valueFormatter(v) : undefined}
           contentStyle={{
             borderRadius: 8,
             border: `1px solid ${DB_GRID}`,
