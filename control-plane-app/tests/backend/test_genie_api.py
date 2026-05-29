@@ -30,7 +30,8 @@ class TestGenieSpaceInfo:
             assert r.json() == {
                 "available": True,
                 "space_id": "01f15b51d23812d695fd6c12d448cdf4",
-                "space_url": f"{host}/genie/spaces/01f15b51d23812d695fd6c12d448cdf4",
+                # /rooms/ is the UI route; /spaces/ is the REST API.
+                "space_url": f"{host}/genie/rooms/01f15b51d23812d695fd6c12d448cdf4",
             }
 
     def test_unavailable_when_host_missing(self, app_client):

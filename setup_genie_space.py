@@ -510,7 +510,8 @@ def main() -> int:
         print(f"  ✅ created. space_id: {sid}")
         host = (w.config.host or "").rstrip("/")
         if host:
-            print(f"  URL: {host}/genie/spaces/{sid}")
+            # /genie/rooms/{id} is the UI route; /genie/spaces/{id} is the REST API.
+            print(f"  URL: {host}/genie/rooms/{sid}")
         print()
         print("Next steps:")
         print(f"  1. Add to your app's .env:   GENIE_SPACE_ID={sid}")
