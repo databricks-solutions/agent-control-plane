@@ -1575,6 +1575,13 @@ with billing_conn.cursor() as cur:
             rows_loaded    INTEGER NOT NULL DEFAULT 0
         )""",
         "ALTER TABLE billing_cache_meta ADD COLUMN IF NOT EXISTS value_text TEXT",
+        # ALTERs for tables that pre-existed without last_synced — CREATE TABLE
+        # IF NOT EXISTS above is a no-op when the table already exists, so these
+        # ADD COLUMN statements are needed to bring older schemas up to date.
+        "ALTER TABLE billing_serving_daily        ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
+        "ALTER TABLE billing_token_daily          ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
+        "ALTER TABLE billing_product_daily        ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
+        "ALTER TABLE billing_user_endpoint_daily  ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
         "CREATE INDEX IF NOT EXISTS idx_bsd_ws  ON billing_serving_daily  (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_btd_ws  ON billing_token_daily    (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_bpd_ws  ON billing_product_daily  (workspace_id)",

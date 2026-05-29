@@ -129,12 +129,20 @@ USER_EP_SCHEMA = StructType([
 # COMMAND ----------
 
 def _execute_sql(sql: str) -> List[Dict[str, Any]]:
+    """Run SQL via the Statement Execution API with EXTERNAL_LINKS disposition
+    so large result sets (e.g. the all-products query that returns ~800k rows)
+    don't get silently truncated by the INLINE response size limit (~16MB)."""
     if not WAREHOUSE_ID:
         print("  No warehouse ID")
         return []
     w = WorkspaceClient()
-    body = {"warehouse_id": WAREHOUSE_ID, "statement": sql,
-            "wait_timeout": "50s", "disposition": "INLINE", "format": "JSON_ARRAY"}
+    body = {
+        "warehouse_id": WAREHOUSE_ID,
+        "statement": sql,
+        "wait_timeout": "50s",
+        "disposition": "EXTERNAL_LINKS",
+        "format": "JSON_ARRAY",
+    }
     try:
         resp = w.api_client.do("POST", "/api/2.0/sql/statements", body=body)
     except Exception as exc:
@@ -156,8 +164,48 @@ def _execute_sql(sql: str) -> List[Dict[str, Any]]:
         err = resp.get("status", {}).get("error", {})
         print(f"  SQL {status}: {err.get('message', '')[:300]}")
         return []
+
     cols = [c["name"] for c in resp.get("manifest", {}).get("schema", {}).get("columns", [])]
-    return [dict(zip(cols, row)) for row in resp.get("result", {}).get("data_array", [])]
+    result = resp.get("result", {}) or {}
+
+    # EXTERNAL_LINKS returns chunked presigned URLs in result.external_links.
+    # First chunk is in the initial response; further chunks must be fetched
+    # via subsequent GETs on /result/chunks/{chunk_index}.
+    import json as _json
+    import urllib.request as _ureq
+    rows: List[Dict[str, Any]] = []
+    chunk = result
+    chunk_count = 0
+    while chunk is not None:
+        links = chunk.get("external_links") or []
+        for link in links:
+            url = link.get("external_link") or ""
+            if not url:
+                continue
+            try:
+                with _ureq.urlopen(url, timeout=60) as r:
+                    data = _json.loads(r.read())
+                for row in data:
+                    rows.append(dict(zip(cols, row)))
+            except Exception as exc:
+                print(f"  ⚠️  chunk download failed: {exc}")
+        chunk_count += 1
+        next_idx = chunk.get("next_chunk_index")
+        next_url = chunk.get("next_chunk_internal_link")
+        if next_idx is None and not next_url:
+            break
+        try:
+            if next_url:
+                chunk = w.api_client.do("GET", next_url)
+            else:
+                chunk = w.api_client.do("GET", f"/api/2.0/sql/statements/{sid}/result/chunks/{next_idx}")
+        except Exception as exc:
+            print(f"  ⚠️  next chunk fetch failed: {exc}")
+            break
+        if chunk_count > 200:
+            print(f"  ⚠️  too many chunks, bailing at {chunk_count}")
+            break
+    return rows
 
 # COMMAND ----------
 
