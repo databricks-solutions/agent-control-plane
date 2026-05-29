@@ -16,35 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **In-chat retry** on errors (re-asks the previous question), **cancel button** while Genie is thinking (AbortController-aware poll loop), and **conversation persistence** across hard refresh via sessionStorage.
 - Per-user / per-group **token budgets** (behind `FEATURE_BUDGETS_ENABLED`, defaults off). Admins set a token cap per principal scoped optionally to an endpoint and a period (day / month / quarter / year). The new "Budgets" sub-tab on AI Gateway shows real-time spent vs cap with `ok` / `warning` / `breached` status pills, a breached-count header banner, and a token-amount input that accepts K / M / B suffixes. Spend is computed on read from `gateway_usage_daily` (input + output tokens) — no separate cache, no dollar conversion. For authoritative billed dollars, the Governance tab remains the source of truth.
 - New Lakebase table `gateway_budgets` (created by `setup_lakebase_tables.py`); new REST surface `GET/POST/PATCH/DELETE /api/v1/gateway/budgets` plus `GET /api/v1/gateway/budgets/alerts`; admin gating via the existing `require_admin` dependency.
-- Knowledge Bases page: unified Vector Search + Lakebase monitoring with cost attribution
-- Vector Search: endpoint/index discovery, sync status, health history, workload cost breakdown
-- Lakebase: instance inventory, compute vs storage cost, per-workspace breakdown
-- Gateway usage caching: all system.serving queries cached via workflow (zero live queries)
-- User analytics caching: activity data cached via workflow
-- 6 parallel discovery workflow tasks (agents, observability, knowledge bases, user analytics, gateway usage)
-- All billing data cached in `kb_billing_daily` Lakebase table
-- Recharts line charts for cost trends on Knowledge Bases page
-- Trace discovery: Tier 2a (AI Gateway / Model Serving inference logs from `*_payload` UC tables) and Tier 2b (UC-stored MLflow traces from both `*_otel_spans` and `trace_logs_*` table formats), both account-wide via Unity Catalog SQL
-- Gateway Requests panel in Observability with payload deep-dive
-- Trace deep-dive view now serves UC-stored traces from the Lakebase cache (no MLflow REST round-trip)
-- Trace and gateway-log time-window selectors extended to 180d / 365d
 
 ### Changed
 - **Billing data refresh moved from app startup to the discovery workflow.** New task `workflows/09_discover_billing.py` pulls `system.billing.usage`, `system.billing.list_prices`, and `system.serving.endpoint_usage` every 30 min into four Delta tables (`billing_serving_daily`, `billing_token_daily`, `billing_product_daily`, `billing_user_endpoint_daily`). `02_sync_to_lakebase.py` (Phase 7) mirrors them to Lakebase and stamps `billing_cache_meta.last_refreshed`. The app's `billing_service.py` is now a read-only layer over the Lakebase cache — `maybe_refresh_async()`/`force_refresh_async()` are kept as no-op stubs for backward compatibility. Brings the billing pipeline in line with the project's discovery → Delta → Lakebase pattern and exposes per-endpoint cost data to Genie/analytics consumers via Delta.
-- Knowledge Bases billing reads from Lakebase cache (was live system table queries)
-- Gateway usage reads from Lakebase cache (was live system table queries)
-- User analytics reads from Lakebase cache (was live system table queries)
-- Sidebar nav reordered: Agents → AI Gateway → Knowledge Bases → Tools → ...
-- Trace discovery's visibility model and run-as principal recommendation documented in README and installation guide
-- `observability_trace_details` lookup falls back to request_id-only when workspace_id is empty (UC traces have no owning workspace)
-
-### Fixed
-- `grant_sp_lakebase.py` now registers the app SP correctly on Provisioned Lakebase via `POST /api/2.0/database/instances/{name}/roles` with `identity_type=SERVICE_PRINCIPAL`. The previous Provisioned-mode branch only printed a TODO message and skipped role registration, leaving operators to do it by hand — and raw psql `CREATE ROLE` produced a `PG_ONLY` role that couldn't validate Databricks-OAuth-minted passwords (every app Lakebase read failed with `password authentication failed`)
-- `02_sync_to_lakebase.py` wraps all DDL (ALTER, CREATE INDEX) in PostgreSQL savepoints so the workflow tolerates non-owner-runs without poisoning the surrounding transaction (caught failures roll back to the savepoint and the run continues)
-- Installation guide documents the workflow-before-app deploy order to avoid the SP-ownership trap on fresh Lakebase instances
-
-### Notes
-- Tier 3 (cross-workspace MLflow REST fan-out for default-backend traces) is on the roadmap. Until then, default-backend traces are visible only from within their owning workspace; UC-stored traces and AI Gateway logs are covered account-wide.
 
 ## [0.1.0] - 2026-04-09
 
