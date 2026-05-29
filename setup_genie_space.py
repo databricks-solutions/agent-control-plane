@@ -156,6 +156,161 @@ SAMPLE_QUESTIONS = [
 
 
 # =====================================================================
+# Benchmarks — evaluate the space against expected SQL behavior
+# =====================================================================
+# Genie benchmarks accept only SQL-format expected answers (the API
+# enum BenchmarkAnswerFormat has just SQL and UNSPECIFIED — there is
+# no TEXT/PROSE format). The benchmark runner compares the model's
+# generated SQL against this expected SQL using an LLM judge that
+# tolerates equivalent variations (different aliases, equivalent
+# JOIN orderings, etc.).
+#
+# Designed to catch regressions in the things that matter most:
+#   - cost ($) vs tokens disambiguation — the #1 way Genie can be wrong here
+#   - cross-table JOIN reasoning
+#   - workspace / date filtering
+#   - the user-identity column naming quirk (requester vs user_identity vs user_id)
+#   - dormancy / no-data handling
+
+_C = "serverless_b4nc10_catalog.control_plane"  # short alias used in expected SQL — Genie
+                                                 # accepts the fully-qualified form too.
+
+
+def _benchmark_sqls(catalog: str, schema: str) -> List[Dict[str, str]]:
+    """Build the benchmarks list with the right catalog/schema baked in."""
+    q = f"{catalog}.{schema}"
+    return [
+        # --- Cost vs tokens disambiguation (critical) ---
+        {
+            "question": "How much did we spend on Model Serving last month?",
+            "expected_sql": f"""SELECT SUM(total_cost_usd) AS total_cost_usd
+FROM {q}.billing_serving_daily
+WHERE usage_date >= DATE_TRUNC('MONTH', CURRENT_DATE - INTERVAL 1 MONTH)
+  AND usage_date <  DATE_TRUNC('MONTH', CURRENT_DATE)""",
+        },
+        {
+            "question": "How many tokens were consumed last month?",
+            "expected_sql": f"""SELECT SUM(input_tokens + output_tokens) AS total_tokens
+FROM {q}.gateway_usage_daily
+WHERE usage_date >= DATE_TRUNC('MONTH', CURRENT_DATE - INTERVAL 1 MONTH)
+  AND usage_date <  DATE_TRUNC('MONTH', CURRENT_DATE)""",
+        },
+
+        # --- Cross-table JOIN reasoning ---
+        {
+            "question": "Show me each endpoint's cost and request count for the past 7 days",
+            "expected_sql": f"""SELECT
+  b.endpoint_name,
+  SUM(b.total_cost_usd) AS total_cost_usd,
+  SUM(g.request_count)  AS total_requests
+FROM {q}.billing_serving_daily b
+JOIN {q}.gateway_usage_daily g
+  ON b.usage_date    = g.usage_date
+ AND b.workspace_id  = g.workspace_id
+ AND b.endpoint_name = g.endpoint_name
+WHERE b.usage_date >= CURRENT_DATE - INTERVAL 7 DAY
+GROUP BY b.endpoint_name
+ORDER BY total_cost_usd DESC""",
+        },
+
+        # --- User identity naming quirk ---
+        {
+            "question": "Show me Alice's token usage this week",
+            "expected_sql": f"""SELECT SUM(input_tokens + output_tokens) AS total_tokens
+FROM {q}.gateway_usage_daily
+WHERE LOWER(requester) LIKE '%alice%'
+  AND usage_date >= CURRENT_DATE - INTERVAL 7 DAY""",
+        },
+
+        # --- Workspace filtering (string type) ---
+        {
+            "question": "What were the top 3 endpoints by cost in workspace 7474647387698456 last week?",
+            "expected_sql": f"""SELECT endpoint_name, SUM(total_cost_usd) AS total_cost_usd
+FROM {q}.billing_serving_daily
+WHERE workspace_id = '7474647387698456'
+  AND usage_date >= CURRENT_DATE - INTERVAL 7 DAY
+GROUP BY endpoint_name
+ORDER BY total_cost_usd DESC
+LIMIT 3""",
+        },
+
+        # --- Date arithmetic (two non-overlapping windows) ---
+        {
+            "question": "Compare total token usage this week vs last week",
+            "expected_sql": f"""SELECT
+  SUM(CASE WHEN usage_date >= CURRENT_DATE - INTERVAL 7 DAY
+            THEN input_tokens + output_tokens ELSE 0 END) AS tokens_this_week,
+  SUM(CASE WHEN usage_date >= CURRENT_DATE - INTERVAL 14 DAY
+            AND usage_date <  CURRENT_DATE - INTERVAL 7 DAY
+            THEN input_tokens + output_tokens ELSE 0 END) AS tokens_last_week
+FROM {q}.gateway_usage_daily
+WHERE usage_date >= CURRENT_DATE - INTERVAL 14 DAY""",
+        },
+
+        # --- Agent-type breakdown ---
+        {
+            "question": "How many serving endpoints, apps, and Genie spaces are deployed in total?",
+            "expected_sql": f"""SELECT type, COUNT(*) AS count
+FROM {q}.discovered_agents
+WHERE type IN ('serving_endpoint', 'databricks_app', 'genie_space')
+GROUP BY type
+ORDER BY type""",
+        },
+
+        # --- Cost-per-token efficiency (cross-table division) ---
+        {
+            "question": "What's the cost per 1000 tokens for each Model Serving endpoint last week?",
+            "expected_sql": f"""SELECT
+  b.endpoint_name,
+  SUM(b.total_cost_usd) * 1000.0
+    / NULLIF(SUM(g.input_tokens + g.output_tokens), 0) AS cost_per_1k_tokens
+FROM {q}.billing_serving_daily b
+JOIN {q}.gateway_usage_daily g
+  ON b.usage_date    = g.usage_date
+ AND b.workspace_id  = g.workspace_id
+ AND b.endpoint_name = g.endpoint_name
+WHERE b.usage_date >= CURRENT_DATE - INTERVAL 7 DAY
+GROUP BY b.endpoint_name
+ORDER BY cost_per_1k_tokens DESC""",
+        },
+
+        # --- Dormancy (NOT IN / anti-join) ---
+        {
+            "question": "Which serving endpoints had zero requests in the past 14 days?",
+            "expected_sql": f"""SELECT DISTINCT endpoint_name
+FROM {q}.discovered_agents
+WHERE type = 'serving_endpoint'
+  AND endpoint_name NOT IN (
+    SELECT DISTINCT endpoint_name
+    FROM {q}.gateway_usage_daily
+    WHERE usage_date >= CURRENT_DATE - INTERVAL 14 DAY
+  )""",
+        },
+
+        # --- Top-N concentration (window + ratio) ---
+        {
+            "question": "What percentage of total tokens did the top 5 users consume this month?",
+            "expected_sql": f"""WITH user_totals AS (
+  SELECT requester,
+         SUM(input_tokens + output_tokens) AS user_tokens
+  FROM {q}.gateway_usage_daily
+  WHERE usage_date >= DATE_TRUNC('MONTH', CURRENT_DATE)
+  GROUP BY requester
+),
+ranked AS (
+  SELECT user_tokens, RANK() OVER (ORDER BY user_tokens DESC) AS rnk
+  FROM user_totals
+)
+SELECT ROUND(
+  SUM(CASE WHEN rnk <= 5 THEN user_tokens ELSE 0 END) * 100.0
+  / NULLIF(SUM(user_tokens), 0), 1
+) AS top5_share_percent
+FROM ranked""",
+        },
+    ]
+
+
+# =====================================================================
 # Serialized-space builder (self-contained — no external deps)
 # =====================================================================
 
@@ -183,6 +338,21 @@ def build_serialized_space(catalog: str, schema: str) -> Dict[str, Any]:
         "config": {
             "sample_questions": [
                 {"id": _new_id(), "question": [q]} for q in SAMPLE_QUESTIONS
+            ],
+        },
+        "benchmarks": {
+            "questions": [
+                {
+                    "id": _new_id(),
+                    "question": [b["question"]],
+                    "answer": [
+                        {
+                            "format": "SQL",
+                            "content": b["expected_sql"].splitlines(keepends=True),
+                        }
+                    ],
+                }
+                for b in _benchmark_sqls(catalog, schema)
             ],
         },
     }
