@@ -4,7 +4,7 @@ import { apiClient } from './client'
 // Config
 export interface AppConfig {
   databricks_host: string
-  features?: { budgets_enabled?: boolean }
+  features?: { budgets_enabled?: boolean; genie_enabled?: boolean }
 }
 
 export function useAppConfig() {
@@ -1631,5 +1631,25 @@ export function useLBTopWorkspacesDaily(days = 30) {
       const { data } = await apiClient.get('/vector-search/lakebase/cost/top-workspaces-daily', { params: { days } })
       return Array.isArray(data) ? data : []
     },
+  })
+}
+
+// ── Genie Ask tab (feature-flagged via FEATURE_GENIE_ENABLED) ──
+
+export interface GenieSpaceInfo {
+  available: boolean
+  space_id: string | null
+  space_url: string | null
+}
+
+export function useGenieSpaceInfo(enabled = true) {
+  return useQuery({
+    queryKey: ['genie', 'space-info'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/genie/space-info')
+      return data as GenieSpaceInfo
+    },
+    staleTime: 600_000, // 10 min — the space URL doesn't change between deploys
+    enabled,
   })
 }

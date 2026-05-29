@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import {
   Bot,
@@ -10,6 +10,7 @@ import {
   UserCog,
   PanelLeftClose,
   PanelLeftOpen,
+  Sparkles,
   Sun,
   Moon,
   Globe,
@@ -18,8 +19,11 @@ import DatabricksLogo from './DatabricksLogo'
 import { useTheme } from '@/context/ThemeContext'
 import { useAppConfig, useCurrentUser, useGatewayBudgetAlerts } from '@/api/hooks'
 
-const navItems = [
+// "Ask" (Genie) sits right after Governance when enabled. Items are filtered
+// at render time based on feature flags from /api/v1/config.
+const baseNavItems = [
   { to: '/', label: 'Governance', icon: Shield, exact: true },
+  { to: '/ask', label: 'Ask', icon: Sparkles, feature: 'genie' as const },
   { to: '/agents', label: 'Agents', icon: Bot },
   { to: '/ai-gateway', label: 'AI Gateway', icon: Waypoints },
   { to: '/vector-search', label: 'Knowledge Bases', icon: Database },
@@ -39,10 +43,16 @@ export default function Layout() {
   // call the API at all when budgets is off — no 404 spam.
   const { data: config } = useAppConfig()
   const budgetsEnabled = !!config?.features?.budgets_enabled
+  const genieEnabled = !!config?.features?.genie_enabled
   const { data: budgetAlerts } = useGatewayBudgetAlerts(budgetsEnabled)
   const badges: Record<string, number> = {
     '/ai-gateway': budgetAlerts?.length ?? 0,
   }
+
+  const navItems = useMemo(() => baseNavItems.filter(item => {
+    if (item.feature === 'genie') return genieEnabled
+    return true
+  }), [genieEnabled])
 
   return (
     <div className="flex h-screen bg-db-gray-50 dark:bg-gray-900">

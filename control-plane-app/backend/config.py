@@ -34,6 +34,10 @@ class Settings(BaseSettings):
 
     # Feature flags — default OFF, flip via env var to dark-launch into prod.
     feature_budgets_enabled: bool = False
+    feature_genie_enabled: bool = False
+
+    # Genie Ask tab — space id minted by setup_genie_space.py and pinned via env.
+    genie_space_id: str = ""
 
     model_config = {
         "env_file": ".env",
