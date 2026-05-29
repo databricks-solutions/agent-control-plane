@@ -960,12 +960,16 @@ export function useBillingRefresh() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (days: number = 90) => {
+      // The POST is a no-op since refresh moved to the discovery workflow
+      // (workflows/09_discover_billing). The button now means "re-pull from
+      // Lakebase" — the workflow may have written new rows since page load.
       const { data } = await apiClient.post('/billing/cache/refresh', null, { params: { days } })
       return data
     },
     onSuccess: () => {
-      // Immediately re-poll cache status so the UI shows "Refreshing…"
-      queryClient.invalidateQueries({ queryKey: ['billing', 'cache-status'] })
+      // Invalidate ALL billing queries so the UI re-pulls Lakebase data.
+      // Matches any query whose key starts with ['billing', ...].
+      queryClient.invalidateQueries({ queryKey: ['billing'] })
     },
   })
 }
