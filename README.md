@@ -97,8 +97,8 @@ Identity and access management with all principals, builders/users breakdown, RB
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Databricks APIs + System Tables                     │
-│  (serving, billing, mlflow, access, apps, genie)     │
+│  Databricks APIs + System Tables                    │
+│  (serving, billing, mlflow, access, apps, genie)    │
 └──────────────────────┬──────────────────────────────┘
                        │  Scheduled workflow (every 30 min)
                        ▼
