@@ -20,6 +20,7 @@ from backend.services.billing_service import (
     force_refresh_async,
     maybe_refresh_async,
     get_all_page_data,
+    get_cost_by_user,
 )
 
 router = APIRouter(prefix="/billing", tags=["billing"], dependencies=[Depends(get_current_user)])
@@ -128,3 +129,13 @@ def product_costs(
 ):
     """Total cost per Databricks product."""
     return get_all_product_costs(days, workspace_id=workspace_id)
+
+
+@router.get("/cost-by-user")
+def cost_by_user(
+    days: int = Query(default=30, ge=1, le=365),
+    workspace_id: Optional[str] = Query(default=None),
+):
+    """Top users by cost. Prefers ACTUAL Unity AI Gateway v2 attribution and
+    falls back to the token-share estimate; response ``source`` says which."""
+    return get_cost_by_user(days, workspace_id=workspace_id)

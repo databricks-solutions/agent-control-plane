@@ -1517,12 +1517,14 @@ BSD_TABLE  = f"{CATALOG}.{SCHEMA}.billing_serving_daily"
 BTD_TABLE  = f"{CATALOG}.{SCHEMA}.billing_token_daily"
 BPD_TABLE  = f"{CATALOG}.{SCHEMA}.billing_product_daily"
 BUED_TABLE = f"{CATALOG}.{SCHEMA}.billing_user_endpoint_daily"
+BUCD_TABLE = f"{CATALOG}.{SCHEMA}.billing_user_cost_daily"
 
 billing_conn = get_lakebase_connection()
 bsd_count = 0
 btd_count = 0
 bpd_count = 0
 bued_count = 0
+bucd_count = 0
 
 # Ensure billing tables (idempotent — also created by app's ensure_billing_tables on startup)
 with billing_conn.cursor() as cur:
@@ -1569,6 +1571,17 @@ with billing_conn.cursor() as cur:
             last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             PRIMARY KEY (usage_date, workspace_id, endpoint_name, user_identity)
         )""",
+        """CREATE TABLE IF NOT EXISTS billing_user_cost_daily (
+            usage_date     DATE          NOT NULL,
+            workspace_id   TEXT          NOT NULL,
+            endpoint_id    TEXT          NOT NULL DEFAULT '',
+            endpoint_name  TEXT          NOT NULL DEFAULT '',
+            run_by         TEXT          NOT NULL DEFAULT '',
+            total_dbus     NUMERIC(18,4) NOT NULL DEFAULT 0,
+            total_cost_usd NUMERIC(18,4) NOT NULL DEFAULT 0,
+            last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (usage_date, workspace_id, endpoint_id, run_by)
+        )""",
         """CREATE TABLE IF NOT EXISTS billing_cache_meta (
             cache_key      TEXT PRIMARY KEY,
             last_refreshed TIMESTAMP WITH TIME ZONE,
@@ -1586,6 +1599,7 @@ with billing_conn.cursor() as cur:
         "CREATE INDEX IF NOT EXISTS idx_btd_ws  ON billing_token_daily    (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_bpd_ws  ON billing_product_daily  (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_bued_ws ON billing_user_endpoint_daily (workspace_id)",
+        "CREATE INDEX IF NOT EXISTS idx_bucd_ws ON billing_user_cost_daily (workspace_id)",
     ]:
         try:
             cur.execute(ddl)
@@ -1736,6 +1750,38 @@ try:
 except Exception as exc:
     print(f"  ⚠️  billing_user_endpoint_daily sync failed: {exc}")
 
+# Sync billing_user_cost_daily (actual per-user $ — UAG v2 attribution)
+print(f"▸ Syncing {BUCD_TABLE} → billing_user_cost_daily ...")
+try:
+    with billing_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE billing_user_cost_daily")
+        billing_conn.commit()
+    bucd_rows = spark.read.table(BUCD_TABLE).collect()
+    if bucd_rows:
+        values = [(r.usage_date, r.workspace_id, r.endpoint_id or "", r.endpoint_name or "",
+                   r.run_by or "unknown",
+                   float(r.total_dbus or 0), float(r.total_cost_usd or 0))
+                  for r in bucd_rows]
+        bucd_count = len(values)
+        with billing_conn.cursor() as cur:
+            execute_values(cur,
+                """INSERT INTO billing_user_cost_daily
+                   (usage_date, workspace_id, endpoint_id, endpoint_name, run_by,
+                    total_dbus, total_cost_usd, last_synced)
+                   VALUES %s
+                   ON CONFLICT (usage_date, workspace_id, endpoint_id, run_by) DO UPDATE SET
+                       endpoint_name = EXCLUDED.endpoint_name,
+                       total_dbus = EXCLUDED.total_dbus,
+                       total_cost_usd = EXCLUDED.total_cost_usd,
+                       last_synced = NOW()""",
+                [(v[0], v[1], v[2], v[3], v[4], v[5], v[6], now) for v in values],
+                page_size=500)
+            billing_conn.commit()
+    print(f"  ✅ {bucd_count} user-cost rows synced")
+    _stamp_cache_meta(billing_conn, "user_cost_daily", bucd_count)
+except Exception as exc:
+    print(f"  ⚠️  billing_user_cost_daily sync failed: {exc}")
+
 billing_conn.close()
 
 # COMMAND ----------
@@ -1771,6 +1817,7 @@ result = {
     "billing_token_daily_rows": btd_count,
     "billing_product_daily_rows": bpd_count,
     "billing_user_endpoint_daily_rows": bued_count,
+    "billing_user_cost_daily_rows": bucd_count,
     "synced_at": datetime.now(timezone.utc).isoformat(),
 }
 print(json.dumps(result, indent=2))

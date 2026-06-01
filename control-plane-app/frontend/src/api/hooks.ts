@@ -911,6 +911,8 @@ export interface BillingPageData {
   daily_tokens: any[]
   products: any[]
   cost_by_user: any[]
+  /** "actual" = Unity AI Gateway v2 per-user attribution; "estimate" = token-share split */
+  cost_by_user_source: 'actual' | 'estimate'
   tokens_by_user: any[]
 }
 
@@ -938,6 +940,7 @@ export function useBillingPageData(days = 30, workspaceId?: string | null) {
         daily_tokens: [],
         products: [],
         cost_by_user: [],
+        cost_by_user_source: 'estimate',
         tokens_by_user: [],
         ...data,
       } as BillingPageData
