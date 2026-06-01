@@ -231,11 +231,26 @@ def ensure_billing_tables():
             PRIMARY KEY (usage_date, workspace_id, endpoint_name, user_identity)
         )
         """,
+        # Actual per-user $ via Unity AI Gateway v2 attribution (identity_metadata.run_by).
+        # Populated by 09_discover_billing → 02_sync. Empty on workspaces without v2 attribution.
+        """
+        CREATE TABLE IF NOT EXISTS billing_user_cost_daily (
+            usage_date     DATE          NOT NULL,
+            workspace_id   TEXT          NOT NULL,
+            endpoint_id    TEXT          NOT NULL DEFAULT '',
+            endpoint_name  TEXT          NOT NULL DEFAULT '',
+            run_by         TEXT          NOT NULL DEFAULT '',
+            total_dbus     NUMERIC(18,4) NOT NULL DEFAULT 0,
+            total_cost_usd NUMERIC(18,4) NOT NULL DEFAULT 0,
+            PRIMARY KEY (usage_date, workspace_id, endpoint_id, run_by)
+        )
+        """,
         # Indexes for fast workspace-filtered reads
         "CREATE INDEX IF NOT EXISTS idx_bsd_ws  ON billing_serving_daily  (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_btd_ws  ON billing_token_daily    (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_bpd_ws  ON billing_product_daily  (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_bued_ws ON billing_user_endpoint_daily (workspace_id)",
+        "CREATE INDEX IF NOT EXISTS idx_bucd_ws ON billing_user_cost_daily (workspace_id)",
         # Add value_text column (idempotent) for storing non-numeric metadata
         "ALTER TABLE billing_cache_meta ADD COLUMN IF NOT EXISTS value_text TEXT",
     ]
@@ -547,6 +562,44 @@ def get_serving_cost_by_user(days: int = 30, workspace_id: Optional[str] = None)
     )
 
 
+def get_actual_cost_by_user(days: int = 30, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Top users by ACTUAL model-serving cost.
+
+    Reads billing_user_cost_daily — real per-user dollar cost attributed by the
+    platform via Unity AI Gateway v2 (system.billing.usage identity_metadata.run_by),
+    rather than the token-share estimate in get_serving_cost_by_user(). Returns an
+    empty list on workspaces where v2 attribution is not yet populated; callers
+    should fall back to the estimate in that case.
+    """
+    ws = "AND workspace_id = %s" if workspace_id else ""
+    params: tuple = (days, workspace_id) if workspace_id else (days,)
+
+    return execute_query(
+        f"""SELECT
+                run_by                              AS user_identity,
+                SUM(total_dbus)::NUMERIC(18,2)      AS total_dbus,
+                SUM(total_cost_usd)::NUMERIC(18,2)  AS total_cost_usd
+            FROM billing_user_cost_daily
+            WHERE usage_date >= CURRENT_DATE - %s {ws}
+            GROUP BY run_by
+            ORDER BY total_cost_usd DESC
+            LIMIT 25""",
+        params,
+    )
+
+
+def get_cost_by_user(days: int = 30, workspace_id: Optional[str] = None) -> Dict[str, Any]:
+    """Per-user cost preferring ACTUAL attribution, falling back to the estimate.
+
+    Returns {"source": "actual"|"estimate", "users": [...]} so the UI can label
+    whether numbers are platform-attributed or token-share estimates.
+    """
+    actual = get_actual_cost_by_user(days, workspace_id)
+    if actual:
+        return {"source": "actual", "users": actual}
+    return {"source": "estimate", "users": get_serving_cost_by_user(days, workspace_id)}
+
+
 # ── token usage by user ─────────────────────────────────────────
 
 def get_token_usage_by_user(days: int = 30, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -777,6 +830,24 @@ def get_all_page_data(days: int = 30, workspace_id: Optional[str] = None) -> Dic
         )
         cost_by_user = [dict(r) for r in cur.fetchall()]
 
+        # 9b. ACTUAL per-user cost via Unity AI Gateway v2 attribution — preferred
+        # over the token-share estimate above when the v2 table has data.
+        cur.execute(
+            f"""SELECT run_by AS user_identity,
+                       SUM(total_dbus)::NUMERIC(18,2)     AS total_dbus,
+                       SUM(total_cost_usd)::NUMERIC(18,2) AS total_cost_usd
+                FROM billing_user_cost_daily u
+                WHERE u.usage_date >= CURRENT_DATE - %s {ws_filter_u}
+                GROUP BY run_by ORDER BY total_cost_usd DESC LIMIT 25""",
+            _p(),
+        )
+        actual_cost_by_user = [dict(r) for r in cur.fetchall()]
+        if actual_cost_by_user:
+            cost_by_user = actual_cost_by_user
+            cost_by_user_source = "actual"
+        else:
+            cost_by_user_source = "estimate"
+
         # 10. token usage by user
         cur.execute(
             f"""SELECT user_identity,
@@ -830,5 +901,6 @@ def get_all_page_data(days: int = 30, workspace_id: Optional[str] = None) -> Dic
         "daily_tokens": daily_tokens,
         "products": products,
         "cost_by_user": cost_by_user,
+        "cost_by_user_source": cost_by_user_source,
         "tokens_by_user": tokens_by_user,
     }

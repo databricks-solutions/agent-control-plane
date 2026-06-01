@@ -64,12 +64,14 @@ SERVING_TABLE  = f"{CATALOG}.{SCHEMA}.billing_serving_daily"
 TOKEN_TABLE    = f"{CATALOG}.{SCHEMA}.billing_token_daily"
 PRODUCT_TABLE  = f"{CATALOG}.{SCHEMA}.billing_product_daily"
 USER_EP_TABLE  = f"{CATALOG}.{SCHEMA}.billing_user_endpoint_daily"
+USER_COST_TABLE = f"{CATALOG}.{SCHEMA}.billing_user_cost_daily"
 
 print(f"Target tables:")
 print(f"  {SERVING_TABLE}")
 print(f"  {TOKEN_TABLE}")
 print(f"  {PRODUCT_TABLE}")
 print(f"  {USER_EP_TABLE}")
+print(f"  {USER_COST_TABLE}")
 print(f"Retention: {RETENTION_DAYS} days")
 
 # COMMAND ----------
@@ -118,6 +120,21 @@ USER_EP_SCHEMA = StructType([
     StructField("request_count", LongType(), True),
     StructField("input_tokens", LongType(), True),
     StructField("output_tokens", LongType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+# Actual per-user dollar cost from system.billing.usage v2 attribution
+# (identity_metadata.run_by + usage_metadata.ai_gateway.endpoint_id). Unlike
+# billing_user_endpoint_daily (tokens only, cost estimated by token-share),
+# this carries real cost attributed by the platform — Unity AI Gateway PPT FM.
+USER_COST_SCHEMA = StructType([
+    StructField("usage_date", StringType(), False),
+    StructField("workspace_id", StringType(), False),
+    StructField("endpoint_id", StringType(), True),
+    StructField("endpoint_name", StringType(), True),
+    StructField("run_by", StringType(), False),
+    StructField("total_dbus", DecimalType(18, 4), True),
+    StructField("total_cost_usd", DecimalType(18, 4), True),
     StructField("discovered_at", TimestampType(), False),
 ])
 
@@ -327,6 +344,53 @@ print(f"  ✅ {len(user_ep_rows)} user-endpoint rows")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Query 5: billing_user_cost_daily (ACTUAL per-user $ via UAG v2 attribution)
+# MAGIC
+# MAGIC Uses `identity_metadata.run_by` + `usage_metadata.ai_gateway.endpoint_id`,
+# MAGIC available for Pay-Per-Token Foundation Models queried via Unity AI Gateway
+# MAGIC endpoints. Degrades gracefully (empty) on workspaces where these v2 fields
+# MAGIC are not yet populated.
+
+# COMMAND ----------
+
+print(f"▸ Querying system.billing.usage for actual per-user cost ({RETENTION_DAYS} days) …")
+try:
+    user_cost_rows = _execute_sql(f"""
+        SELECT
+            CAST(u.usage_date AS STRING)                       AS usage_date,
+            u.workspace_id,
+            u.usage_metadata.ai_gateway.endpoint_id            AS endpoint_id,
+            u.usage_metadata.endpoint_name                     AS endpoint_name,
+            COALESCE(u.identity_metadata.run_by, 'unknown')    AS run_by,
+            ROUND(SUM(u.usage_quantity), 4)                    AS total_dbus,
+            ROUND(SUM(u.usage_quantity *
+                COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0.07)
+            ), 4)                                              AS total_cost_usd
+        FROM system.billing.usage u
+        LEFT JOIN system.billing.list_prices lp
+            ON u.sku_name = lp.sku_name
+            AND u.cloud   = lp.cloud
+            AND u.usage_unit = lp.usage_unit
+            AND lp.price_end_time IS NULL
+        WHERE u.billing_origin_product = 'MODEL_SERVING'
+          AND u.usage_date >= current_date() - INTERVAL {RETENTION_DAYS} DAYS
+          AND u.identity_metadata.run_by IS NOT NULL
+          AND u.workspace_id IS NOT NULL
+        GROUP BY u.usage_date, u.workspace_id,
+                 u.usage_metadata.ai_gateway.endpoint_id,
+                 u.usage_metadata.endpoint_name,
+                 u.identity_metadata.run_by
+    """)
+    print(f"  ✅ {len(user_cost_rows)} actual per-user cost rows")
+except Exception as exc:
+    # v2 attribution fields (usage_metadata.ai_gateway / identity_metadata.run_by)
+    # may not exist on older system.billing.usage schemas — degrade gracefully.
+    user_cost_rows = []
+    print(f"  ⚠️  per-user cost query unavailable (v2 attribution not present?): {exc}")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Write to Delta (overwrite — Delta is the canonical source)
 
 # COMMAND ----------
@@ -383,6 +447,18 @@ else:
     spark.createDataFrame([], USER_EP_SCHEMA).write.mode("overwrite").saveAsTable(USER_EP_TABLE)
 print(f"✅ Wrote {len(user_ep_rows)} rows to {USER_EP_TABLE}")
 
+# User cost (actual, v2 attribution)
+if user_cost_rows:
+    rows = [(r.get("usage_date",""), r.get("workspace_id",""),
+             r.get("endpoint_id"), r.get("endpoint_name"),
+             r.get("run_by","unknown") or "unknown",
+             _dec(r.get("total_dbus"), 4), _dec(r.get("total_cost_usd"), 4), now)
+            for r in user_cost_rows]
+    spark.createDataFrame(rows, USER_COST_SCHEMA).write.mode("overwrite").saveAsTable(USER_COST_TABLE)
+else:
+    spark.createDataFrame([], USER_COST_SCHEMA).write.mode("overwrite").saveAsTable(USER_COST_TABLE)
+print(f"✅ Wrote {len(user_cost_rows)} rows to {USER_COST_TABLE}")
+
 # COMMAND ----------
 
 result = {
@@ -391,6 +467,7 @@ result = {
     "token_rows": len(token_rows),
     "product_rows": len(product_rows),
     "user_endpoint_rows": len(user_ep_rows),
+    "user_cost_rows": len(user_cost_rows),
     "retention_days": RETENTION_DAYS,
     "discovered_at": now.isoformat(),
 }

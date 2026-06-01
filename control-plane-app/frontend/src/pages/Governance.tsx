@@ -17,7 +17,7 @@ import { LineChart } from '@/components/charts/LineChart'
 import { BarChart } from '@/components/charts/BarChart'
 import { PieChart } from '@/components/charts/PieChart'
 import { DB_CHART } from '@/lib/brand'
-import { LayoutDashboard, Zap, Server, ChevronDown, ChevronRight, BarChart3, Layers, Globe, RefreshCw, Users } from 'lucide-react'
+import { LayoutDashboard, Zap, Server, ChevronDown, ChevronRight, BarChart3, Layers, Globe, RefreshCw, Users, Info } from 'lucide-react'
 
 /* ── helpers ──────────────────────────────────────────────────── */
 
@@ -353,14 +353,14 @@ function OverviewTab({ data, loading }: { data?: BillingPageData; loading: boole
       </div>
 
       {/* Cost by user */}
-      <CostByUserSection costByUser={data?.cost_by_user || []} />
+      <CostByUserSection costByUser={data?.cost_by_user || []} source={data?.cost_by_user_source || 'estimate'} />
     </div>
   )
 }
 
 /* ── Cost by User (used in Overview tab) ─────────────────────── */
 
-function CostByUserSection({ costByUser }: { costByUser: any[] }) {
+function CostByUserSection({ costByUser, source = 'estimate' }: { costByUser: any[]; source?: 'actual' | 'estimate' }) {
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(10)
   const { sort, toggle } = useSort<string>('total_cost_usd')
@@ -383,6 +383,32 @@ function CostByUserSection({ costByUser }: { costByUser: any[] }) {
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
             <Users className="w-4 h-4 text-blue-600" /> Top Users by Serving Cost
+            <span className="group relative ml-1 inline-flex">
+              <span
+                tabIndex={0}
+                aria-label="How this is calculated"
+                className={`px-1.5 py-0.5 rounded text-[10px] font-medium cursor-help inline-flex items-center gap-0.5 outline-none ${
+                  source === 'actual'
+                    ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+                    : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
+                }`}
+              >
+                {source === 'actual' ? 'Actual' : 'Estimated'}
+                <Info className="w-2.5 h-2.5 opacity-70" />
+              </span>
+              <span
+                role="tooltip"
+                className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 hidden w-64 rounded-lg border border-gray-200 bg-white p-3 text-left text-[11px] font-normal leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+              >
+                <span className="mb-1 block font-semibold text-gray-900 dark:text-gray-100">How per-user cost is calculated</span>
+                <span className={`block ${source === 'actual' ? 'text-green-700 dark:text-green-300' : 'opacity-70'}`}>
+                  <strong>Actual</strong> — real per-user dollars attributed by Unity AI Gateway (<code>system.billing.usage</code>).
+                </span>
+                <span className={`mt-1.5 block ${source === 'actual' ? 'opacity-70' : 'text-amber-700 dark:text-amber-300'}`}>
+                  <strong>Estimated</strong> — each endpoint’s total cost split across users by their share of tokens. Shown when AI Gateway v2 attribution isn’t available yet.
+                </span>
+              </span>
+            </span>
           </CardTitle>
         </CardHeader>
         <CardContent>
