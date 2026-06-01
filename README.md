@@ -103,15 +103,15 @@ Identity and access management with all principals, builders/users breakdown, RB
                        │  Scheduled workflow (every 30 min)
                        ▼
 ┌─────────────────────────────────────────────────────┐
-│  Delta Tables → Lakebase (PostgreSQL)                │
-│  (agents, experiments, runs, traces, billing cache)  │
+│  Delta Tables → Lakebase (PostgreSQL)               │
+│  (agents, experiments, runs, traces, billing cache) │
 └──────────────────────┬──────────────────────────────┘
                        │  Sub-100ms reads
                        ▼
 ┌─────────────────────────────────────────────────────┐
 │  FastAPI Backend (17 routers, 16 services)          │
-│  → React Frontend (TanStack Query + Tailwind)        │
-│  → Databricks App (OBO authentication)               │
+│  → React Frontend (TanStack Query + Tailwind)       │
+│  → Databricks App (OBO authentication)              │
 └─────────────────────────────────────────────────────┘
 ```
 
