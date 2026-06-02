@@ -397,12 +397,15 @@ def _app_class_to_type(app_class):
     return app_class               # ai_enabled_app / regular_app — not persisted
 
 
+_EXPORT_TIMEOUT = 8.0  # short — many source files are absent / cross-ws ACL-blocked
+
+
 def _export_ws_text(base, headers, path):
     """Best-effort export of a workspace file as text (fail-open → None)."""
     try:
         resp = httpx.get(f"{base}/api/2.0/workspace/export", headers=headers,
                          params={"path": path, "direct_download": "true"},
-                         timeout=_REST_TIMEOUT)
+                         timeout=_EXPORT_TIMEOUT)
         if resp.status_code == 200:
             return resp.text
     except Exception:
@@ -452,8 +455,13 @@ def classify_app_source(deps_text, app_yaml_text):
     return ("unknown", None, "low", "insufficient_signal")
 
 
-def _build_app_record(app, ws_id, source, base, headers):
-    """Build one classified app record (shared by local + cross-workspace discovery)."""
+def _build_app_record(app, ws_id, source, base, headers, read_source=True):
+    """Build one classified app record (shared by local + cross-workspace discovery).
+
+    `read_source` reads the app's pyproject/app.yaml (Stage 3). Disabled for
+    cross-workspace apps — remote file exports are slow and usually ACL-blocked, so
+    those rely on endpoint-link (resource) + behavior instead.
+    """
     name = app.get("name", "")
     cs = app.get("compute_status") or {}
     status = cs.get("state", "")
@@ -490,7 +498,8 @@ def _build_app_record(app, ws_id, source, base, headers):
             config_dict["resources"].append(r_entry)
 
     # Stage 3: read the app's own source (workspace-local; fail-open if unreadable).
-    signals = _read_app_signals(base, headers, app.get("default_source_code_path", ""))
+    signals = (_read_app_signals(base, headers, app.get("default_source_code_path", ""))
+               if read_source else {"deps": "", "app_yaml": ""})
     env_endpoint = _endpoint_from_app_yaml(signals["app_yaml"])
     linked_endpoint = resource_endpoint or env_endpoint or ""
     app_class, framework, confidence, classified_by = classify_app_source(
@@ -1124,10 +1133,10 @@ def _fetch_apps_for_workspace(
 
             body = resp.json()
             for app in body.get("apps", []):
-                # Source read uses the remote host + token (workspace-local to that
-                # workspace); fail-open if file ACLs block it → falls back to
-                # endpoint-link / behavior in resolve_apps().
-                agents.append(_build_app_record(app, ws_id, "cross_workspace_api", host, headers))
+                # Skip remote source reads (slow + usually ACL-blocked); cross-ws apps
+                # rely on endpoint-link (resource) + behavior in resolve_apps().
+                agents.append(_build_app_record(app, ws_id, "cross_workspace_api", host,
+                                                headers, read_source=False))
 
             next_page_token = body.get("next_page_token")
             if not next_page_token:
