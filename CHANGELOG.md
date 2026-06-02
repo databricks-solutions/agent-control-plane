@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-06-02
+
+This release builds the Unity AI Gateway **v2** story and steps the app back from
+enforcement it shouldn't own. Two design decisions drove it (detail below): keep
+v2 on its own tab rather than replacing the existing gateway view, and remove
+in-app budgeting in favor of the platform's native control.
+
+### Added
+- **Unity AI Gateway v2 (Beta) tab.** A dedicated tab surfacing data that exists
+  *only* in `system.ai_gateway.usage` (v2-routed traffic, ~20-min fresh): cached
+  tokens, p50/p95 latency, p95 time-to-first-byte, and a per-endpoint table with a
+  freshness ("as of") badge and a scope tooltip. The `(Beta)` marker is a label
+  pill, not plain text. New discovery task `workflows/11_discover_ai_gateway_usage.py`
+  → Delta → Lakebase (`uag_usage_summary`); backend `get_uag_v2_usage()` and
+  `GET /gateway/uag-v2-usage`, both degrading gracefully to empty when the
+  (account-scoped) system table is unreadable or unsynced.
+- **v2 usage breakdowns** on that tab — three additive cuts of
+  `system.ai_gateway.usage`: **Agent vs. Human** (`requester_type`), **Top Models**
+  (`destination_model`), and **By API Type** (`api_type`), each rendered as a
+  proportion-bar card. New `uag_usage_breakdown` Delta table + Lakebase mirror; the
+  backend response gains a `breakdowns` object keyed by dimension.
+- **Actual per-user cost** via Unity AI Gateway v2 attribution, from
+  `system.billing.usage` joined to v2 usage (replaces estimated splits where v2
+  data exists).
+- **Rate-limit (429) visibility** per endpoint and per user, sourced from
+  `system.serving.endpoint_usage`.
+
+### Changed
+- The AI Gateway top KPI row (Total Endpoints / Ready / Gateway Enabled /
+  Requests 24h / Unique Users 24h / Error Rate 24h) now renders **only on the
+  Overview tab**, so the Metrics, Permissions, Rate Limits, and v2 tabs aren't
+  fronted by Overview-scoped numbers.
+
+### Removed
+- **In-app per-user / per-group token budgeting** (`FEATURE_BUDGETS_ENABLED`, the
+  Budgets tab, `/gateway/budgets*` routes, `budgets_service.py`, and the related
+  config). Unity AI Gateway v2 ships native budgets / spend controls; the app
+  should not run a competing enforcement path. The Lakebase `gateway_budgets`
+  table is left intact (orphaned, non-destructive). We will integrate the native
+  budgets once a public v2 management API is available.
+
+### Security
+- Frontend dependency advisories cleared: axios, postcss, follow-redirects,
+  picomatch bumps; Vite 5 → 6 (esbuild dev-server advisory); lodash override
+  → 4.18.1.
+
+### Design decisions
+
+- **Why v2 is a separate tab, not a replacement.** `system.ai_gateway.usage` only
+  covers traffic routed through v2-enabled endpoints — roughly **13%** of all
+  serving requests in our reference workspace — and carries **no dollar cost** and
+  almost no 429s. The broad/authoritative sources remain
+  `system.serving.endpoint_usage` (all serving + rate-limit hits) and
+  `system.billing.usage` (billed cost). Folding v2 into — or replacing — the main
+  view would contaminate broad metrics with a partial-coverage subset and drop
+  cost/429 coverage. So v2 is **additive**: its own clearly-Beta tab for the things
+  only it has (cached-token %, TTFB, requester/model/API breakdowns, ~20-min
+  freshness). When v2 eventually supersedes the legacy gateway, we expand this tab
+  rather than re-plumb the others.
+- **Why in-app budgeting was removed.** Enforcement belongs in the request path,
+  which is the gateway — not in an app reading mirrored tables after the fact.
+  Running our own budgets alongside v2's native budgets would create two sources of
+  truth and a split-brain control. The v2 policy/budget management APIs are not yet
+  public, so anything built now would target unstable internals and need rebuilding.
+  The app stays in its lane — **observability**, not enforcement — and will surface
+  native budgets once their API lands.
+
 ## [0.1.1] - 2026-05-29
 
 ### Added
