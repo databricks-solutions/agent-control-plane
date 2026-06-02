@@ -56,9 +56,9 @@ in-app budgeting in favor of the platform's native control.
 ### Design decisions
 
 - **Why v2 is a separate tab, not a replacement.** `system.ai_gateway.usage` only
-  covers traffic routed through v2-enabled endpoints — roughly **13%** of all
-  serving requests in our reference workspace — and carries **no dollar cost** and
-  almost no 429s. The broad/authoritative sources remain
+  covers traffic routed through v2-enabled endpoints — a subset of all serving
+  requests — and carries **no dollar cost** and almost no 429s. The
+  broad/authoritative sources remain
   `system.serving.endpoint_usage` (all serving + rate-limit hits) and
   `system.billing.usage` (billed cost). Folding v2 into — or replacing — the main
   view would contaminate broad metrics with a partial-coverage subset and drop
