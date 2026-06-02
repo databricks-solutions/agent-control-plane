@@ -593,6 +593,82 @@ def discover_from_system_tables() -> List[Dict[str, Any]]:
     return agents
 
 
+def enrich_unknown_with_behavior(agents, window_days=30):
+    """Stage 2: refine empty-task CUSTOM_MODEL `unknown` rows using runtime behavior.
+
+    Joins `system.serving.endpoint_usage` (by served_entity_id → endpoint) over a
+    recent window:
+      - co-located `feedback` served entity (Agent Framework marker) → genai_agent
+      - emits tokens / streams                                       → genai_model (uses_llm)
+      - traffic but zero tokens                                      → traditional_ml
+      - no traffic in window                                         → stays unknown
+
+    Behavior proves "uses an LLM", not "is an agent" (the dashboard lesson), so token
+    emission yields genai_model — not genai_agent — unless the feedback marker fires.
+    Fail-open: any error leaves the unknown rows unchanged. Mutates `agents` in place.
+    """
+    unknown = [a for a in agents if a.get("workload_class") == "unknown"]
+    if not unknown:
+        return
+    try:
+        beh_rows = spark.sql(f"""
+            WITH u AS (
+                SELECT served_entity_id,
+                       SUM(COALESCE(input_token_count, 0) + COALESCE(output_token_count, 0)) AS toks,
+                       MAX(CASE WHEN request_streaming THEN 1 ELSE 0 END) AS streamed,
+                       COUNT(*) AS reqs
+                FROM system.serving.endpoint_usage
+                WHERE request_time >= current_timestamp() - INTERVAL {int(window_days)} DAYS
+                GROUP BY served_entity_id
+            ),
+            se AS (
+                SELECT served_entity_id, workspace_id, endpoint_name
+                FROM system.serving.served_entities
+                WHERE endpoint_delete_time IS NULL
+            )
+            SELECT se.workspace_id AS ws, se.endpoint_name AS ep,
+                   SUM(u.toks) AS toks, MAX(u.streamed) AS streamed, SUM(u.reqs) AS reqs
+            FROM u JOIN se USING (served_entity_id)
+            GROUP BY se.workspace_id, se.endpoint_name
+        """).collect()
+        behavior = {(str(r.ws), r.ep): (int(r.toks or 0), int(r.streamed or 0), int(r.reqs or 0))
+                    for r in beh_rows}
+
+        fb_rows = spark.sql("""
+            SELECT DISTINCT workspace_id AS ws, endpoint_name AS ep
+            FROM system.serving.served_entities
+            WHERE endpoint_delete_time IS NULL
+              AND (lower(served_entity_name) LIKE '%feedback%' OR lower(entity_name) LIKE '%feedback%')
+        """).collect()
+        feedback = {(str(r.ws), r.ep) for r in fb_rows}
+    except Exception as e:
+        print(f"  Stage 2 behavioral enrichment unavailable (fail-open): {e}")
+        return
+
+    counts = {"genai_agent": 0, "genai_model": 0, "traditional_ml": 0, "unknown": 0}
+    for a in unknown:
+        key = (str(a.get("workspace_id", "")), a.get("endpoint_name", ""))
+        if key in feedback:
+            a.update(workload_class="genai_agent", type="custom_agent",
+                     confidence="high", classified_by="feedback_sibling", uses_llm=True)
+            counts["genai_agent"] += 1
+            continue
+        beh = behavior.get(key)
+        if not beh or beh[2] == 0:
+            counts["unknown"] += 1            # no traffic — leave for Stage 3
+            continue
+        toks, streamed, _reqs = beh
+        if toks > 0 or streamed:
+            a.update(workload_class="genai_model", type="genai_model",
+                     uses_llm=True, confidence="high", classified_by="behavior_tokens")
+            counts["genai_model"] += 1
+        else:
+            a.update(workload_class="traditional_ml", type="traditional_ml",
+                     uses_llm=False, confidence="med", classified_by="behavior_no_tokens")
+            counts["traditional_ml"] += 1
+    print(f"  Stage 2 behavioral: refined {len(unknown)} unknown → {counts}")
+
+
 def discover_genie_from_audit_logs() -> List[Dict[str, Any]]:
     """Discover Genie Spaces across workspaces via audit logs."""
     agents = []
@@ -969,6 +1045,9 @@ all_agents.extend(discover_genie_from_audit_logs())
 
 print("=" * 60)
 print(f"Total discovered: {len(all_agents)} agents")
+
+# Stage 2: refine empty-task CUSTOM_MODEL `unknown` rows from runtime behavior.
+enrich_unknown_with_behavior(all_agents)
 
 # Pre-filter classification distribution (the Stage-1 flip diff vs the old taxonomy)
 from collections import Counter as _Counter
