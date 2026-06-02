@@ -16,7 +16,7 @@ import {
 } from 'lucide-react'
 import DatabricksLogo from './DatabricksLogo'
 import { useTheme } from '@/context/ThemeContext'
-import { useAppConfig, useCurrentUser, useGatewayBudgetAlerts } from '@/api/hooks'
+import { useCurrentUser } from '@/api/hooks'
 import AskGenieOverlay from './AskGenieOverlay'
 
 const navItems = [
@@ -36,14 +36,8 @@ export default function Layout() {
   const isDark = theme === 'dark'
   const { data: user } = useCurrentUser()
 
-  // Per-tab alert badges. Gated on the feature flag so the hook doesn't
-  // call the API at all when budgets is off — no 404 spam.
-  const { data: config } = useAppConfig()
-  const budgetsEnabled = !!config?.features?.budgets_enabled
-  const { data: budgetAlerts } = useGatewayBudgetAlerts(budgetsEnabled)
-  const badges: Record<string, number> = {
-    '/ai-gateway': budgetAlerts?.length ?? 0,
-  }
+  // Per-tab alert badges (none currently).
+  const badges: Record<string, number> = {}
 
   return (
     <div className="flex h-screen bg-db-gray-50 dark:bg-gray-900">
