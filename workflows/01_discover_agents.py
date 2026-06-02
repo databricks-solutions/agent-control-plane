@@ -75,7 +75,7 @@ DISCOVERED_AGENTS_SCHEMA = StructType([
     StructField("is_extensive", BooleanType(), True),
     StructField("discovered_at", TimestampType(), False),
     # ── Workload classification (Stage 1+) ──────────────────────────────
-    StructField("workload_class", StringType(), True),   # genai_agent | genai_model | embedding_model | foundation_model | external_model | feature_serving | traditional_ml | agent_app | agent_frontend_app | ai_enabled_app | regular_app | genie_space | unknown
+    StructField("workload_class", StringType(), True),   # genai_agent | llm | multimodal | embedding_model | foundation_model | external_llm | external_embedding | feature_serving | traditional_ml | agent_app | agent_frontend_app | ai_enabled_app | regular_app | genie_space | unknown
     StructField("subtype", StringType(), True),          # knowledge_assistant | multi_agent_supervisor | custom_llm | information_extraction | ...
     StructField("framework", StringType(), True),        # sklearn | xgboost | langgraph | openai-agents | ... (Stage 3 / apps)
     StructField("interface_task", StringType(), True),   # the serving task that decided it (agent/v1/responses, llm/v1/chat, ...)
@@ -112,9 +112,10 @@ _TILE_PROBLEM_TYPE_MAP = {
 
 # Types persisted to the agent inventory. Agents + `unknown` (the empty-task
 # custom-model review queue). Definitively-non-agent serving classes
-# (foundation_model, embedding_model, genai_model, feature_serving) are not
+# (foundation_model, embedding_model, feature_serving) are not
 # persisted here. Once Stage 2/3 land, `unknown` rows resolve in place.
-_PERSISTED_TYPES = _VALID_AGENT_TYPES + ("unknown", "ml_model", "genai_model")
+_PERSISTED_TYPES = _VALID_AGENT_TYPES + (
+    "unknown", "ml_model", "llm", "multimodal", "external_llm", "external_embedding")
 
 # Back-compat `type` (from non-serving producers) → workload_class, so the new
 # column is populated everywhere. Apps are refined to their precise class in the
@@ -125,7 +126,7 @@ _TYPE_TO_CLASS_FALLBACK = {
     "multi_agent_supervisor": "genai_agent",
     "custom_llm": "genai_agent",
     "information_extraction": "genai_agent",
-    "external_agent": "external_model",
+    "external_agent": "external_llm",
     "custom_app": "agent_app",
     "genie_space": "genie_space",
     "unknown": "unknown",
@@ -153,9 +154,11 @@ _LLM_TASK_PREFIXES = ("llm/", "anthropic/", "responses/")
 # inventory at persist time (they are not in _PERSISTED_TYPES).
 _CLASS_TO_TYPE = {
     "genai_agent": "custom_agent",
-    "external_model": "external_agent",
+    "external_llm": "external_llm",
+    "external_embedding": "external_embedding",
+    "llm": "llm",
+    "multimodal": "multimodal",
     "traditional_ml": "ml_model",
-    "genai_model": "genai_model",
     "unknown": "unknown",
 }
 
@@ -176,7 +179,9 @@ def classify_served_entity(entity_type, task, tile_problem_type=None, entity_nam
     if et == "FEATURE_SPEC":
         return ("feature_serving", None, tk, "high", "entity_type")
     if et == "EXTERNAL_MODEL":
-        return ("external_model", None, tk, "high", "entity_type")
+        # External provider proxy — split by task into LLM vs embedding routes.
+        cls = "external_embedding" if tk in _EMBEDDING_TASKS else "external_llm"
+        return (cls, None, tk, "high", "entity_type")
 
     # Agent task (prefix — covers agent/v1/responses, agent/v1/chat, agent/v2/chat)
     if tk.startswith(_AGENT_TASK_PREFIX):
@@ -185,7 +190,8 @@ def classify_served_entity(entity_type, task, tile_problem_type=None, entity_nam
     if tk in _EMBEDDING_TASKS:
         return ("embedding_model", None, tk, "high", "task")
     if any(tk.startswith(p) for p in _LLM_TASK_PREFIXES):
-        cls = "foundation_model" if et == "FOUNDATION_MODEL" else "genai_model"
+        # FM = stock platform model (dropped); custom LLM-task model = `llm`.
+        cls = "foundation_model" if et == "FOUNDATION_MODEL" else "llm"
         return (cls, None, tk, "high", "task")
 
     if et == "FOUNDATION_MODEL":
@@ -664,7 +670,7 @@ def discover_from_system_tables() -> List[Dict[str, Any]]:
                 classify_served_entity(entity_type, task_type, None, r.model_name or ""))
 
             # Stock platform models (foundation/embedding) and feature specs are not
-            # part of the inventory — skip. Custom models (traditional_ml / genai_model)
+            # part of the inventory — skip. Custom models (traditional_ml / llm / multimodal)
             # ARE kept and labeled (not dropped).
             if workload_class in ("foundation_model", "embedding_model", "feature_serving"):
                 continue
@@ -709,12 +715,12 @@ def enrich_unknown_with_behavior(agents, window_days=30):
     Joins `system.serving.endpoint_usage` (by served_entity_id → endpoint) over a
     recent window:
       - co-located `feedback` served entity (Agent Framework marker) → genai_agent
-      - emits tokens / streams                                       → genai_model (uses_llm)
+      - emits tokens / streams                                       → llm (uses_llm)
       - traffic but zero tokens                                      → traditional_ml
       - no traffic in window                                         → stays unknown
 
     Behavior proves "uses an LLM", not "is an agent" (the dashboard lesson), so token
-    emission yields genai_model — not genai_agent — unless the feedback marker fires.
+    emission yields `llm` — not genai_agent — unless the feedback marker fires.
     Fail-open: any error leaves the unknown rows unchanged. Mutates `agents` in place.
     """
     unknown = [a for a in agents if a.get("workload_class") == "unknown"]
@@ -755,7 +761,7 @@ def enrich_unknown_with_behavior(agents, window_days=30):
         print(f"  Stage 2 behavioral enrichment unavailable (fail-open): {e}")
         return
 
-    counts = {"genai_agent": 0, "genai_model": 0, "traditional_ml": 0, "unknown": 0}
+    counts = {"genai_agent": 0, "llm": 0, "traditional_ml": 0, "unknown": 0}
     for a in unknown:
         key = (str(a.get("workspace_id", "")), a.get("endpoint_name", ""))
         if key in feedback:
@@ -769,9 +775,9 @@ def enrich_unknown_with_behavior(agents, window_days=30):
             continue
         toks, streamed, _reqs = beh
         if toks > 0 or streamed:
-            a.update(workload_class="genai_model", type=_workload_to_type("genai_model", None),
+            a.update(workload_class="llm", type=_workload_to_type("llm", None),
                      uses_llm=True, confidence="high", classified_by="behavior_tokens")
-            counts["genai_model"] += 1
+            counts["llm"] += 1
         else:
             a.update(workload_class="traditional_ml", type=_workload_to_type("traditional_ml", None),
                      uses_llm=False, confidence="med", classified_by="behavior_no_tokens")
@@ -885,7 +891,7 @@ def apply_model_classification(agents):
         if a.get("confidence") == "high" and a.get("classified_by") in (
                 "task", "tile_metadata", "feedback_sibling"):
             continue
-        if a.get("workload_class") not in ("unknown", "genai_model", "traditional_ml"):
+        if a.get("workload_class") not in ("unknown", "llm", "traditional_ml", "multimodal"):
             continue
         hit = lookup.get(a.get("model_name") or "")
         if not hit:
@@ -896,7 +902,7 @@ def apply_model_classification(agents):
         a["framework"] = fw or a.get("framework")
         a["confidence"] = conf or "high"
         a["classified_by"] = "artifact"
-        if wc == "genai_model":
+        if wc in ("llm", "multimodal"):
             a["uses_llm"] = True
         upgraded += 1
     print(f"  Stage 3 artifact: upgraded {upgraded} rows ({len(lookup)} resolved models in table)")

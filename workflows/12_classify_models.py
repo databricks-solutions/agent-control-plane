@@ -56,7 +56,7 @@ print(f"Target table: {TABLE} | max_models/run {MAX_MODELS}")
 SCHEMA_DEF = StructType([
     StructField("model_full_name", StringType(), False),
     StructField("model_version", StringType(), False),
-    StructField("workload_class", StringType(), True),   # traditional_ml | genai_agent | genai_model | unknown
+    StructField("workload_class", StringType(), True),   # traditional_ml | genai_agent | llm | multimodal | unknown
     StructField("framework", StringType(), True),
     StructField("loader_module", StringType(), True),
     StructField("signature_kind", StringType(), True),   # tabular | messages | text | null
@@ -73,29 +73,54 @@ _AGENT_LOADER_HINTS = ("responses_agent", "chat_agent", "chat_model", "langchain
                        "langgraph", "agent", "openai")
 
 
+def _signature_kind(s):
+    """Coarse input-signature kind: messages | image | audio | text | tabular | None."""
+    s = (s or "").lower()
+    if "messages" in s or "conversation_id" in s or "custom_inputs" in s:
+        return "messages"
+    if any(k in s for k in ("image", "pixel", "vision")) or "binary" in s:
+        return "image"
+    if "audio" in s or "speech" in s:
+        return "audio"
+    if "string" in s and "[" in s:
+        return "text"
+    return "tabular" if s else None
+
+
 def _classify(flavors, loader, sig_inputs):
-    """Return (workload_class, framework, signature_kind, confidence, source_signal)."""
+    """Return (workload_class, framework, signature_kind, confidence, source_signal).
+
+    Classes: genai_agent | llm | multimodal | traditional_ml | unknown.
+    `llm` = text-generative model (not an agent); `multimodal` = vision/audio model.
+    """
     fl = set(flavors or {})
-    s = (sig_inputs or "").lower()
-    sig_kind = ("messages" if ("messages" in s or "conversation_id" in s or "custom_inputs" in s)
-                else "text" if ("string" in s and "[" in s)
-                else "tabular" if s else None)
+    sig_kind = _signature_kind(sig_inputs)
+
     agent_fl = fl & _AGENT_FLAVORS
     if agent_fl:
         return ("genai_agent", sorted(agent_fl)[0], sig_kind, "high", "flavor")
+
+    # Vision/audio signature → multimodal, regardless of producing flavor.
+    if sig_kind in ("image", "audio"):
+        fw = "transformers" if "transformers" in fl else (sorted(fl & _ML_FLAVORS)[0]
+                                                          if (fl & _ML_FLAVORS) else "pyfunc")
+        return ("multimodal", fw, sig_kind, "high" if fl else "med", "signature")
+
     ml_fl = fl & _ML_FLAVORS
     if ml_fl:
         return ("traditional_ml", sorted(ml_fl)[0], sig_kind, "high", "flavor")
+
     loader_l = (loader or "").lower()
     if any(h in loader_l for h in _AGENT_LOADER_HINTS):
         return ("genai_agent", "pyfunc:" + loader_l.split(".")[-1], sig_kind, "high", "loader")
+
     if "transformers" in fl:
-        # transformers spans LLM (text) and traditional (vision/audio) — split by signature
-        return (("genai_model" if sig_kind in ("messages", "text") else "traditional_ml"),
+        # text/chat → llm; anything else non-text already handled above → multimodal fallback
+        return (("llm" if sig_kind in ("messages", "text") else "multimodal"),
                 "transformers", sig_kind, "med", "signature")
-    if sig_kind == "messages":
-        # chat I/O without an agent flavor/loader: GenAI, but agent-ness unconfirmed.
-        return ("genai_model", "pyfunc", sig_kind, "med", "signature")
+    if sig_kind in ("messages", "text"):
+        # generative text I/O without an agent flavor/loader: LLM, agent-ness unconfirmed.
+        return ("llm", "pyfunc", sig_kind, "med", "signature")
     if sig_kind == "tabular":
         return ("traditional_ml", "pyfunc", sig_kind, "med", "signature")
     return ("unknown", None, sig_kind, "low", "indeterminate")
