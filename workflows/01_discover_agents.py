@@ -1302,7 +1302,10 @@ for a in deduped:
 
 # Convert to Spark DataFrame and write as Delta
 if deduped:
-    rows = [Row(**a) for a in deduped]
+    # Build rows as tuples in exact schema order (positional, length-safe) — robust
+    # to dict key order / missing optional fields across heterogeneous producers.
+    _field_names = [f.name for f in DISCOVERED_AGENTS_SCHEMA.fields]
+    rows = [tuple(a.get(fn) for fn in _field_names) for a in deduped]
     df = spark.createDataFrame(rows, schema=DISCOVERED_AGENTS_SCHEMA)
 
     # Overwrite the table each run — this is the latest snapshot
