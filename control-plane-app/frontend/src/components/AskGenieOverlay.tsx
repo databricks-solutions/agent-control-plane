@@ -128,13 +128,13 @@ const ROUTE_SUGGESTIONS: Array<{ match: (p: string) => boolean; questions: strin
       'Show data freshness across all caches',
     ],
   },
-  // Governance (root) — budgets and spend focus
+  // Governance (root) — cost and spend focus
   {
     match: p => p === '/' || p.startsWith('/governance'),
     questions: [
-      'Which users are above 80% of their budget?',
       'Top 5 most expensive users this month',
       'Daily token consumption over the past 14 days',
+      'Cost by endpoint over the past 30 days',
     ],
   },
 ]

@@ -83,8 +83,6 @@ env:
     value: "${LAKEBASE_ENDPOINT_PATH:-}"
   - name: DATABRICKS_ACCOUNT_ID
     value: "${DATABRICKS_ACCOUNT_ID:-}"
-  - name: FEATURE_BUDGETS_ENABLED
-    value: "${FEATURE_BUDGETS_ENABLED:-false}"
   - name: FEATURE_GENIE_ENABLED
     value: "${FEATURE_GENIE_ENABLED:-false}"
   - name: GENIE_SPACE_ID
