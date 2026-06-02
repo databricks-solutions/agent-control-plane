@@ -184,10 +184,10 @@ if daily_rows:
              int(r.get("output_tokens") or 0), int(r.get("error_count") or 0),
              int(r.get("rate_limited_count") or 0), now)
             for r in daily_rows]
-    spark.createDataFrame(rows, GW_DAILY_SCHEMA).write.mode("overwrite").saveAsTable(GW_USAGE_DAILY_TABLE)
+    spark.createDataFrame(rows, GW_DAILY_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(GW_USAGE_DAILY_TABLE)
     print(f"✅ Wrote {len(rows)} rows to {GW_USAGE_DAILY_TABLE}")
 else:
-    spark.createDataFrame([], GW_DAILY_SCHEMA).write.mode("overwrite").saveAsTable(GW_USAGE_DAILY_TABLE)
+    spark.createDataFrame([], GW_DAILY_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(GW_USAGE_DAILY_TABLE)
 
 if hourly_rows:
     rows = [(r.get("hour",""), r.get("endpoint_name",""),
@@ -195,10 +195,10 @@ if hourly_rows:
              int(r.get("output_tokens") or 0), int(r.get("error_count") or 0),
              int(r.get("rate_limited_count") or 0), now)
             for r in hourly_rows]
-    spark.createDataFrame(rows, GW_HOURLY_SCHEMA).write.mode("overwrite").saveAsTable(GW_USAGE_HOURLY_TABLE)
+    spark.createDataFrame(rows, GW_HOURLY_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(GW_USAGE_HOURLY_TABLE)
     print(f"✅ Wrote {len(rows)} rows to {GW_USAGE_HOURLY_TABLE}")
 else:
-    spark.createDataFrame([], GW_HOURLY_SCHEMA).write.mode("overwrite").saveAsTable(GW_USAGE_HOURLY_TABLE)
+    spark.createDataFrame([], GW_HOURLY_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(GW_USAGE_HOURLY_TABLE)
 
 # COMMAND ----------
 
