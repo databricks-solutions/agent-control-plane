@@ -186,6 +186,9 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
 
   // Unity AI Gateway (v2) usage — v2-routed endpoints only, ~20-min fresh
   const { data: uag } = useUagV2Usage()
+  const uagSort = useSort('request_count', 'desc')
+  const [uagPage, setUagPage] = useState(0)
+  const [uagPageSize, setUagPageSize] = useState(10)
 
   // Usage data
   const { data: summary, isLoading: usageLoading } = useGatewayUsageSummary(days)
@@ -260,6 +263,17 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
   const safePage = Math.min(page, totalPages - 1)
   const paged = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize)
 
+  // Unity AI Gateway (v2) usage — sortable + paginated
+  const uagEndpoints: any[] = uag?.endpoints || []
+  const sortedUag = useMemo(() => sortRows(uagEndpoints, uagSort.sort, (e: any, key) => {
+    if (key === 'endpoint_name') return (e.endpoint_name || '').toLowerCase()
+    if (key === 'cached') return Number((e.cache_read_tokens || 0) + (e.cache_creation_tokens || 0))
+    return Number(e[key] || 0)
+  }), [uagEndpoints, uagSort.sort])
+  const uagTotalPages = Math.max(1, Math.ceil(sortedUag.length / uagPageSize))
+  const uagSafePage = Math.min(uagPage, uagTotalPages - 1)
+  const pagedUag = sortedUag.slice(uagSafePage * uagPageSize, (uagSafePage + 1) * uagPageSize)
+
   return (
     <div className="space-y-6">
       {/* Unity AI Gateway (v2) usage — additive, v2-routed endpoints only */}
@@ -294,16 +308,17 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
-                    <th className="py-2 font-medium">Endpoint</th>
-                    <th className="py-2 font-medium text-right">Requests</th>
-                    <th className="py-2 font-medium text-right">Cached Tokens</th>
-                    <th className="py-2 font-medium text-right">p50 Latency</th>
-                    <th className="py-2 font-medium text-right">p95 Latency</th>
-                    <th className="py-2 font-medium text-right">p95 TTFB</th>
+                    <SortableHeader label="Endpoint" sortKey="endpoint_name" current={uagSort.sort} onToggle={uagSort.toggle} />
+                    <SortableHeader label="Requests" sortKey="request_count" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                    <SortableHeader label="Cached Tokens" sortKey="cached" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                    <SortableHeader label="p50 Latency" sortKey="p50_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                    <SortableHeader label="p95 Latency" sortKey="p95_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                    <SortableHeader label="p95 TTFB" sortKey="p95_ttfb_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                    <SortableHeader label="Users" sortKey="unique_users" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
                   </tr>
                 </thead>
                 <tbody>
-                  {uag.endpoints.slice(0, 8).map((e) => (
+                  {pagedUag.map((e: any) => (
                     <tr key={e.endpoint_name} className="border-b border-gray-100 dark:border-gray-700">
                       <td className="py-2 font-medium truncate max-w-[260px]">{e.endpoint_name}</td>
                       <td className="py-2 text-right">{Number(e.request_count).toLocaleString()}</td>
@@ -311,11 +326,13 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
                       <td className="py-2 text-right">{Number(e.p50_latency_ms).toLocaleString()}ms</td>
                       <td className="py-2 text-right">{Number(e.p95_latency_ms).toLocaleString()}ms</td>
                       <td className="py-2 text-right">{Number(e.p95_ttfb_ms).toLocaleString()}ms</td>
+                      <td className="py-2 text-right">{Number(e.unique_users).toLocaleString()}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+            <TablePagination page={uagSafePage} totalItems={sortedUag.length} pageSize={uagPageSize} onPageChange={setUagPage} onPageSizeChange={setUagPageSize} />
           </CardContent>
         </Card>
       )}
