@@ -108,7 +108,8 @@ async def lifespan(app: FastAPI):
 
     def _init_gateway():
         try:
-            from backend.services.gateway_service import prewarm_cache
+            from backend.services.gateway_service import prewarm_cache, ensure_gateway_usage_columns
+            ensure_gateway_usage_columns()
             prewarm_cache()
         except Exception as exc:
             logger.warning("AI Gateway startup init skipped: %s", exc)

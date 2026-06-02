@@ -568,6 +568,26 @@ def _get_usage_overview_stats(days: int = 1) -> Dict[str, Any]:
     }
 
 
+def ensure_gateway_usage_columns() -> None:
+    """Defensively add columns the app reads but the discovery workflow owns.
+
+    The gateway_usage_* tables are created/populated by the discovery workflow,
+    not the app. When the app ships a read for a new column (e.g.
+    rate_limited_count) before the workflow's ALTER has run, the SELECT would
+    fail and blank the whole usage view. Adding the column here (idempotent,
+    no-op if the table doesn't exist yet) keeps reads self-healing.
+    """
+    from backend.database import execute_update
+    for stmt in (
+        "ALTER TABLE gateway_usage_daily  ADD COLUMN IF NOT EXISTS rate_limited_count BIGINT DEFAULT 0",
+        "ALTER TABLE gateway_usage_hourly ADD COLUMN IF NOT EXISTS rate_limited_count BIGINT DEFAULT 0",
+    ):
+        try:
+            execute_update(stmt)
+        except Exception as exc:
+            logger.warning("gateway_usage column ensure skipped: %s", exc)
+
+
 def get_usage_summary(days: int = 7) -> List[Dict[str, Any]]:
     """Per-endpoint usage summary from Lakebase cache."""
     from backend.database import execute_query
