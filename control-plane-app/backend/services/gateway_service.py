@@ -596,7 +596,7 @@ def get_uag_v2_usage() -> Dict[str, Any]:
     synced yet or the workflow couldn't read the (account-scoped) system table.
     """
     from backend.database import execute_query
-    empty = {"as_of": None, "totals": {}, "endpoints": []}
+    empty = {"as_of": None, "totals": {}, "endpoints": [], "breakdowns": {}}
     try:
         rows = execute_query(
             """SELECT endpoint_name, request_count, input_tokens, output_tokens,
@@ -623,8 +623,28 @@ def get_uag_v2_usage() -> Dict[str, Any]:
     cached = total_cache_read + total_cache_create
     cache_pct = round(100.0 * total_cache_read / total_in, 1) if total_in else 0.0
     as_of = max((r.get("max_event_time") for r in rows if r.get("max_event_time")), default=None)
+
+    # Additive breakdowns (agent-vs-human / by model / by api_type) — same source table.
+    breakdowns: Dict[str, list] = {}
+    try:
+        bd = execute_query(
+            """SELECT dimension, key, request_count, input_tokens, output_tokens, cached_tokens
+               FROM uag_usage_breakdown ORDER BY request_count DESC"""
+        )
+        for r in bd:
+            breakdowns.setdefault(r.get("dimension") or "unknown", []).append({
+                "key": r.get("key", ""),
+                "request_count": int(r.get("request_count") or 0),
+                "input_tokens": int(r.get("input_tokens") or 0),
+                "output_tokens": int(r.get("output_tokens") or 0),
+                "cached_tokens": int(r.get("cached_tokens") or 0),
+            })
+    except Exception as exc:
+        logger.warning("uag_usage_breakdown not available: %s", exc)
+
     return {
         "as_of": as_of,
+        "breakdowns": breakdowns,
         "totals": {
             "request_count": total_req,
             "input_tokens": total_in,

@@ -12,6 +12,7 @@ import {
   useGatewayUsageTimeseries,
   useGatewayUsageByUser,
   useUagV2Usage,
+  type UagBreakdownRow,
   useGatewayInferenceLogs,
   useGatewayMetrics,
   useAppConfig,
@@ -54,11 +55,11 @@ import {
 
 /* ── tab definitions ─────────────────────────────────────────── */
 const baseTabs = [
-  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'metrics', label: 'Metrics', icon: Cpu },
-  { id: 'permissions', label: 'Permissions', icon: Shield },
-  { id: 'rate-limits', label: 'Rate Limits & Guardrails', icon: ShieldAlert },
-  { id: 'uag-v2', label: 'Unity AI Gateway v2 (Beta)', icon: Sparkles },
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard, beta: false },
+  { id: 'metrics', label: 'Metrics', icon: Cpu, beta: false },
+  { id: 'permissions', label: 'Permissions', icon: Shield, beta: false },
+  { id: 'rate-limits', label: 'Rate Limits & Guardrails', icon: ShieldAlert, beta: false },
+  { id: 'uag-v2', label: 'Unity AI Gateway v2', icon: Sparkles, beta: true },
 ] as const
 
 type TabId = 'overview' | 'metrics' | 'permissions' | 'rate-limits' | 'uag-v2'
@@ -129,7 +130,7 @@ export default function AIGatewayPage() {
 
       {/* Tab bar */}
       <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700 overflow-x-auto">
-        {tabs.map(({ id, label, icon: Icon }) => (
+        {tabs.map(({ id, label, icon: Icon, beta }) => (
           <button
             key={id}
             onClick={() => setActiveTab(id)}
@@ -141,19 +142,26 @@ export default function AIGatewayPage() {
           >
             <Icon className="w-4 h-4" />
             {label}
+            {beta && (
+              <span className="ml-0.5 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300">
+                Beta
+              </span>
+            )}
           </button>
         ))}
       </div>
 
-      {/* KPI Row */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
-        <KpiCard title="Total Endpoints" value={overview?.total_endpoints ?? 0} format="number" />
-        <KpiCard title="Ready" value={overview?.ready_endpoints ?? 0} format="number" />
-        <KpiCard title="Gateway Enabled" value={overview?.gateway_enabled ?? 0} format="number" />
-        <KpiCard title="Requests (24h)" value={overview?.total_requests_24h ?? 0} format="number" />
-        <KpiCard title="Unique Users (24h)" value={overview?.unique_users_24h ?? 0} format="number" />
-        <KpiCard title="Error Rate (24h)" value={overview?.error_rate_24h ?? 0} format="percentage" />
-      </div>
+      {/* KPI Row — Overview only */}
+      {activeTab === 'overview' && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
+          <KpiCard title="Total Endpoints" value={overview?.total_endpoints ?? 0} format="number" />
+          <KpiCard title="Ready" value={overview?.ready_endpoints ?? 0} format="number" />
+          <KpiCard title="Gateway Enabled" value={overview?.gateway_enabled ?? 0} format="number" />
+          <KpiCard title="Requests (24h)" value={overview?.total_requests_24h ?? 0} format="number" />
+          <KpiCard title="Unique Users (24h)" value={overview?.unique_users_24h ?? 0} format="number" />
+          <KpiCard title="Error Rate (24h)" value={overview?.error_rate_24h ?? 0} format="percentage" />
+        </div>
+      )}
 
       {/* Tab content */}
       {activeTab === 'overview' && <OverviewSection endpoints={endpoints} overview={overview} workspaceUrl={workspaceUrl} loading={pageLoading} searchQuery={searchQuery} days={days} />}
@@ -253,7 +261,73 @@ function UagV2Section() {
           )}
         </CardContent>
       </Card>
+
+      {hasData && uag?.breakdowns && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <UagBreakdownCard
+            title="Agent vs. Human"
+            subtitle="Requests by requester type"
+            rows={uag.breakdowns.requester_type}
+            labelMap={{ AGENT: 'Agent', USER: 'Human', HUMAN: 'Human', unknown: 'Unknown' }}
+          />
+          <UagBreakdownCard
+            title="Top Models"
+            subtitle="Requests by destination model"
+            rows={uag.breakdowns.destination_model}
+            limit={8}
+          />
+          <UagBreakdownCard
+            title="By API Type"
+            subtitle="Requests by API surface"
+            rows={uag.breakdowns.api_type}
+          />
+        </div>
+      )}
     </div>
+  )
+}
+
+/* Compact breakdown card — one ai_gateway.usage dimension, sorted by request volume. */
+function UagBreakdownCard({ title, subtitle, rows, limit, labelMap }: {
+  title: string
+  subtitle: string
+  rows?: UagBreakdownRow[]
+  limit?: number
+  labelMap?: Record<string, string>
+}) {
+  const data = (rows || []).slice().sort((a, b) => b.request_count - a.request_count)
+  const shown = limit ? data.slice(0, limit) : data
+  const total = data.reduce((s, r) => s + r.request_count, 0)
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{title}</CardTitle>
+        <p className="text-[11px] text-gray-400 dark:text-gray-500">{subtitle}</p>
+      </CardHeader>
+      <CardContent>
+        {shown.length === 0 ? (
+          <div className="py-8 text-center text-gray-400 dark:text-gray-500 text-sm">No data</div>
+        ) : (
+          <div className="space-y-2">
+            {shown.map((r) => {
+              const pct = total ? Math.round((r.request_count / total) * 100) : 0
+              const label = labelMap?.[r.key] || r.key || 'unknown'
+              return (
+                <div key={r.key}>
+                  <div className="flex items-center justify-between text-sm mb-0.5">
+                    <span className="font-medium truncate max-w-[200px]" title={label}>{label}</span>
+                    <span className="text-gray-500 dark:text-gray-400 tabular-nums">{r.request_count.toLocaleString()} ({pct}%)</span>
+                  </div>
+                  <div className="h-1.5 w-full rounded-full bg-gray-100 dark:bg-gray-700 overflow-hidden">
+                    <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: DB_CHART.primary }} />
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
