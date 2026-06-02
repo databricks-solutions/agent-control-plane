@@ -838,6 +838,60 @@ def resolve_apps(agents, window_days=30):
     print(f"  Apps resolved: {counts} (from {len(apps)} apps)")
 
 
+def apply_model_classification(agents):
+    """Serving Stage 3 (consumer): upgrade unresolved serving rows from the
+    `model_classification` side-channel table (produced by 12_classify_models).
+
+    Decoupled + fail-open + upgrade-only: no-op if the table is absent/empty, never
+    overrides a high-confidence task/tile/feedback verdict, and only touches the
+    dormant `unknown` (and behavioral-medium) serving customs. The authoritative
+    artifact read happens in the producer, never here. Mutates `agents` in place.
+    """
+    table = f"{CATALOG}.{SCHEMA}.model_classification"
+    try:
+        if not spark.catalog.tableExists(table):
+            print("  Stage 3: model_classification not present yet (no-op)")
+            return
+        rows = spark.sql(f"""
+            SELECT model_full_name, workload_class, framework, confidence
+            FROM {table}
+            WHERE probe_status = 'resolved' AND workload_class != 'unknown'
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY model_full_name
+                ORDER BY CASE confidence WHEN 'high' THEN 0 WHEN 'med' THEN 1 ELSE 2 END
+            ) = 1
+        """).collect()
+    except Exception as e:
+        print(f"  Stage 3 model_classification unavailable (fail-open): {e}")
+        return
+
+    lookup = {r.model_full_name: (r.workload_class, r.framework, r.confidence) for r in rows}
+    if not lookup:
+        return
+
+    upgraded = 0
+    for a in agents:
+        # Don't override settled high-confidence verdicts (task/tile/feedback).
+        if a.get("confidence") == "high" and a.get("classified_by") in (
+                "task", "tile_metadata", "feedback_sibling"):
+            continue
+        if a.get("workload_class") not in ("unknown", "genai_model", "traditional_ml"):
+            continue
+        hit = lookup.get(a.get("model_name") or "")
+        if not hit:
+            continue
+        wc, fw, conf = hit
+        a["workload_class"] = wc
+        a["type"] = _workload_to_type(wc, None)
+        a["framework"] = fw or a.get("framework")
+        a["confidence"] = conf or "high"
+        a["classified_by"] = "artifact"
+        if wc == "genai_model":
+            a["uses_llm"] = True
+        upgraded += 1
+    print(f"  Stage 3 artifact: upgraded {upgraded} rows ({len(lookup)} resolved models in table)")
+
+
 def discover_genie_from_audit_logs() -> List[Dict[str, Any]]:
     """Discover Genie Spaces across workspaces via audit logs."""
     agents = []
@@ -1168,6 +1222,10 @@ enrich_unknown_with_behavior(all_agents)
 # Apps: finalize endpoint-frontend links + app-SP behavioral (after serving
 # classification so the genai_agent set is complete).
 resolve_apps(all_agents)
+
+# Stage 3: upgrade dormant `unknown` serving rows from the model_classification
+# side-channel (fail-open, no-op until 12_classify_models has populated it).
+apply_model_classification(all_agents)
 
 # Pre-filter classification distribution (the Stage-1 flip diff vs the old taxonomy)
 from collections import Counter as _Counter

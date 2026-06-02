@@ -161,6 +161,15 @@ resources:
               warehouse_id: ${var.warehouse_id}
           environment_key: default
 
+        - task_key: classify_models
+          description: "Serving Stage 3: probe MLflow artifact (flavor/loader/signature) for empty-task custom models → model_classification (Delta). Decoupled side-channel — discover_agents reads it fail-open + upgrade-only, never waits on it."
+          notebook_task:
+            notebook_path: ./12_classify_models.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+          environment_key: default
+
         - task_key: sync_to_lakebase
           description: "Sync all discovery data (Delta → Lakebase) + system table billing"
           depends_on:
@@ -195,6 +204,7 @@ resources:
               - databricks-sdk
               - psycopg2-binary
               - requests
+              - mlflow
 
       email_notifications:
         on_failure:
