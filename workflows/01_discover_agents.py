@@ -114,7 +114,7 @@ _TILE_PROBLEM_TYPE_MAP = {
 # custom-model review queue). Definitively-non-agent serving classes
 # (foundation_model, embedding_model, genai_model, feature_serving) are not
 # persisted here. Once Stage 2/3 land, `unknown` rows resolve in place.
-_PERSISTED_TYPES = _VALID_AGENT_TYPES + ("unknown",)
+_PERSISTED_TYPES = _VALID_AGENT_TYPES + ("unknown", "ml_model", "genai_model")
 
 # Back-compat `type` (from non-serving producers) → workload_class, so the new
 # column is populated everywhere. Apps are refined to their precise class in the
@@ -154,6 +154,8 @@ _LLM_TASK_PREFIXES = ("llm/", "anthropic/", "responses/")
 _CLASS_TO_TYPE = {
     "genai_agent": "custom_agent",
     "external_model": "external_agent",
+    "traditional_ml": "ml_model",
+    "genai_model": "genai_model",
     "unknown": "unknown",
 }
 
@@ -652,11 +654,10 @@ def discover_from_system_tables() -> List[Dict[str, Any]]:
             workload_class, subtype, interface_task, confidence, classified_by = (
                 classify_served_entity(entity_type, task_type, None, r.model_name or ""))
 
-            # Non-agent serving (plain foundation / embedding / custom LLM / feature
-            # specs) is not part of the agent inventory — skip from this account-wide
-            # source (consistent with prior behavior of skipping foundation models).
-            if workload_class in ("foundation_model", "embedding_model",
-                                  "genai_model", "feature_serving"):
+            # Stock platform models (foundation/embedding) and feature specs are not
+            # part of the inventory — skip. Custom models (traditional_ml / genai_model)
+            # ARE kept and labeled (not dropped).
+            if workload_class in ("foundation_model", "embedding_model", "feature_serving"):
                 continue
 
             agent_type = _workload_to_type(workload_class, subtype)
@@ -759,11 +760,11 @@ def enrich_unknown_with_behavior(agents, window_days=30):
             continue
         toks, streamed, _reqs = beh
         if toks > 0 or streamed:
-            a.update(workload_class="genai_model", type="genai_model",
+            a.update(workload_class="genai_model", type=_workload_to_type("genai_model", None),
                      uses_llm=True, confidence="high", classified_by="behavior_tokens")
             counts["genai_model"] += 1
         else:
-            a.update(workload_class="traditional_ml", type="traditional_ml",
+            a.update(workload_class="traditional_ml", type=_workload_to_type("traditional_ml", None),
                      uses_llm=False, confidence="med", classified_by="behavior_no_tokens")
             counts["traditional_ml"] += 1
     print(f"  Stage 2 behavioral: refined {len(unknown)} unknown → {counts}")
