@@ -897,6 +897,10 @@ def apply_model_classification(agents):
         if not hit:
             continue
         wc, fw, conf = hit
+        # Ignore stale/unrecognized producer verdicts (e.g. an older classifier's
+        # cached class) — leave the row as Stage 1/2 classified it.
+        if wc not in ("genai_agent", "llm", "multimodal", "traditional_ml"):
+            continue
         a["workload_class"] = wc
         a["type"] = _workload_to_type(wc, None)
         a["framework"] = fw or a.get("framework")
