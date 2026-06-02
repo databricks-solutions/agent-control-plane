@@ -52,7 +52,8 @@ if not CATALOG or not SCHEMA:
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
 
 UAG_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_summary"
-print(f"Target table: {UAG_TABLE} | retention {RETENTION_DAYS}d")
+UAG_BREAKDOWN_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_breakdown"
+print(f"Target tables: {UAG_TABLE}, {UAG_BREAKDOWN_TABLE} | retention {RETENTION_DAYS}d")
 
 # COMMAND ----------
 
@@ -69,6 +70,18 @@ UAG_SCHEMA = StructType([
     StructField("error_count", LongType(), True),
     StructField("unique_users", LongType(), True),
     StructField("max_event_time", StringType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+# Flexible breakdown: one row per (dimension, key). dimension ∈
+# {requester_type, destination_model, api_type} — additive v2 cuts.
+UAG_BREAKDOWN_SCHEMA = StructType([
+    StructField("dimension", StringType(), False),
+    StructField("key", StringType(), False),
+    StructField("request_count", LongType(), True),
+    StructField("input_tokens", LongType(), True),
+    StructField("output_tokens", LongType(), True),
+    StructField("cached_tokens", LongType(), True),
     StructField("discovered_at", TimestampType(), False),
 ])
 
@@ -140,15 +153,17 @@ except Exception as exc:
 now = datetime.now(timezone.utc)
 
 
-def _i(x):
+# NOTE: don't name this `_i` — IPython/Databricks reserves `_i`, `_ii`, `_iii`
+# for input history and rebinds them to strings between cells.
+def to_int(x):
     return int(x) if x not in (None, "") else 0
 
 
 if rows_raw:
-    rows = [(r.get("endpoint_name", ""), _i(r.get("request_count")), _i(r.get("input_tokens")),
-             _i(r.get("output_tokens")), _i(r.get("cache_read_tokens")), _i(r.get("cache_creation_tokens")),
-             _i(r.get("p50_latency_ms")), _i(r.get("p95_latency_ms")), _i(r.get("p95_ttfb_ms")),
-             _i(r.get("error_count")), _i(r.get("unique_users")), r.get("max_event_time"), now)
+    rows = [(r.get("endpoint_name", ""), to_int(r.get("request_count")), to_int(r.get("input_tokens")),
+             to_int(r.get("output_tokens")), to_int(r.get("cache_read_tokens")), to_int(r.get("cache_creation_tokens")),
+             to_int(r.get("p50_latency_ms")), to_int(r.get("p95_latency_ms")), to_int(r.get("p95_ttfb_ms")),
+             to_int(r.get("error_count")), to_int(r.get("unique_users")), r.get("max_event_time"), now)
             for r in rows_raw]
     spark.createDataFrame(rows, UAG_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_TABLE)
 else:
@@ -157,7 +172,47 @@ print(f"✅ Wrote {len(rows_raw)} rows to {UAG_TABLE}")
 
 # COMMAND ----------
 
-result = {"status": "success", "uag_endpoint_rows": len(rows_raw),
+# Breakdowns: agent-vs-human (requester_type), by model (destination_model), by api_type.
+print("▸ Querying ai_gateway.usage breakdowns (requester_type / destination_model / api_type) …")
+try:
+    bd_rows = _execute_sql(f"""
+        WITH base AS (
+            SELECT requester_type, destination_model, api_type, input_tokens, output_tokens,
+                   COALESCE(token_details.cache_read_input_tokens, 0)
+                 + COALESCE(token_details.cache_creation_input_tokens, 0) AS cached
+            FROM system.ai_gateway.usage
+            WHERE event_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
+        )
+        SELECT 'requester_type' AS dimension, COALESCE(requester_type, 'unknown') AS key,
+               COUNT(*) AS request_count, COALESCE(SUM(input_tokens), 0) AS input_tokens,
+               COALESCE(SUM(output_tokens), 0) AS output_tokens, COALESCE(SUM(cached), 0) AS cached_tokens
+        FROM base GROUP BY requester_type
+        UNION ALL
+        SELECT 'destination_model', COALESCE(destination_model, 'unknown'),
+               COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
+        FROM base GROUP BY destination_model
+        UNION ALL
+        SELECT 'api_type', COALESCE(api_type, 'unknown'),
+               COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
+        FROM base GROUP BY api_type
+    """)
+    print(f"  ✅ {len(bd_rows)} breakdown rows")
+except Exception as exc:
+    bd_rows = []
+    print(f"  ⚠️  breakdown query unavailable: {exc}")
+
+if bd_rows:
+    rows = [(r.get("dimension", ""), r.get("key", "") or "unknown", to_int(r.get("request_count")),
+             to_int(r.get("input_tokens")), to_int(r.get("output_tokens")), to_int(r.get("cached_tokens")), now)
+            for r in bd_rows]
+    spark.createDataFrame(rows, UAG_BREAKDOWN_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_BREAKDOWN_TABLE)
+else:
+    spark.createDataFrame([], UAG_BREAKDOWN_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_BREAKDOWN_TABLE)
+print(f"✅ Wrote {len(bd_rows)} rows to {UAG_BREAKDOWN_TABLE}")
+
+# COMMAND ----------
+
+result = {"status": "success", "uag_endpoint_rows": len(rows_raw), "uag_breakdown_rows": len(bd_rows),
           "retention_days": RETENTION_DAYS, "discovered_at": now.isoformat()}
 print(json.dumps(result, indent=2))
 dbutils.notebook.exit(json.dumps(result))

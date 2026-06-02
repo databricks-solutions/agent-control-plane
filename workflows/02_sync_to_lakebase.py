@@ -1576,6 +1576,50 @@ try:
 except Exception as exc:
     print(f"  ⚠️  uag_usage_summary sync failed: {exc}")
 
+# Sync uag_usage_breakdown (agent-vs-human / by model / by api_type)
+UAG_BREAKDOWN_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_breakdown"
+uag_bd_count = 0
+with uag_conn.cursor() as cur:
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS uag_usage_breakdown (
+            dimension     TEXT NOT NULL,
+            key           TEXT NOT NULL,
+            request_count BIGINT DEFAULT 0,
+            input_tokens  BIGINT DEFAULT 0,
+            output_tokens BIGINT DEFAULT 0,
+            cached_tokens BIGINT DEFAULT 0,
+            last_synced   TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (dimension, key)
+        )""")
+    uag_conn.commit()
+print(f"▸ Syncing {UAG_BREAKDOWN_TABLE} → uag_usage_breakdown ...")
+try:
+    with uag_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE uag_usage_breakdown")
+        uag_conn.commit()
+    bd_rows = spark.read.table(UAG_BREAKDOWN_TABLE).collect()
+    if bd_rows:
+        values = [(r.dimension, r.key, int(r.request_count or 0), int(r.input_tokens or 0),
+                   int(r.output_tokens or 0), int(r.cached_tokens or 0), now)
+                  for r in bd_rows]
+        uag_bd_count = len(values)
+        with uag_conn.cursor() as cur:
+            execute_values(cur,
+                """INSERT INTO uag_usage_breakdown
+                   (dimension, key, request_count, input_tokens, output_tokens, cached_tokens, last_synced)
+                   VALUES %s
+                   ON CONFLICT (dimension, key) DO UPDATE SET
+                       request_count = EXCLUDED.request_count,
+                       input_tokens = EXCLUDED.input_tokens,
+                       output_tokens = EXCLUDED.output_tokens,
+                       cached_tokens = EXCLUDED.cached_tokens,
+                       last_synced = NOW()""",
+                values, page_size=500)
+            uag_conn.commit()
+    print(f"  ✅ {uag_bd_count} UAG breakdown rows synced")
+except Exception as exc:
+    print(f"  ⚠️  uag_usage_breakdown sync failed: {exc}")
+
 uag_conn.close()
 
 # COMMAND ----------

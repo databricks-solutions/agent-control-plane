@@ -599,6 +599,19 @@ export interface UagV2Usage {
     error_count: number
     unique_users: number
   }>
+  breakdowns?: {
+    requester_type?: UagBreakdownRow[]
+    destination_model?: UagBreakdownRow[]
+    api_type?: UagBreakdownRow[]
+  }
+}
+
+export interface UagBreakdownRow {
+  key: string
+  request_count: number
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
 }
 
 /** Unity AI Gateway (v2) usage — v2-routed endpoints only, ~20-min fresh. */
