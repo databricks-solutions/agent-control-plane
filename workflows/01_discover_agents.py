@@ -370,8 +370,162 @@ def discover_serving_endpoints() -> List[Dict[str, Any]]:
     return agents
 
 
+# ── App classification (Stage 1+2+3) ────────────────────────────────────
+# Authoritative signal is the app's own source: pyproject.toml / requirements.txt
+# (agent frameworks) + app.yaml (MLflow AgentServer pattern). "uses an LLM" is NOT
+# "is an agent" — a dashboard with a Genie feature is ai_enabled_app, not an agent.
+_AGENT_FRAMEWORKS = (
+    "databricks-agents", "databricks_agents", "langgraph", "openai-agents",
+    "crewai", "autogen", "pyautogen", "dspy", "llama-index", "llama_index",
+)
+# LLM client libs (LLM use without agent orchestration → ai_enabled_app)
+_LLM_CLIENT_LIBS = (
+    "openai", "anthropic", "databricks-openai", "langchain", "databricks-langchain",
+    "litellm", "mistralai", "cohere",
+)
+_APP_CLASSES = ("agent_app", "agent_frontend_app", "ai_enabled_app", "regular_app")
+
+
+def _app_class_to_type(app_class):
+    """Map an app_class to the back-compat `type`. Only true agent apps persist."""
+    if app_class in ("agent_app", "agent_frontend_app"):
+        return "custom_app"
+    if app_class == "unknown":
+        return "app_unknown"      # distinct from serving `unknown`; not persisted
+    return app_class               # ai_enabled_app / regular_app — not persisted
+
+
+def _export_ws_text(base, headers, path):
+    """Best-effort export of a workspace file as text (fail-open → None)."""
+    try:
+        resp = httpx.get(f"{base}/api/2.0/workspace/export", headers=headers,
+                         params={"path": path, "direct_download": "true"},
+                         timeout=_REST_TIMEOUT)
+        if resp.status_code == 200:
+            return resp.text
+    except Exception:
+        pass
+    return None
+
+
+def _read_app_signals(base, headers, source_path):
+    """Read dependency + app.yaml text from an app's source dir (workspace-local)."""
+    if not source_path:
+        return {"deps": "", "app_yaml": ""}
+    deps = []
+    for fn in ("requirements.txt", "pyproject.toml"):
+        t = _export_ws_text(base, headers, f"{source_path}/{fn}")
+        if t:
+            deps.append(t)
+    return {"deps": "\n".join(deps), "app_yaml": _export_ws_text(base, headers, f"{source_path}/app.yaml") or ""}
+
+
+def _endpoint_from_app_yaml(app_yaml):
+    """Extract a backing serving endpoint referenced via app.yaml env (e.g.
+    MODEL_SERVING_ENDPOINT), which is NOT a declared resource."""
+    lines = (app_yaml or "").splitlines()
+    for i, ln in enumerate(lines):
+        low = ln.lower()
+        if "name:" in low and "serving_endpoint" in low:
+            for j in range(i + 1, min(i + 3, len(lines))):
+                if "value:" in lines[j].lower():
+                    return lines[j].split("value:", 1)[1].strip().strip('"\'')
+    return ""
+
+
+def classify_app_source(deps_text, app_yaml_text):
+    """Source-only app classification (Stage 3). Endpoint-link + behavior are applied
+    later in resolve_apps(). Returns (app_class, framework, confidence, classified_by)."""
+    deps = (deps_text or "").lower()
+    ay = (app_yaml_text or "").lower()
+    framework = next((f for f in _AGENT_FRAMEWORKS if f in deps), None)
+    agent_server = ("invocations" in ay) or ("agent_server" in ay) or ("agent_server" in deps)
+    if framework or agent_server:
+        return ("agent_app", framework or "mlflow_agentserver", "high",
+                "app_source" if framework else "app_yaml")
+    if any(c in deps for c in _LLM_CLIENT_LIBS):
+        return ("ai_enabled_app", None, "med", "app_source")
+    if deps or ay:
+        return ("regular_app", None, "high", "app_source")
+    return ("unknown", None, "low", "insufficient_signal")
+
+
+def _build_app_record(app, ws_id, source, base, headers):
+    """Build one classified app record (shared by local + cross-workspace discovery)."""
+    name = app.get("name", "")
+    cs = app.get("compute_status") or {}
+    status = cs.get("state", "")
+    if not status:
+        dep_status = (app.get("active_deployment") or {}).get("status") or {}
+        status = dep_status.get("state", "")
+    raw_creator = app.get("creator", "")
+    creator = raw_creator.get("username", "") if isinstance(raw_creator, dict) else str(raw_creator or "")
+
+    config_dict = {
+        "url": app.get("url", ""),
+        "app_id": app.get("id", ""),
+        "compute_size": app.get("compute_size", ""),
+        "deployment_type": "databricks_app",
+        "deployment_method": "app",
+        "sp_client_id": app.get("service_principal_client_id", "") or "",
+    }
+
+    resource_endpoint = ""
+    resources = app.get("resources") or []
+    if resources:
+        config_dict["resources"] = []
+        for r in resources:
+            r_entry = {"name": r.get("name", ""), "description": r.get("description", "")}
+            for rtype in ("serving_endpoint", "sql_warehouse", "experiment", "secret"):
+                if rtype in r:
+                    r_entry["type"] = rtype
+                    if rtype == "serving_endpoint":
+                        nested = r.get("serving_endpoint") or {}
+                        if isinstance(nested, dict) and nested.get("name"):
+                            r_entry["endpoint_name"] = nested["name"]
+                            resource_endpoint = resource_endpoint or nested["name"]
+                    break
+            config_dict["resources"].append(r_entry)
+
+    # Stage 3: read the app's own source (workspace-local; fail-open if unreadable).
+    signals = _read_app_signals(base, headers, app.get("default_source_code_path", ""))
+    env_endpoint = _endpoint_from_app_yaml(signals["app_yaml"])
+    linked_endpoint = resource_endpoint or env_endpoint or ""
+    app_class, framework, confidence, classified_by = classify_app_source(
+        signals["deps"], signals["app_yaml"])
+
+    if linked_endpoint:
+        config_dict["linked_endpoint"] = linked_endpoint
+
+    return {
+        "agent_id": _make_id(name, ws_id),
+        "workspace_id": ws_id,
+        "name": name,
+        "type": _app_class_to_type(app_class),
+        "endpoint_name": name,
+        "endpoint_status": status,
+        "model_name": "",
+        "served_entity_name": "",
+        "creator": creator,
+        "description": app.get("description", ""),
+        "config": json.dumps(config_dict),
+        "source": source,
+        "is_extensive": source != "api",
+        "workload_class": app_class,
+        "subtype": None,
+        "framework": framework,
+        "interface_task": None,
+        "uses_llm": None,
+        "linked_endpoint": linked_endpoint or None,
+        "confidence": confidence,
+        "classified_by": classified_by,
+        "classifier_version": _CLASSIFIER_VERSION,
+        "raw_signals": json.dumps({"source_readable": bool(signals["deps"] or signals["app_yaml"])}),
+    }
+
+
 def discover_apps() -> List[Dict[str, Any]]:
-    """Discover Databricks Apps via REST API."""
+    """Discover Databricks Apps via REST API (classified; refined in resolve_apps())."""
     base = _get_host()
     headers = _get_headers()
     agents = []
@@ -392,69 +546,15 @@ def discover_apps() -> List[Dict[str, Any]]:
             ws_id = _get_workspace_id()
 
             for app in body.get("apps", []):
-                name = app.get("name", "")
-
-                # Status: prefer compute_status over deployment status
-                cs = app.get("compute_status") or {}
-                status = cs.get("state", "")
-                if not status:
-                    active = app.get("active_deployment") or {}
-                    dep_status = active.get("status") or {}
-                    status = dep_status.get("state", "")
-
-                url = app.get("url", "")
-                description = app.get("description", "")
-                raw_creator = app.get("creator", "")
-                creator = raw_creator.get("username", "") if isinstance(raw_creator, dict) else str(raw_creator or "")
-
-                config_dict = {
-                    "url": url,
-                    "app_id": app.get("id", ""),
-                    "compute_size": app.get("compute_size", ""),
-                    "deployment_type": "databricks_app",
-                    "deployment_method": "app",
-                }
-
-                resources = app.get("resources") or []
-                if resources:
-                    config_dict["resources"] = []
-                    for r in resources:
-                        r_entry = {"name": r.get("name", ""), "description": r.get("description", "")}
-                        for rtype in ("serving_endpoint", "sql_warehouse", "experiment", "secret"):
-                            if rtype in r:
-                                r_entry["type"] = rtype
-                                if rtype == "serving_endpoint":
-                                    nested = r.get("serving_endpoint") or {}
-                                    if isinstance(nested, dict) and nested.get("name"):
-                                        r_entry["endpoint_name"] = nested["name"]
-                                break
-                        config_dict["resources"].append(r_entry)
-
-                # Only include apps that have a serving_endpoint resource
-                if not any(r.get("type") == "serving_endpoint" for r in config_dict.get("resources", [])):
-                    continue
-
-                agents.append({
-                    "agent_id": _make_id(name, ws_id),
-                    "workspace_id": ws_id,
-                    "name": name,
-                    "type": "custom_app",
-                    "endpoint_name": name,
-                    "endpoint_status": status,
-                    "model_name": "",
-                    "served_entity_name": "",
-                    "creator": creator,
-                    "description": description,
-                    "config": json.dumps(config_dict),
-                    "source": "api",
-                    "is_extensive": False,
-                })
+                # Classify every app (no serving_endpoint gate); resolve_apps()
+                # finalizes endpoint-frontend + behavioral signals afterward.
+                agents.append(_build_app_record(app, ws_id, "api", base, headers))
 
             next_page_token = body.get("next_page_token")
             if not next_page_token:
                 break
 
-        print(f"  Databricks Apps: {len(agents)} agent apps")
+        print(f"  Databricks Apps: {len(agents)} apps classified")
     except Exception as e:
         print(f"  ERROR discovering apps: {e}")
     return agents
@@ -667,6 +767,75 @@ def enrich_unknown_with_behavior(agents, window_days=30):
                      uses_llm=False, confidence="med", classified_by="behavior_no_tokens")
             counts["traditional_ml"] += 1
     print(f"  Stage 2 behavioral: refined {len(unknown)} unknown → {counts}")
+
+
+def resolve_apps(agents, window_days=30):
+    """Finalize app classification: link frontends to backing genai_agent endpoints
+    and apply the app service-principal behavioral signal. Runs after serving
+    classification (so the genai_agent set is final). Mutates `agents` in place.
+
+    Precedence: source agent_app > endpoint-link (agent_frontend_app) > LLM-use
+    (ai_enabled_app) > regular_app > unknown. "Uses an LLM" never promotes to agent.
+    """
+    apps = []
+    for a in agents:
+        try:
+            cfg = json.loads(a.get("config") or "{}")
+        except Exception:
+            cfg = {}
+        if cfg.get("deployment_method") == "app":
+            apps.append((a, cfg))
+    if not apps:
+        return
+
+    agent_eps = {(str(a.get("workspace_id", "")), a.get("endpoint_name", ""))
+                 for a in agents if a.get("workload_class") == "genai_agent"}
+
+    # App-SP behavioral: which app service principals call serving endpoints w/ tokens.
+    llm_sps = set()
+    sp_ids = {cfg.get("sp_client_id") for _a, cfg in apps if cfg.get("sp_client_id")}
+    if sp_ids:
+        try:
+            in_list = ",".join("'" + s.replace("'", "") + "'" for s in sp_ids)
+            rows = spark.sql(f"""
+                SELECT requester,
+                       SUM(COALESCE(input_token_count, 0) + COALESCE(output_token_count, 0)) AS toks
+                FROM system.serving.endpoint_usage
+                WHERE requester IN ({in_list})
+                  AND request_time >= current_timestamp() - INTERVAL {int(window_days)} DAYS
+                GROUP BY requester
+            """).collect()
+            llm_sps = {r.requester for r in rows if int(r.toks or 0) > 0}
+        except Exception as e:
+            print(f"  App-SP behavioral unavailable (fail-open): {e}")
+
+    counts = {}
+    for a, cfg in apps:
+        ws = str(a.get("workspace_id", ""))
+        le = a.get("linked_endpoint") or ""
+        spid = cfg.get("sp_client_id")
+        sp_llm = bool(spid) and spid in llm_sps
+        cur = a.get("workload_class")
+
+        if cur == "agent_app":
+            final = "agent_app"
+        elif le and (ws, le) in agent_eps:
+            final = "agent_frontend_app"
+            a["confidence"], a["classified_by"] = "high", "endpoint_link"
+        elif cur == "ai_enabled_app" or sp_llm:
+            final = "ai_enabled_app"
+            if sp_llm and cur != "ai_enabled_app":
+                a["confidence"], a["classified_by"] = "med", "behavior_sp_tokens"
+        elif cur == "regular_app":
+            final = "regular_app"
+        else:
+            final = "unknown"
+
+        a["workload_class"] = final
+        a["type"] = _app_class_to_type(final)
+        a["uses_llm"] = final in ("agent_app", "agent_frontend_app", "ai_enabled_app") or sp_llm
+        counts[final] = counts.get(final, 0) + 1
+    print(f"  Apps resolved: {counts} (from {len(apps)} apps)")
 
 
 def discover_genie_from_audit_logs() -> List[Dict[str, Any]]:
@@ -900,63 +1069,10 @@ def _fetch_apps_for_workspace(
 
             body = resp.json()
             for app in body.get("apps", []):
-                name = app.get("name", "")
-
-                # Status
-                cs = app.get("compute_status") or {}
-                status = cs.get("state", "")
-                if not status:
-                    active = app.get("active_deployment") or {}
-                    dep_status = active.get("status") or {}
-                    status = dep_status.get("state", "")
-
-                url = app.get("url", "")
-                description = app.get("description", "")
-                raw_creator = app.get("creator", "")
-                creator = raw_creator.get("username", "") if isinstance(raw_creator, dict) else str(raw_creator or "")
-
-                config_dict: Dict[str, Any] = {
-                    "url": url,
-                    "app_id": app.get("id", ""),
-                    "compute_size": app.get("compute_size", ""),
-                    "deployment_type": "databricks_app",
-                    "deployment_method": "app",
-                }
-
-                resources = app.get("resources") or []
-                if resources:
-                    config_dict["resources"] = []
-                    for r in resources:
-                        r_entry: Dict[str, Any] = {"name": r.get("name", ""), "description": r.get("description", "")}
-                        for rtype in ("serving_endpoint", "sql_warehouse", "experiment", "secret"):
-                            if rtype in r:
-                                r_entry["type"] = rtype
-                                if rtype == "serving_endpoint":
-                                    nested = r.get("serving_endpoint") or {}
-                                    if isinstance(nested, dict) and nested.get("name"):
-                                        r_entry["endpoint_name"] = nested["name"]
-                                break
-                        config_dict["resources"].append(r_entry)
-
-                # Only include apps that have a serving_endpoint resource
-                if not any(r.get("type") == "serving_endpoint" for r in config_dict.get("resources", [])):
-                    continue
-
-                agents.append({
-                    "agent_id": _make_id(name, ws_id),
-                    "workspace_id": ws_id,
-                    "name": name,
-                    "type": "custom_app",
-                    "endpoint_name": name,
-                    "endpoint_status": status,
-                    "model_name": "",
-                    "served_entity_name": "",
-                    "creator": creator,
-                    "description": description,
-                    "config": json.dumps(config_dict),
-                    "source": "cross_workspace_api",
-                    "is_extensive": True,
-                })
+                # Source read uses the remote host + token (workspace-local to that
+                # workspace); fail-open if file ACLs block it → falls back to
+                # endpoint-link / behavior in resolve_apps().
+                agents.append(_build_app_record(app, ws_id, "cross_workspace_api", host, headers))
 
             next_page_token = body.get("next_page_token")
             if not next_page_token:
@@ -1048,6 +1164,10 @@ print(f"Total discovered: {len(all_agents)} agents")
 
 # Stage 2: refine empty-task CUSTOM_MODEL `unknown` rows from runtime behavior.
 enrich_unknown_with_behavior(all_agents)
+
+# Apps: finalize endpoint-frontend links + app-SP behavioral (after serving
+# classification so the genai_agent set is complete).
+resolve_apps(all_agents)
 
 # Pre-filter classification distribution (the Stage-1 flip diff vs the old taxonomy)
 from collections import Counter as _Counter
