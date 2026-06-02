@@ -568,6 +568,26 @@ def _get_usage_overview_stats(days: int = 1) -> Dict[str, Any]:
     }
 
 
+def ensure_gateway_usage_columns() -> None:
+    """Defensively add columns the app reads but the discovery workflow owns.
+
+    The gateway_usage_* tables are created/populated by the discovery workflow,
+    not the app. When the app ships a read for a new column (e.g.
+    rate_limited_count) before the workflow's ALTER has run, the SELECT would
+    fail and blank the whole usage view. Adding the column here (idempotent,
+    no-op if the table doesn't exist yet) keeps reads self-healing.
+    """
+    from backend.database import execute_update
+    for stmt in (
+        "ALTER TABLE gateway_usage_daily  ADD COLUMN IF NOT EXISTS rate_limited_count BIGINT DEFAULT 0",
+        "ALTER TABLE gateway_usage_hourly ADD COLUMN IF NOT EXISTS rate_limited_count BIGINT DEFAULT 0",
+    ):
+        try:
+            execute_update(stmt)
+        except Exception as exc:
+            logger.warning("gateway_usage column ensure skipped: %s", exc)
+
+
 def get_usage_summary(days: int = 7) -> List[Dict[str, Any]]:
     """Per-endpoint usage summary from Lakebase cache."""
     from backend.database import execute_query
@@ -577,6 +597,7 @@ def get_usage_summary(days: int = 7) -> List[Dict[str, Any]]:
                   SUM(input_tokens) AS total_input_tokens,
                   SUM(output_tokens) AS total_output_tokens,
                   SUM(error_count) AS error_count,
+                  COALESCE(SUM(rate_limited_count), 0) AS rate_limited_count,
                   COUNT(DISTINCT NULLIF(requester, '')) AS unique_users
            FROM gateway_usage_daily
            WHERE usage_date >= CURRENT_DATE - INTERVAL '%s days'
@@ -590,6 +611,7 @@ def get_usage_summary(days: int = 7) -> List[Dict[str, Any]]:
             "total_input_tokens": int(r.get("total_input_tokens") or 0),
             "total_output_tokens": int(r.get("total_output_tokens") or 0),
             "error_count": int(r.get("error_count") or 0),
+            "rate_limited_count": int(r.get("rate_limited_count") or 0),
             "unique_users": int(r.get("unique_users") or 0),
         }
         for r in rows
@@ -603,7 +625,8 @@ def get_usage_timeseries(days: int = 7, endpoint_name: Optional[str] = None) -> 
         rows = execute_query(
             """SELECT hour, SUM(request_count) AS request_count,
                       SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
-                      SUM(error_count) AS error_count
+                      SUM(error_count) AS error_count,
+                      COALESCE(SUM(rate_limited_count), 0) AS rate_limited_count
                FROM gateway_usage_hourly WHERE endpoint_name = %s
                GROUP BY hour ORDER BY hour""",
             (endpoint_name,),
@@ -612,7 +635,8 @@ def get_usage_timeseries(days: int = 7, endpoint_name: Optional[str] = None) -> 
         rows = execute_query(
             """SELECT hour, SUM(request_count) AS request_count,
                       SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
-                      SUM(error_count) AS error_count
+                      SUM(error_count) AS error_count,
+                      COALESCE(SUM(rate_limited_count), 0) AS rate_limited_count
                FROM gateway_usage_hourly
                GROUP BY hour ORDER BY hour""",
         )
@@ -623,6 +647,7 @@ def get_usage_timeseries(days: int = 7, endpoint_name: Optional[str] = None) -> 
             "input_tokens": int(r.get("input_tokens") or 0),
             "output_tokens": int(r.get("output_tokens") or 0),
             "error_count": int(r.get("error_count") or 0),
+            "rate_limited_count": int(r.get("rate_limited_count") or 0),
         }
         for r in rows
     ]
@@ -634,7 +659,8 @@ def get_usage_by_user(days: int = 7) -> List[Dict[str, Any]]:
     rows = execute_query(
         """SELECT requester, SUM(request_count) AS total_requests,
                   SUM(input_tokens) AS total_input_tokens, SUM(output_tokens) AS total_output_tokens,
-                  SUM(error_count) AS error_count
+                  SUM(error_count) AS error_count,
+                  COALESCE(SUM(rate_limited_count), 0) AS rate_limited_count
            FROM gateway_usage_daily
            WHERE usage_date >= CURRENT_DATE - INTERVAL '%s days'
              AND requester != ''
@@ -648,6 +674,7 @@ def get_usage_by_user(days: int = 7) -> List[Dict[str, Any]]:
             "total_input_tokens": int(r.get("total_input_tokens") or 0),
             "total_output_tokens": int(r.get("total_output_tokens") or 0),
             "error_count": int(r.get("error_count") or 0),
+            "rate_limited_count": int(r.get("rate_limited_count") or 0),
         }
         for r in rows
     ]

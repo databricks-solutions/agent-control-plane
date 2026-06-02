@@ -1422,11 +1422,15 @@ with gw_conn.cursor() as cur:
             input_tokens    BIGINT DEFAULT 0,
             output_tokens   BIGINT DEFAULT 0,
             error_count     BIGINT DEFAULT 0,
+            rate_limited_count BIGINT DEFAULT 0,
             last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             PRIMARY KEY (usage_date, endpoint_name, requester)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_gud_date ON gateway_usage_daily (usage_date DESC)",
         "CREATE INDEX IF NOT EXISTS idx_gud_ep ON gateway_usage_daily (endpoint_name)",
+        # ADD COLUMN for tables that pre-existed without rate_limited_count
+        "ALTER TABLE gateway_usage_daily  ADD COLUMN IF NOT EXISTS rate_limited_count BIGINT DEFAULT 0",
+        "ALTER TABLE gateway_usage_hourly ADD COLUMN IF NOT EXISTS rate_limited_count BIGINT DEFAULT 0",
         """CREATE TABLE IF NOT EXISTS gateway_usage_hourly (
             hour            TEXT NOT NULL,
             endpoint_name   TEXT DEFAULT '',
@@ -1434,6 +1438,7 @@ with gw_conn.cursor() as cur:
             input_tokens    BIGINT DEFAULT 0,
             output_tokens   BIGINT DEFAULT 0,
             error_count     BIGINT DEFAULT 0,
+            rate_limited_count BIGINT DEFAULT 0,
             last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             PRIMARY KEY (hour, endpoint_name)
         )""",
@@ -1457,13 +1462,14 @@ try:
     gw_rows = gw_df.collect()
     if gw_rows:
         values = [(r.usage_date, r.endpoint_name, r.requester or "",
-                   r.request_count, r.input_tokens, r.output_tokens, r.error_count, now)
+                   r.request_count, r.input_tokens, r.output_tokens, r.error_count,
+                   getattr(r, "rate_limited_count", 0) or 0, now)
                   for r in gw_rows]
         gw_daily_count = len(values)
         with gw_conn.cursor() as cur:
             execute_values(cur,
                 """INSERT INTO gateway_usage_daily
-                   (usage_date, endpoint_name, requester, request_count, input_tokens, output_tokens, error_count, last_synced)
+                   (usage_date, endpoint_name, requester, request_count, input_tokens, output_tokens, error_count, rate_limited_count, last_synced)
                    VALUES %s""",
                 values, page_size=500)
             gw_conn.commit()
@@ -1480,13 +1486,14 @@ try:
     gh_rows = gh_df.collect()
     if gh_rows:
         values = [(r.hour, r.endpoint_name or "", r.request_count,
-                   r.input_tokens, r.output_tokens, r.error_count, now)
+                   r.input_tokens, r.output_tokens, r.error_count,
+                   getattr(r, "rate_limited_count", 0) or 0, now)
                   for r in gh_rows]
         gw_hourly_count = len(values)
         with gw_conn.cursor() as cur:
             execute_values(cur,
                 """INSERT INTO gateway_usage_hourly
-                   (hour, endpoint_name, request_count, input_tokens, output_tokens, error_count, last_synced)
+                   (hour, endpoint_name, request_count, input_tokens, output_tokens, error_count, rate_limited_count, last_synced)
                    VALUES %s""",
                 values, page_size=500)
             gw_conn.commit()

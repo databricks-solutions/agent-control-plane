@@ -203,6 +203,7 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
     if (key === 'total_input_tokens') return Number(s.total_input_tokens || 0)
     if (key === 'total_output_tokens') return Number(s.total_output_tokens || 0)
     if (key === 'error_count') return Number(s.error_count || 0)
+    if (key === 'rate_limited_count') return Number(s.rate_limited_count || 0)
     if (key === 'unique_users') return Number(s.unique_users || 0)
     return 0
   }), [allSummary, usageSort.sort])
@@ -217,6 +218,7 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
     if (key === 'total_input_tokens') return Number(u.total_input_tokens || 0)
     if (key === 'total_output_tokens') return Number(u.total_output_tokens || 0)
     if (key === 'error_count') return Number(u.error_count || 0)
+    if (key === 'rate_limited_count') return Number(u.rate_limited_count || 0)
     return 0
   }), [allUsers, userSort.sort])
   const userTotalPages = Math.max(1, Math.ceil(sortedUsers.length / userPageSize))
@@ -406,6 +408,7 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
                   <SortableHeader label="Input Tokens" sortKey="total_input_tokens" current={usageSort.sort} onToggle={usageSort.toggle} align="right" />
                   <SortableHeader label="Output Tokens" sortKey="total_output_tokens" current={usageSort.sort} onToggle={usageSort.toggle} align="right" />
                   <SortableHeader label="Errors" sortKey="error_count" current={usageSort.sort} onToggle={usageSort.toggle} align="right" />
+                  <SortableHeader label="Rate-Limited" sortKey="rate_limited_count" current={usageSort.sort} onToggle={usageSort.toggle} align="right" />
                   <SortableHeader label="Users" sortKey="unique_users" current={usageSort.sort} onToggle={usageSort.toggle} align="right" />
                 </tr>
               </thead>
@@ -417,11 +420,12 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
                     <td className="py-2 text-right">{Number(s.total_input_tokens).toLocaleString()}</td>
                     <td className="py-2 text-right">{Number(s.total_output_tokens).toLocaleString()}</td>
                     <td className="py-2 text-right text-red-600">{Number(s.error_count).toLocaleString()}</td>
+                    <td className="py-2 text-right text-amber-600 dark:text-amber-400">{Number(s.rate_limited_count || 0).toLocaleString()}</td>
                     <td className="py-2 text-right">{Number(s.unique_users).toLocaleString()}</td>
                   </tr>
                 ))}
                 {sortedUsage.length === 0 && (
-                  <tr><td colSpan={6} className="py-8 text-center text-gray-400 dark:text-gray-500">{usageLoading ? 'Loading…' : 'No usage data'}</td></tr>
+                  <tr><td colSpan={7} className="py-8 text-center text-gray-400 dark:text-gray-500">{usageLoading ? 'Loading…' : 'No usage data'}</td></tr>
                 )}
               </tbody>
             </table>
@@ -447,6 +451,7 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
                   <SortableHeader label="Input Tokens" sortKey="total_input_tokens" current={userSort.sort} onToggle={userSort.toggle} align="right" />
                   <SortableHeader label="Output Tokens" sortKey="total_output_tokens" current={userSort.sort} onToggle={userSort.toggle} align="right" />
                   <SortableHeader label="Errors" sortKey="error_count" current={userSort.sort} onToggle={userSort.toggle} align="right" />
+                  <SortableHeader label="Rate-Limited" sortKey="rate_limited_count" current={userSort.sort} onToggle={userSort.toggle} align="right" />
                 </tr>
               </thead>
               <tbody>
@@ -457,10 +462,11 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
                     <td className="py-2 text-right">{Number(u.total_input_tokens).toLocaleString()}</td>
                     <td className="py-2 text-right">{Number(u.total_output_tokens).toLocaleString()}</td>
                     <td className="py-2 text-right text-red-600">{Number(u.error_count).toLocaleString()}</td>
+                    <td className="py-2 text-right text-amber-600 dark:text-amber-400">{Number(u.rate_limited_count || 0).toLocaleString()}</td>
                   </tr>
                 ))}
                 {sortedUsers.length === 0 && (
-                  <tr><td colSpan={5} className="py-8 text-center text-gray-400 dark:text-gray-500">{usersLoading ? 'Loading…' : 'No user data'}</td></tr>
+                  <tr><td colSpan={6} className="py-8 text-center text-gray-400 dark:text-gray-500">{usersLoading ? 'Loading…' : 'No user data'}</td></tr>
                 )}
               </tbody>
             </table>

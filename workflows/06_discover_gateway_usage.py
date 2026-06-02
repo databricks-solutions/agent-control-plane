@@ -67,6 +67,7 @@ GW_DAILY_SCHEMA = StructType([
     StructField("input_tokens", LongType(), True),
     StructField("output_tokens", LongType(), True),
     StructField("error_count", LongType(), True),
+    StructField("rate_limited_count", LongType(), True),
     StructField("discovered_at", TimestampType(), False),
 ])
 
@@ -77,6 +78,7 @@ GW_HOURLY_SCHEMA = StructType([
     StructField("input_tokens", LongType(), True),
     StructField("output_tokens", LongType(), True),
     StructField("error_count", LongType(), True),
+    StructField("rate_limited_count", LongType(), True),
     StructField("discovered_at", TimestampType(), False),
 ])
 
@@ -137,7 +139,8 @@ daily_rows = _execute_sql("""
         COUNT(*) AS request_count,
         COALESCE(SUM(u.input_token_count), 0) AS input_tokens,
         COALESCE(SUM(u.output_token_count), 0) AS output_tokens,
-        SUM(CASE WHEN u.status_code >= 400 THEN 1 ELSE 0 END) AS error_count
+        SUM(CASE WHEN u.status_code >= 400 THEN 1 ELSE 0 END) AS error_count,
+        SUM(CASE WHEN u.status_code = 429 THEN 1 ELSE 0 END) AS rate_limited_count
     FROM system.serving.endpoint_usage u
     JOIN system.serving.served_entities se
         ON u.served_entity_id = se.served_entity_id
@@ -157,7 +160,8 @@ hourly_rows = _execute_sql("""
         COUNT(*) AS request_count,
         COALESCE(SUM(u.input_token_count), 0) AS input_tokens,
         COALESCE(SUM(u.output_token_count), 0) AS output_tokens,
-        SUM(CASE WHEN u.status_code >= 400 THEN 1 ELSE 0 END) AS error_count
+        SUM(CASE WHEN u.status_code >= 400 THEN 1 ELSE 0 END) AS error_count,
+        SUM(CASE WHEN u.status_code = 429 THEN 1 ELSE 0 END) AS rate_limited_count
     FROM system.serving.endpoint_usage u
     JOIN system.serving.served_entities se
         ON u.served_entity_id = se.served_entity_id
@@ -177,22 +181,24 @@ print(f"  ✅ {len(hourly_rows)} hourly usage rows")
 if daily_rows:
     rows = [(r.get("usage_date",""), r.get("endpoint_name",""), r.get("requester",""),
              int(r.get("request_count") or 0), int(r.get("input_tokens") or 0),
-             int(r.get("output_tokens") or 0), int(r.get("error_count") or 0), now)
+             int(r.get("output_tokens") or 0), int(r.get("error_count") or 0),
+             int(r.get("rate_limited_count") or 0), now)
             for r in daily_rows]
-    spark.createDataFrame(rows, GW_DAILY_SCHEMA).write.mode("overwrite").saveAsTable(GW_USAGE_DAILY_TABLE)
+    spark.createDataFrame(rows, GW_DAILY_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(GW_USAGE_DAILY_TABLE)
     print(f"✅ Wrote {len(rows)} rows to {GW_USAGE_DAILY_TABLE}")
 else:
-    spark.createDataFrame([], GW_DAILY_SCHEMA).write.mode("overwrite").saveAsTable(GW_USAGE_DAILY_TABLE)
+    spark.createDataFrame([], GW_DAILY_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(GW_USAGE_DAILY_TABLE)
 
 if hourly_rows:
     rows = [(r.get("hour",""), r.get("endpoint_name",""),
              int(r.get("request_count") or 0), int(r.get("input_tokens") or 0),
-             int(r.get("output_tokens") or 0), int(r.get("error_count") or 0), now)
+             int(r.get("output_tokens") or 0), int(r.get("error_count") or 0),
+             int(r.get("rate_limited_count") or 0), now)
             for r in hourly_rows]
-    spark.createDataFrame(rows, GW_HOURLY_SCHEMA).write.mode("overwrite").saveAsTable(GW_USAGE_HOURLY_TABLE)
+    spark.createDataFrame(rows, GW_HOURLY_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(GW_USAGE_HOURLY_TABLE)
     print(f"✅ Wrote {len(rows)} rows to {GW_USAGE_HOURLY_TABLE}")
 else:
-    spark.createDataFrame([], GW_HOURLY_SCHEMA).write.mode("overwrite").saveAsTable(GW_USAGE_HOURLY_TABLE)
+    spark.createDataFrame([], GW_HOURLY_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(GW_USAGE_HOURLY_TABLE)
 
 # COMMAND ----------
 
