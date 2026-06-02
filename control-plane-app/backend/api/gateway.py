@@ -172,6 +172,13 @@ def usage_by_user(days: int = Query(default=7, le=90)):
     return gateway_service.get_usage_by_user(days)
 
 
+@router.get("/uag-v2-usage")
+def uag_v2_usage():
+    """Unity AI Gateway (v2) usage summary from system.ai_gateway.usage —
+    v2-routed endpoints only, ~20-min fresh (cached tokens + latency/TTFB)."""
+    return gateway_service.get_uag_v2_usage()
+
+
 @router.get("/inference-logs")
 def inference_logs(
     limit: int = Query(default=50, le=500),

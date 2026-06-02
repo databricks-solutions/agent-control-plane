@@ -11,6 +11,7 @@ import {
   useGatewayUsageSummary,
   useGatewayUsageTimeseries,
   useGatewayUsageByUser,
+  useUagV2Usage,
   useGatewayInferenceLogs,
   useGatewayMetrics,
   useAppConfig,
@@ -54,6 +55,8 @@ import {
   AlertCircle,
   Pencil,
   Wallet,
+  Info,
+  Sparkles,
 } from 'lucide-react'
 
 /* ── tab definitions ─────────────────────────────────────────── */
@@ -62,9 +65,10 @@ const baseTabs = [
   { id: 'metrics', label: 'Metrics', icon: Cpu },
   { id: 'permissions', label: 'Permissions', icon: Shield },
   { id: 'rate-limits', label: 'Rate Limits & Guardrails', icon: ShieldAlert },
+  { id: 'uag-v2', label: 'Unity AI Gateway v2 (Beta)', icon: Sparkles },
 ] as const
 
-type TabId = 'overview' | 'metrics' | 'permissions' | 'rate-limits' | 'budgets'
+type TabId = 'overview' | 'metrics' | 'permissions' | 'rate-limits' | 'uag-v2' | 'budgets'
 
 export default function AIGatewayPage() {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
@@ -170,7 +174,100 @@ export default function AIGatewayPage() {
       {activeTab === 'metrics' && <MetricsSection />}
       {activeTab === 'permissions' && <PermissionsSection />}
       {activeTab === 'rate-limits' && <RateLimitsAndGuardrailsSection />}
+      {activeTab === 'uag-v2' && <UagV2Section />}
       {activeTab === 'budgets' && budgetsEnabled && <BudgetsSection />}
+    </div>
+  )
+}
+
+/* ── Unity AI Gateway v2 (Beta) Section ───────────────────────── */
+
+function UagV2Section() {
+  const { data: uag, isLoading } = useUagV2Usage()
+  const uagSort = useSort('request_count', 'desc')
+  const [uagPage, setUagPage] = useState(0)
+  const [uagPageSize, setUagPageSize] = useState(10)
+
+  const uagEndpoints: any[] = uag?.endpoints || []
+  const sortedUag = useMemo(() => sortRows(uagEndpoints, uagSort.sort, (e: any, key) => {
+    if (key === 'endpoint_name') return (e.endpoint_name || '').toLowerCase()
+    if (key === 'cached') return Number((e.cache_read_tokens || 0) + (e.cache_creation_tokens || 0))
+    return Number(e[key] || 0)
+  }), [uagEndpoints, uagSort.sort])
+  const uagTotalPages = Math.max(1, Math.ceil(sortedUag.length / uagPageSize))
+  const uagSafePage = Math.min(uagPage, uagTotalPages - 1)
+  const pagedUag = sortedUag.slice(uagSafePage * uagPageSize, (uagSafePage + 1) * uagPageSize)
+  const hasData = (uag?.totals?.request_count ?? 0) > 0
+
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            Unity AI Gateway v2 (Beta) Usage
+            <span className="group relative inline-flex">
+              <Info className="w-3.5 h-3.5 text-gray-400 cursor-help" tabIndex={0} />
+              <span role="tooltip" className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 hidden w-72 rounded-lg border border-gray-200 bg-white p-3 text-left text-[11px] font-normal leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">
+                Only requests routed through <strong>Unity AI Gateway v2</strong> endpoints (~20-min fresh) — a subset of all serving. Broader serving usage is under <strong>Metrics</strong>; dollar cost is under <strong>Governance</strong>. Cached-token % and TTFB come only from this source.
+              </span>
+            </span>
+            {uag?.as_of && (
+              <span className="ml-auto text-[10px] font-normal text-gray-400 dark:text-gray-500">
+                as of {new Date(uag.as_of).toLocaleString()}
+              </span>
+            )}
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="py-12 text-center text-gray-400 dark:text-gray-500">Loading…</div>
+          ) : !hasData ? (
+            <div className="py-12 text-center text-gray-400 dark:text-gray-500">
+              No Unity AI Gateway v2 usage yet — either no v2-routed traffic in this workspace, or the discovery workflow hasn't synced <code>system.ai_gateway.usage</code> yet.
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
+                <KpiCard title="Requests" value={uag!.totals.request_count ?? 0} format="number" />
+                <KpiCard title="Input Tokens" value={uag!.totals.input_tokens ?? 0} format="number" />
+                <KpiCard title="Output Tokens" value={uag!.totals.output_tokens ?? 0} format="number" />
+                <KpiCard title="Cached Tokens" value={uag!.totals.cached_tokens ?? 0} format="number" />
+                <KpiCard title="Cache Read %" value={uag!.totals.cache_read_pct ?? 0} format="percentage" />
+                <KpiCard title="Endpoints" value={uag!.totals.endpoints ?? 0} format="number" />
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                      <SortableHeader label="Endpoint" sortKey="endpoint_name" current={uagSort.sort} onToggle={uagSort.toggle} />
+                      <SortableHeader label="Requests" sortKey="request_count" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                      <SortableHeader label="Cached Tokens" sortKey="cached" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                      <SortableHeader label="p50 Latency" sortKey="p50_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                      <SortableHeader label="p95 Latency" sortKey="p95_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                      <SortableHeader label="p95 TTFB" sortKey="p95_ttfb_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                      <SortableHeader label="Users" sortKey="unique_users" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pagedUag.map((e: any) => (
+                      <tr key={e.endpoint_name} className="border-b border-gray-100 dark:border-gray-700">
+                        <td className="py-2 font-medium truncate max-w-[260px]">{e.endpoint_name}</td>
+                        <td className="py-2 text-right">{Number(e.request_count).toLocaleString()}</td>
+                        <td className="py-2 text-right">{Number(e.cache_read_tokens + e.cache_creation_tokens).toLocaleString()}</td>
+                        <td className="py-2 text-right">{Number(e.p50_latency_ms).toLocaleString()}ms</td>
+                        <td className="py-2 text-right">{Number(e.p95_latency_ms).toLocaleString()}ms</td>
+                        <td className="py-2 text-right">{Number(e.p95_ttfb_ms).toLocaleString()}ms</td>
+                        <td className="py-2 text-right">{Number(e.unique_users).toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <TablePagination page={uagSafePage} totalItems={sortedUag.length} pageSize={uagPageSize} onPageChange={setUagPage} onPageSizeChange={setUagPageSize} />
+            </>
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }

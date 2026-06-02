@@ -1508,6 +1508,79 @@ gw_conn.close()
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Sync Unity AI Gateway (v2) usage summary (Delta → Lakebase)
+# MAGIC Mirrors `uag_usage_summary` from `11_discover_ai_gateway_usage`.
+
+# COMMAND ----------
+
+UAG_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_summary"
+uag_conn = get_lakebase_connection()
+uag_count = 0
+
+with uag_conn.cursor() as cur:
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS uag_usage_summary (
+            endpoint_name         TEXT NOT NULL,
+            request_count         BIGINT DEFAULT 0,
+            input_tokens          BIGINT DEFAULT 0,
+            output_tokens         BIGINT DEFAULT 0,
+            cache_read_tokens     BIGINT DEFAULT 0,
+            cache_creation_tokens BIGINT DEFAULT 0,
+            p50_latency_ms        BIGINT DEFAULT 0,
+            p95_latency_ms        BIGINT DEFAULT 0,
+            p95_ttfb_ms           BIGINT DEFAULT 0,
+            error_count           BIGINT DEFAULT 0,
+            unique_users          BIGINT DEFAULT 0,
+            max_event_time        TEXT,
+            last_synced           TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (endpoint_name)
+        )""")
+    uag_conn.commit()
+
+print(f"▸ Syncing {UAG_TABLE} → uag_usage_summary ...")
+try:
+    with uag_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE uag_usage_summary")
+        uag_conn.commit()
+    uag_rows = spark.read.table(UAG_TABLE).collect()
+    if uag_rows:
+        values = [(r.endpoint_name, int(r.request_count or 0), int(r.input_tokens or 0),
+                   int(r.output_tokens or 0), int(r.cache_read_tokens or 0), int(r.cache_creation_tokens or 0),
+                   int(r.p50_latency_ms or 0), int(r.p95_latency_ms or 0), int(r.p95_ttfb_ms or 0),
+                   int(r.error_count or 0), int(r.unique_users or 0), r.max_event_time, now)
+                  for r in uag_rows]
+        uag_count = len(values)
+        with uag_conn.cursor() as cur:
+            execute_values(cur,
+                """INSERT INTO uag_usage_summary
+                   (endpoint_name, request_count, input_tokens, output_tokens, cache_read_tokens,
+                    cache_creation_tokens, p50_latency_ms, p95_latency_ms, p95_ttfb_ms,
+                    error_count, unique_users, max_event_time, last_synced)
+                   VALUES %s
+                   ON CONFLICT (endpoint_name) DO UPDATE SET
+                       request_count = EXCLUDED.request_count,
+                       input_tokens = EXCLUDED.input_tokens,
+                       output_tokens = EXCLUDED.output_tokens,
+                       cache_read_tokens = EXCLUDED.cache_read_tokens,
+                       cache_creation_tokens = EXCLUDED.cache_creation_tokens,
+                       p50_latency_ms = EXCLUDED.p50_latency_ms,
+                       p95_latency_ms = EXCLUDED.p95_latency_ms,
+                       p95_ttfb_ms = EXCLUDED.p95_ttfb_ms,
+                       error_count = EXCLUDED.error_count,
+                       unique_users = EXCLUDED.unique_users,
+                       max_event_time = EXCLUDED.max_event_time,
+                       last_synced = NOW()""",
+                values, page_size=500)
+            uag_conn.commit()
+    print(f"  ✅ {uag_count} UAG usage rows synced")
+except Exception as exc:
+    print(f"  ⚠️  uag_usage_summary sync failed: {exc}")
+
+uag_conn.close()
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Phase 7: Sync Billing (Delta → Lakebase)
 # MAGIC
 # MAGIC Mirrors the four billing tables populated by `09_discover_billing`:
@@ -1820,6 +1893,7 @@ result = {
     "ua_heatmap_rows": ua_heatmap_count,
     "gw_daily_rows": gw_daily_count,
     "gw_hourly_rows": gw_hourly_count,
+    "uag_usage_rows": uag_count,
     "billing_serving_daily_rows": bsd_count,
     "billing_token_daily_rows": btd_count,
     "billing_product_daily_rows": bpd_count,

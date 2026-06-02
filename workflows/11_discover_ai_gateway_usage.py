@@ -1,0 +1,163 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # Unity AI Gateway (v2) Usage Discovery Job
+# MAGIC
+# MAGIC Queries `system.ai_gateway.usage` (v2 Unity AI Gateway traffic only) for a
+# MAGIC per-endpoint usage summary and writes a Delta table for `02_sync_to_lakebase`.
+# MAGIC
+# MAGIC **Why a separate source:** `system.ai_gateway.usage` is ~20-min fresh (vs
+# MAGIC ~2 hr for `system.billing.usage`) and carries data the others lack — cached
+# MAGIC tokens (`token_details`), time-to-first-byte, per-request tags. It covers
+# MAGIC ONLY requests routed through Unity AI Gateway v2 endpoints (a subset of all
+# MAGIC serving), so it is additive — not a replacement for billing (dollar cost)
+# MAGIC or serving.endpoint_usage (broad coverage + rate-limit hits).
+# MAGIC
+# MAGIC **Tables written:** `uag_usage_summary`
+
+# COMMAND ----------
+
+# MAGIC %pip install databricks-sdk --upgrade
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
+import json
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List
+
+from databricks.sdk import WorkspaceClient
+from pyspark.sql import SparkSession
+from pyspark.sql.types import (
+    StructType, StructField, StringType, LongType, IntegerType, TimestampType,
+)
+
+spark = SparkSession.builder.getOrCreate()
+
+# COMMAND ----------
+
+dbutils.widgets.text("catalog", "", "Unity Catalog name")
+dbutils.widgets.text("schema", "", "Schema name")
+dbutils.widgets.text("warehouse_id", "", "SQL warehouse ID")
+dbutils.widgets.text("uag_retention_days", "7", "Days of UAG usage to summarize")
+
+CATALOG = dbutils.widgets.get("catalog")
+SCHEMA = dbutils.widgets.get("schema")
+WAREHOUSE_ID = dbutils.widgets.get("warehouse_id")
+RETENTION_DAYS = int(dbutils.widgets.get("uag_retention_days") or "7")
+
+if not CATALOG or not SCHEMA:
+    raise ValueError(f"catalog and schema required (got {CATALOG!r}, {SCHEMA!r})")
+
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
+
+UAG_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_summary"
+print(f"Target table: {UAG_TABLE} | retention {RETENTION_DAYS}d")
+
+# COMMAND ----------
+
+UAG_SCHEMA = StructType([
+    StructField("endpoint_name", StringType(), False),
+    StructField("request_count", LongType(), True),
+    StructField("input_tokens", LongType(), True),
+    StructField("output_tokens", LongType(), True),
+    StructField("cache_read_tokens", LongType(), True),
+    StructField("cache_creation_tokens", LongType(), True),
+    StructField("p50_latency_ms", LongType(), True),
+    StructField("p95_latency_ms", LongType(), True),
+    StructField("p95_ttfb_ms", LongType(), True),
+    StructField("error_count", LongType(), True),
+    StructField("unique_users", LongType(), True),
+    StructField("max_event_time", StringType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+# COMMAND ----------
+
+def _execute_sql(sql: str) -> List[Dict[str, Any]]:
+    if not WAREHOUSE_ID:
+        print("  No warehouse ID")
+        return []
+    w = WorkspaceClient()
+    body = {"warehouse_id": WAREHOUSE_ID, "statement": sql,
+            "wait_timeout": "50s", "disposition": "INLINE", "format": "JSON_ARRAY"}
+    try:
+        resp = w.api_client.do("POST", "/api/2.0/sql/statements", body=body)
+    except Exception as exc:
+        print(f"  SQL failed: {exc}")
+        return []
+    status = resp.get("status", {}).get("state", "")
+    sid = resp.get("statement_id", "")
+    if status in ("PENDING", "RUNNING") and sid:
+        for _ in range(20):
+            time.sleep(3)
+            try:
+                resp = w.api_client.do("GET", f"/api/2.0/sql/statements/{sid}")
+            except Exception:
+                continue
+            status = resp.get("status", {}).get("state", "")
+            if status not in ("PENDING", "RUNNING"):
+                break
+    if status != "SUCCEEDED":
+        err = resp.get("status", {}).get("error", {})
+        print(f"  SQL {status}: {err.get('message', '')[:300]}")
+        return []
+    cols = [c["name"] for c in resp.get("manifest", {}).get("schema", {}).get("columns", [])]
+    return [dict(zip(cols, row)) for row in resp.get("result", {}).get("data_array", [])]
+
+# COMMAND ----------
+
+print(f"▸ Querying system.ai_gateway.usage (v2 UAG, {RETENTION_DAYS}d) …")
+try:
+    rows_raw = _execute_sql(f"""
+        SELECT
+            endpoint_name,
+            COUNT(*)                                                   AS request_count,
+            COALESCE(SUM(input_tokens), 0)                             AS input_tokens,
+            COALESCE(SUM(output_tokens), 0)                            AS output_tokens,
+            COALESCE(SUM(token_details.cache_read_input_tokens), 0)    AS cache_read_tokens,
+            COALESCE(SUM(token_details.cache_creation_input_tokens), 0) AS cache_creation_tokens,
+            CAST(PERCENTILE_APPROX(latency_ms, 0.5) AS LONG)           AS p50_latency_ms,
+            CAST(PERCENTILE_APPROX(latency_ms, 0.95) AS LONG)          AS p95_latency_ms,
+            CAST(PERCENTILE_APPROX(time_to_first_byte_ms, 0.95) AS LONG) AS p95_ttfb_ms,
+            SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END)        AS error_count,
+            COUNT(DISTINCT requester)                                  AS unique_users,
+            CAST(MAX(event_time) AS STRING)                            AS max_event_time
+        FROM system.ai_gateway.usage
+        WHERE event_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
+          AND endpoint_name IS NOT NULL
+        GROUP BY endpoint_name
+        ORDER BY request_count DESC
+    """)
+    print(f"  ✅ {len(rows_raw)} UAG endpoint rows")
+except Exception as exc:
+    # Table may be inaccessible (account-admin scoping varies by workspace) — degrade.
+    rows_raw = []
+    print(f"  ⚠️  system.ai_gateway.usage unavailable: {exc}")
+
+# COMMAND ----------
+
+now = datetime.now(timezone.utc)
+
+
+def _i(x):
+    return int(x) if x not in (None, "") else 0
+
+
+if rows_raw:
+    rows = [(r.get("endpoint_name", ""), _i(r.get("request_count")), _i(r.get("input_tokens")),
+             _i(r.get("output_tokens")), _i(r.get("cache_read_tokens")), _i(r.get("cache_creation_tokens")),
+             _i(r.get("p50_latency_ms")), _i(r.get("p95_latency_ms")), _i(r.get("p95_ttfb_ms")),
+             _i(r.get("error_count")), _i(r.get("unique_users")), r.get("max_event_time"), now)
+            for r in rows_raw]
+    spark.createDataFrame(rows, UAG_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_TABLE)
+else:
+    spark.createDataFrame([], UAG_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_TABLE)
+print(f"✅ Wrote {len(rows_raw)} rows to {UAG_TABLE}")
+
+# COMMAND ----------
+
+result = {"status": "success", "uag_endpoint_rows": len(rows_raw),
+          "retention_days": RETENTION_DAYS, "discovered_at": now.isoformat()}
+print(json.dumps(result, indent=2))
+dbutils.notebook.exit(json.dumps(result))
