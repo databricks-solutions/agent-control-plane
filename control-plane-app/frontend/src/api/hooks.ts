@@ -576,6 +576,43 @@ export function useGatewayUsageByUser(days = 7) {
   })
 }
 
+export interface UagV2Usage {
+  as_of: string | null
+  totals: {
+    request_count?: number
+    input_tokens?: number
+    output_tokens?: number
+    cached_tokens?: number
+    cache_read_pct?: number
+    endpoints?: number
+  }
+  endpoints: Array<{
+    endpoint_name: string
+    request_count: number
+    input_tokens: number
+    output_tokens: number
+    cache_read_tokens: number
+    cache_creation_tokens: number
+    p50_latency_ms: number
+    p95_latency_ms: number
+    p95_ttfb_ms: number
+    error_count: number
+    unique_users: number
+  }>
+}
+
+/** Unity AI Gateway (v2) usage — v2-routed endpoints only, ~20-min fresh. */
+export function useUagV2Usage() {
+  return useQuery({
+    queryKey: ['gateway', 'uag-v2-usage'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/uag-v2-usage')
+      return data as UagV2Usage
+    },
+    staleTime: GW_STALE,
+  })
+}
+
 export function useGatewayInferenceLogs(limit = 50, endpointName?: string) {
   return useQuery({
     queryKey: ['gateway', 'inference-logs', limit, endpointName],

@@ -588,6 +588,70 @@ def ensure_gateway_usage_columns() -> None:
             logger.warning("gateway_usage column ensure skipped: %s", exc)
 
 
+def get_uag_v2_usage() -> Dict[str, Any]:
+    """Unity AI Gateway (v2) usage summary from `uag_usage_summary` (sourced from
+    system.ai_gateway.usage — v2-routed endpoints only, ~20-min fresh).
+
+    Returns {as_of, totals, endpoints}. Degrades to empty if the table isn't
+    synced yet or the workflow couldn't read the (account-scoped) system table.
+    """
+    from backend.database import execute_query
+    empty = {"as_of": None, "totals": {}, "endpoints": []}
+    try:
+        rows = execute_query(
+            """SELECT endpoint_name, request_count, input_tokens, output_tokens,
+                      cache_read_tokens, cache_creation_tokens,
+                      p50_latency_ms, p95_latency_ms, p95_ttfb_ms,
+                      error_count, unique_users, max_event_time
+               FROM uag_usage_summary
+               ORDER BY request_count DESC LIMIT 200"""
+        )
+    except Exception as exc:
+        logger.warning("uag_usage_summary not available: %s", exc)
+        return empty
+    if not rows:
+        return empty
+
+    def _i(r, k):
+        return int(r.get(k) or 0)
+
+    total_req = sum(_i(r, "request_count") for r in rows)
+    total_in = sum(_i(r, "input_tokens") for r in rows)
+    total_out = sum(_i(r, "output_tokens") for r in rows)
+    total_cache_read = sum(_i(r, "cache_read_tokens") for r in rows)
+    total_cache_create = sum(_i(r, "cache_creation_tokens") for r in rows)
+    cached = total_cache_read + total_cache_create
+    cache_pct = round(100.0 * total_cache_read / total_in, 1) if total_in else 0.0
+    as_of = max((r.get("max_event_time") for r in rows if r.get("max_event_time")), default=None)
+    return {
+        "as_of": as_of,
+        "totals": {
+            "request_count": total_req,
+            "input_tokens": total_in,
+            "output_tokens": total_out,
+            "cached_tokens": cached,
+            "cache_read_pct": cache_pct,
+            "endpoints": len(rows),
+        },
+        "endpoints": [
+            {
+                "endpoint_name": r.get("endpoint_name", ""),
+                "request_count": _i(r, "request_count"),
+                "input_tokens": _i(r, "input_tokens"),
+                "output_tokens": _i(r, "output_tokens"),
+                "cache_read_tokens": _i(r, "cache_read_tokens"),
+                "cache_creation_tokens": _i(r, "cache_creation_tokens"),
+                "p50_latency_ms": _i(r, "p50_latency_ms"),
+                "p95_latency_ms": _i(r, "p95_latency_ms"),
+                "p95_ttfb_ms": _i(r, "p95_ttfb_ms"),
+                "error_count": _i(r, "error_count"),
+                "unique_users": _i(r, "unique_users"),
+            }
+            for r in rows
+        ],
+    }
+
+
 def get_usage_summary(days: int = 7) -> List[Dict[str, Any]]:
     """Per-endpoint usage summary from Lakebase cache."""
     from backend.database import execute_query

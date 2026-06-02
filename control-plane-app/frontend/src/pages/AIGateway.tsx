@@ -11,6 +11,7 @@ import {
   useGatewayUsageSummary,
   useGatewayUsageTimeseries,
   useGatewayUsageByUser,
+  useUagV2Usage,
   useGatewayInferenceLogs,
   useGatewayMetrics,
   useAppConfig,
@@ -54,6 +55,7 @@ import {
   AlertCircle,
   Pencil,
   Wallet,
+  Info,
 } from 'lucide-react'
 
 /* ── tab definitions ─────────────────────────────────────────── */
@@ -182,6 +184,9 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
   const [pageSize, setPageSize] = useState(10)
   const { sort, toggle } = useSort('name', 'asc')
 
+  // Unity AI Gateway (v2) usage — v2-routed endpoints only, ~20-min fresh
+  const { data: uag } = useUagV2Usage()
+
   // Usage data
   const { data: summary, isLoading: usageLoading } = useGatewayUsageSummary(days)
   const { data: timeseries } = useGatewayUsageTimeseries(days)
@@ -257,6 +262,64 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
 
   return (
     <div className="space-y-6">
+      {/* Unity AI Gateway (v2) usage — additive, v2-routed endpoints only */}
+      {uag && (uag.totals?.request_count ?? 0) > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              Unity AI Gateway (v2) Usage
+              <span className="group relative inline-flex">
+                <Info className="w-3.5 h-3.5 text-gray-400 cursor-help" tabIndex={0} />
+                <span role="tooltip" className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 hidden w-72 rounded-lg border border-gray-200 bg-white p-3 text-left text-[11px] font-normal leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">
+                  Only requests routed through <strong>Unity AI Gateway v2</strong> endpoints (~20-min fresh). Broader serving usage is under <strong>Metrics</strong>; dollar cost is under <strong>Governance</strong>. Cached-token % and TTFB come only from this source.
+                </span>
+              </span>
+              {uag.as_of && (
+                <span className="ml-auto text-[10px] font-normal text-gray-400 dark:text-gray-500">
+                  as of {new Date(uag.as_of).toLocaleString()}
+                </span>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
+              <KpiCard title="Requests" value={uag.totals.request_count ?? 0} format="number" />
+              <KpiCard title="Input Tokens" value={uag.totals.input_tokens ?? 0} format="number" />
+              <KpiCard title="Output Tokens" value={uag.totals.output_tokens ?? 0} format="number" />
+              <KpiCard title="Cached Tokens" value={uag.totals.cached_tokens ?? 0} format="number" />
+              <KpiCard title="Cache Read %" value={uag.totals.cache_read_pct ?? 0} format="percentage" />
+              <KpiCard title="Endpoints" value={uag.totals.endpoints ?? 0} format="number" />
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                    <th className="py-2 font-medium">Endpoint</th>
+                    <th className="py-2 font-medium text-right">Requests</th>
+                    <th className="py-2 font-medium text-right">Cached Tokens</th>
+                    <th className="py-2 font-medium text-right">p50 Latency</th>
+                    <th className="py-2 font-medium text-right">p95 Latency</th>
+                    <th className="py-2 font-medium text-right">p95 TTFB</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {uag.endpoints.slice(0, 8).map((e) => (
+                    <tr key={e.endpoint_name} className="border-b border-gray-100 dark:border-gray-700">
+                      <td className="py-2 font-medium truncate max-w-[260px]">{e.endpoint_name}</td>
+                      <td className="py-2 text-right">{Number(e.request_count).toLocaleString()}</td>
+                      <td className="py-2 text-right">{Number(e.cache_read_tokens + e.cache_creation_tokens).toLocaleString()}</td>
+                      <td className="py-2 text-right">{Number(e.p50_latency_ms).toLocaleString()}ms</td>
+                      <td className="py-2 text-right">{Number(e.p95_latency_ms).toLocaleString()}ms</td>
+                      <td className="py-2 text-right">{Number(e.p95_ttfb_ms).toLocaleString()}ms</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Task distribution */}
       {overview?.tasks && Object.keys(overview.tasks).length > 0 && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
