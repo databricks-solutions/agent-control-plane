@@ -196,10 +196,31 @@ def ensure_lakebase_table(conn):
         config            JSONB,
         last_synced       TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         source            TEXT DEFAULT 'api',
-        is_extensive      BOOLEAN DEFAULT FALSE
+        is_extensive      BOOLEAN DEFAULT FALSE,
+        workload_class    TEXT,
+        subtype           TEXT,
+        framework         TEXT,
+        interface_task    TEXT,
+        uses_llm          BOOLEAN,
+        linked_endpoint   TEXT,
+        confidence        TEXT,
+        classified_by     TEXT,
+        classifier_version TEXT,
+        raw_signals       TEXT
     );
+    ALTER TABLE discovered_agents ADD COLUMN IF NOT EXISTS workload_class TEXT;
+    ALTER TABLE discovered_agents ADD COLUMN IF NOT EXISTS subtype TEXT;
+    ALTER TABLE discovered_agents ADD COLUMN IF NOT EXISTS framework TEXT;
+    ALTER TABLE discovered_agents ADD COLUMN IF NOT EXISTS interface_task TEXT;
+    ALTER TABLE discovered_agents ADD COLUMN IF NOT EXISTS uses_llm BOOLEAN;
+    ALTER TABLE discovered_agents ADD COLUMN IF NOT EXISTS linked_endpoint TEXT;
+    ALTER TABLE discovered_agents ADD COLUMN IF NOT EXISTS confidence TEXT;
+    ALTER TABLE discovered_agents ADD COLUMN IF NOT EXISTS classified_by TEXT;
+    ALTER TABLE discovered_agents ADD COLUMN IF NOT EXISTS classifier_version TEXT;
+    ALTER TABLE discovered_agents ADD COLUMN IF NOT EXISTS raw_signals TEXT;
     CREATE INDEX IF NOT EXISTS idx_da_ws ON discovered_agents (workspace_id);
     CREATE INDEX IF NOT EXISTS idx_da_type ON discovered_agents (type);
+    CREATE INDEX IF NOT EXISTS idx_da_workload_class ON discovered_agents (workload_class);
     DROP INDEX IF EXISTS idx_da_name_ws;
     CREATE INDEX IF NOT EXISTS idx_da_name_ws ON discovered_agents (name, workspace_id);
     """
@@ -280,7 +301,9 @@ try:
             INSERT INTO discovered_agents
                 (agent_id, workspace_id, name, type, endpoint_name,
                  endpoint_status, model_name, served_entity_name,
-                 creator, description, config, last_synced, source, is_extensive)
+                 creator, description, config, last_synced, source, is_extensive,
+                 workload_class, subtype, framework, interface_task, uses_llm,
+                 linked_endpoint, confidence, classified_by, classifier_version, raw_signals)
             VALUES %s
             ON CONFLICT (agent_id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -294,8 +317,26 @@ try:
                 config = EXCLUDED.config,
                 last_synced = EXCLUDED.last_synced,
                 source = EXCLUDED.source,
-                is_extensive = EXCLUDED.is_extensive
+                is_extensive = EXCLUDED.is_extensive,
+                workload_class = EXCLUDED.workload_class,
+                subtype = EXCLUDED.subtype,
+                framework = EXCLUDED.framework,
+                interface_task = EXCLUDED.interface_task,
+                uses_llm = EXCLUDED.uses_llm,
+                linked_endpoint = EXCLUDED.linked_endpoint,
+                confidence = EXCLUDED.confidence,
+                classified_by = EXCLUDED.classified_by,
+                classifier_version = EXCLUDED.classifier_version,
+                raw_signals = EXCLUDED.raw_signals
         """
+
+        # Migration-safe field access (classification columns may be absent if an
+        # older Delta snapshot is read before 01 re-runs).
+        def _rg(row, field):
+            try:
+                return row[field]
+            except Exception:
+                return None
 
         values = []
         now = datetime.now(timezone.utc)
@@ -310,6 +351,7 @@ try:
             else:
                 config_val = json.dumps({})
 
+            uses_llm = _rg(r, "uses_llm")
             values.append((
                 r.agent_id,
                 r.workspace_id,
@@ -325,6 +367,16 @@ try:
                 now,
                 r.source or "api",
                 bool(r.is_extensive),
+                _rg(r, "workload_class"),
+                _rg(r, "subtype"),
+                _rg(r, "framework"),
+                _rg(r, "interface_task"),
+                (None if uses_llm is None else bool(uses_llm)),
+                _rg(r, "linked_endpoint"),
+                _rg(r, "confidence"),
+                _rg(r, "classified_by"),
+                _rg(r, "classifier_version"),
+                _rg(r, "raw_signals"),
             ))
 
         execute_values(cur, insert_sql, values, page_size=100)

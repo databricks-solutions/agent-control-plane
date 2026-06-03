@@ -74,6 +74,17 @@ DISCOVERED_AGENTS_SCHEMA = StructType([
     StructField("source", StringType(), True),        # api | cross_workspace_api | system_table | audit_log | user_api
     StructField("is_extensive", BooleanType(), True),
     StructField("discovered_at", TimestampType(), False),
+    # ── Workload classification (Stage 1+) ──────────────────────────────
+    StructField("workload_class", StringType(), True),   # genai_agent | llm | multimodal | embedding_model | foundation_model | external_llm | external_embedding | feature_serving | traditional_ml | agent_app | agent_frontend_app | ai_enabled_app | regular_app | genie_space | unknown
+    StructField("subtype", StringType(), True),          # knowledge_assistant | multi_agent_supervisor | custom_llm | information_extraction | ...
+    StructField("framework", StringType(), True),        # sklearn | xgboost | langgraph | openai-agents | ... (Stage 3 / apps)
+    StructField("interface_task", StringType(), True),   # the serving task that decided it (agent/v1/responses, llm/v1/chat, ...)
+    StructField("uses_llm", BooleanType(), True),        # behavioral: emits tokens / calls LLM endpoints (Stage 2)
+    StructField("linked_endpoint", StringType(), True),  # apps → backing serving endpoint (dedup link)
+    StructField("confidence", StringType(), True),       # high | med | low
+    StructField("classified_by", StringType(), True),    # signal that decided: tile_metadata | task | entity_type | behavior_* | insufficient_signal
+    StructField("classifier_version", StringType(), True),
+    StructField("raw_signals", StringType(), True),       # JSON of inputs for audit / re-classification
 ])
 
 # COMMAND ----------
@@ -99,10 +110,121 @@ _TILE_PROBLEM_TYPE_MAP = {
     "INFORMATION_EXTRACTION": "information_extraction",
 }
 
+# Types persisted to the agent inventory. Agents + `unknown` (the empty-task
+# custom-model review queue). Definitively-non-agent serving classes
+# (foundation_model, embedding_model, feature_serving) are not
+# persisted here. Once Stage 2/3 land, `unknown` rows resolve in place.
+_PERSISTED_TYPES = _VALID_AGENT_TYPES + (
+    "unknown", "ml_model", "llm", "multimodal", "external_llm", "external_embedding")
+
+# Back-compat `type` (from non-serving producers) → workload_class, so the new
+# column is populated everywhere. Apps are refined to their precise class in the
+# apps step; for now custom_app maps to agent_app.
+_TYPE_TO_CLASS_FALLBACK = {
+    "custom_agent": "genai_agent",
+    "knowledge_assistant": "genai_agent",
+    "multi_agent_supervisor": "genai_agent",
+    "custom_llm": "genai_agent",
+    "information_extraction": "genai_agent",
+    "external_agent": "external_llm",
+    "custom_app": "agent_app",
+    "genie_space": "genie_space",
+    "unknown": "unknown",
+}
+
 _ENTITY_TYPE_MAP = {
     "CUSTOM_MODEL": "custom_agent",
     "EXTERNAL_MODEL": "external_agent",
 }
+
+# ── Stage 1 workload classifier ─────────────────────────────────────────
+# Classify the *artifact*, not the infrastructure. Validated against the live
+# account: agents declare an `agent/*` task; LLMs `llm/*` / `<provider>/v1/*`;
+# embeddings `llm/v1/embeddings`; traditional ML + feature specs have empty task.
+# Empty-task CUSTOM_MODEL is genuinely ambiguous (ML vs no-task agent) → `unknown`,
+# resolved later by Stage 2 (behavior) / Stage 3 (artifact). NEVER default to agent.
+_CLASSIFIER_VERSION = "2026.06.stage1"
+
+_AGENT_TASK_PREFIX = "agent/"
+_EMBEDDING_TASKS = ("llm/v1/embeddings",)
+_LLM_TASK_PREFIXES = ("llm/", "anthropic/", "responses/")
+
+# workload_class → back-compat `type` (what the app / Lakebase already expect).
+# Non-agent classes keep their own class string and are dropped from the agent
+# inventory at persist time (they are not in _PERSISTED_TYPES).
+_CLASS_TO_TYPE = {
+    "genai_agent": "custom_agent",
+    "external_llm": "external_llm",
+    "external_embedding": "external_embedding",
+    "llm": "llm",
+    "multimodal": "multimodal",
+    "traditional_ml": "ml_model",
+    "unknown": "unknown",
+}
+
+
+def classify_served_entity(entity_type, task, tile_problem_type=None, entity_name=""):
+    """Deterministic Stage-1 classification from entity_type + task (+ Agent Bricks tile).
+
+    Returns (workload_class, subtype, interface_task, confidence, classified_by).
+    """
+    et = (entity_type or "").upper()
+    tk = (task or "").strip().lower()
+
+    # Agent Bricks tile metadata is the most precise signal when present.
+    sub = _TILE_PROBLEM_TYPE_MAP.get((tile_problem_type or "").upper())
+    if sub:
+        return ("genai_agent", sub, tk or "agent/*", "high", "tile_metadata")
+
+    if et == "FEATURE_SPEC":
+        return ("feature_serving", None, tk, "high", "entity_type")
+    if et == "EXTERNAL_MODEL":
+        # External provider proxy — split by task into LLM vs embedding routes.
+        cls = "external_embedding" if tk in _EMBEDDING_TASKS else "external_llm"
+        return (cls, None, tk, "high", "entity_type")
+
+    # Agent task (prefix — covers agent/v1/responses, agent/v1/chat, agent/v2/chat)
+    if tk.startswith(_AGENT_TASK_PREFIX):
+        return ("genai_agent", None, tk, "high", "task")
+
+    if tk in _EMBEDDING_TASKS:
+        return ("embedding_model", None, tk, "high", "task")
+    if any(tk.startswith(p) for p in _LLM_TASK_PREFIXES):
+        # FM = stock platform model (dropped); custom LLM-task model = `llm`.
+        cls = "foundation_model" if et == "FOUNDATION_MODEL" else "llm"
+        return (cls, None, tk, "high", "task")
+
+    if et == "FOUNDATION_MODEL":
+        return ("foundation_model", None, tk, "high", "entity_type")
+    if et == "CUSTOM_MODEL":
+        # empty / non-LLM task on a custom model: cannot tell ML from a no-task agent.
+        return ("unknown", None, tk, "low", "insufficient_signal")
+
+    return ("unknown", None, tk, "low", "insufficient_signal")
+
+
+def _workload_to_type(workload_class, subtype):
+    """Map a workload_class to the back-compat `type` value."""
+    if workload_class == "genai_agent":
+        return subtype or "custom_agent"
+    return _CLASS_TO_TYPE.get(workload_class, workload_class)
+
+
+def _classification_fields(workload_class, subtype, interface_task, confidence,
+                           classified_by, raw_signals):
+    """Common new columns shared by every classified record."""
+    return {
+        "workload_class": workload_class,
+        "subtype": subtype,
+        "framework": None,
+        "interface_task": interface_task or None,
+        "uses_llm": None,
+        "linked_endpoint": None,
+        "confidence": confidence,
+        "classified_by": classified_by,
+        "classifier_version": _CLASSIFIER_VERSION,
+        "raw_signals": json.dumps(raw_signals) if raw_signals else None,
+    }
 
 
 def _make_id(name: str, workspace: str) -> str:
@@ -159,56 +281,55 @@ def discover_serving_endpoints() -> List[Dict[str, Any]]:
         ws_id = _get_workspace_id()
         for ep in resp.json().get("endpoints", []):
             name = ep.get("name", "")
-            served = ep.get("config", {}).get("served_entities", [])
+            served = ep.get("config", {}).get("served_entities", []) or []
+            # `task` is an ENDPOINT-level field in the REST payload (served-entity
+            # task is null) — read it here, not from served_entities.
+            endpoint_task = ep.get("task", "") or ""
 
-            # Check Agent Bricks tile metadata FIRST (before skipping empty served_entities).
-            # KA/MAS endpoints often have zero served_entities but DO have tile_endpoint_metadata.
+            # Agent Bricks tile metadata (KA/MAS often have zero served_entities).
             tile = ep.get("tile_endpoint_metadata") or {}
             problem_type = (tile.get("problem_type") or "").upper()
-            agent_type = _TILE_PROBLEM_TYPE_MAP.get(problem_type)
 
-            if not served and agent_type is None:
-                continue  # no served entities and not Agent Bricks — skip
+            if not served and not problem_type and not endpoint_task:
+                continue  # nothing to classify
 
-            # Fallback: fetch individual endpoint for tile metadata
-            if agent_type is None:
-                has_agent_task = any(
-                    (e.get("task") or "") == "agent/v1/responses" for e in served
-                )
-                if has_agent_task:
-                    try:
-                        det = httpx.get(
-                            f"{base}/api/2.0/serving-endpoints/{name}",
-                            headers=headers, timeout=_REST_TIMEOUT,
-                        )
-                        if det.status_code == 200:
-                            tile = det.json().get("tile_endpoint_metadata") or {}
-                            problem_type = (tile.get("problem_type") or "").upper()
-                            agent_type = _TILE_PROBLEM_TYPE_MAP.get(problem_type)
-                    except Exception:
-                        pass
-
-            # Classify custom/external/Agent Bricks using config only (no prefix guessing)
-            if agent_type is None:
-                se = served[0]
-                if se.get("external_model") is not None:
-                    agent_type = "external_agent"
-                elif se.get("foundation_model") is not None:
-                    # Foundation model without tile metadata — only include if
-                    # it has an agent task (Agent Bricks without tile metadata)
-                    has_agent_task = any(
-                        (e.get("task") or "") == "agent/v1/responses" for e in served
+            # Fallback: fetch the endpoint detail for tile metadata when it shows an
+            # agent task but the list payload lacked the tile block.
+            if not problem_type and endpoint_task.startswith(_AGENT_TASK_PREFIX):
+                try:
+                    det = httpx.get(
+                        f"{base}/api/2.0/serving-endpoints/{name}",
+                        headers=headers, timeout=_REST_TIMEOUT,
                     )
-                    if has_agent_task:
-                        agent_type = "custom_agent"  # agent task but no tile metadata
-                    else:
-                        continue  # plain foundation model — skip
-                else:
-                    entity_name = se.get("entity_name", "") or ""
-                    if entity_name.startswith("system.ai."):
-                        continue
-                    agent_type = "custom_agent"
+                    if det.status_code == 200:
+                        tile = det.json().get("tile_endpoint_metadata") or tile
+                        problem_type = (tile.get("problem_type") or "").upper()
+                except Exception:
+                    pass
 
+            # Derive entity_type for the classifier from served-entity config.
+            se0 = served[0] if served else {}
+            if se0.get("external_model") is not None:
+                entity_type = "EXTERNAL_MODEL"
+            elif se0.get("foundation_model") is not None:
+                entity_type = "FOUNDATION_MODEL"
+            elif se0.get("entity_name"):
+                if str(se0.get("entity_name", "")).startswith("system.ai."):
+                    continue  # system-provided FM building block — not an endpoint we own
+                entity_type = "CUSTOM_MODEL"
+            else:
+                entity_type = ""  # tile-only (KA/MAS) — classifier uses the tile
+
+            workload_class, subtype, interface_task, confidence, classified_by = (
+                classify_served_entity(entity_type, endpoint_task, problem_type,
+                                       se0.get("entity_name", "")))
+
+            # Plain foundation / embedding models are not agents — skip from the
+            # agent inventory (consistent with prior behavior).
+            if workload_class in ("foundation_model", "embedding_model", "feature_serving"):
+                continue
+
+            agent_type = _workload_to_type(workload_class, subtype)
             state = (ep.get("state", {}) or {}).get("ready", "") or ""
             creator = ep.get("creator", "") or ""
 
@@ -245,6 +366,10 @@ def discover_serving_endpoints() -> List[Dict[str, Any]]:
                 "config": json.dumps(config_dict),
                 "source": "api",
                 "is_extensive": False,
+                **_classification_fields(
+                    workload_class, subtype, interface_task, confidence, classified_by,
+                    {"entity_type": entity_type, "task": endpoint_task,
+                     "problem_type": problem_type or None}),
             })
 
         print(f"  Serving endpoints: {len(agents)} agents")
@@ -253,8 +378,171 @@ def discover_serving_endpoints() -> List[Dict[str, Any]]:
     return agents
 
 
+# ── App classification (Stage 1+2+3) ────────────────────────────────────
+# Authoritative signal is the app's own source: pyproject.toml / requirements.txt
+# (agent frameworks) + app.yaml (MLflow AgentServer pattern). "uses an LLM" is NOT
+# "is an agent" — a dashboard with a Genie feature is ai_enabled_app, not an agent.
+_AGENT_FRAMEWORKS = (
+    "databricks-agents", "databricks_agents", "langgraph", "openai-agents",
+    "crewai", "autogen", "pyautogen", "dspy", "llama-index", "llama_index",
+)
+# LLM client libs (LLM use without agent orchestration → ai_enabled_app)
+_LLM_CLIENT_LIBS = (
+    "openai", "anthropic", "databricks-openai", "langchain", "databricks-langchain",
+    "litellm", "mistralai", "cohere",
+)
+_APP_CLASSES = ("agent_app", "agent_frontend_app", "ai_enabled_app", "regular_app")
+
+
+def _app_class_to_type(app_class):
+    """Map an app_class to the back-compat `type`. Only true agent apps persist."""
+    if app_class in ("agent_app", "agent_frontend_app"):
+        return "custom_app"
+    if app_class == "unknown":
+        return "app_unknown"      # distinct from serving `unknown`; not persisted
+    return app_class               # ai_enabled_app / regular_app — not persisted
+
+
+_EXPORT_TIMEOUT = 8.0  # short — many source files are absent / cross-ws ACL-blocked
+
+
+def _export_ws_text(base, headers, path):
+    """Best-effort export of a workspace file as text (fail-open → None)."""
+    try:
+        resp = httpx.get(f"{base}/api/2.0/workspace/export", headers=headers,
+                         params={"path": path, "direct_download": "true"},
+                         timeout=_EXPORT_TIMEOUT)
+        if resp.status_code == 200:
+            return resp.text
+    except Exception:
+        pass
+    return None
+
+
+def _read_app_signals(base, headers, source_path):
+    """Read dependency + app.yaml text from an app's source dir (workspace-local)."""
+    if not source_path:
+        return {"deps": "", "app_yaml": ""}
+    deps = []
+    for fn in ("requirements.txt", "pyproject.toml"):
+        t = _export_ws_text(base, headers, f"{source_path}/{fn}")
+        if t:
+            deps.append(t)
+    return {"deps": "\n".join(deps), "app_yaml": _export_ws_text(base, headers, f"{source_path}/app.yaml") or ""}
+
+
+def _endpoint_from_app_yaml(app_yaml):
+    """Extract a backing serving endpoint referenced via app.yaml env (e.g.
+    MODEL_SERVING_ENDPOINT), which is NOT a declared resource."""
+    lines = (app_yaml or "").splitlines()
+    for i, ln in enumerate(lines):
+        low = ln.lower()
+        if "name:" in low and "serving_endpoint" in low:
+            for j in range(i + 1, min(i + 3, len(lines))):
+                if "value:" in lines[j].lower():
+                    return lines[j].split("value:", 1)[1].strip().strip('"\'')
+    return ""
+
+
+def classify_app_source(deps_text, app_yaml_text):
+    """Source-only app classification (Stage 3). Endpoint-link + behavior are applied
+    later in resolve_apps(). Returns (app_class, framework, confidence, classified_by)."""
+    deps = (deps_text or "").lower()
+    ay = (app_yaml_text or "").lower()
+    framework = next((f for f in _AGENT_FRAMEWORKS if f in deps), None)
+    agent_server = ("invocations" in ay) or ("agent_server" in ay) or ("agent_server" in deps)
+    if framework or agent_server:
+        return ("agent_app", framework or "mlflow_agentserver", "high",
+                "app_source" if framework else "app_yaml")
+    if any(c in deps for c in _LLM_CLIENT_LIBS):
+        return ("ai_enabled_app", None, "med", "app_source")
+    if deps or ay:
+        return ("regular_app", None, "high", "app_source")
+    return ("unknown", None, "low", "insufficient_signal")
+
+
+def _build_app_record(app, ws_id, source, base, headers, read_source=True):
+    """Build one classified app record (shared by local + cross-workspace discovery).
+
+    `read_source` reads the app's pyproject/app.yaml (Stage 3). Disabled for
+    cross-workspace apps — remote file exports are slow and usually ACL-blocked, so
+    those rely on endpoint-link (resource) + behavior instead.
+    """
+    name = app.get("name", "")
+    cs = app.get("compute_status") or {}
+    status = cs.get("state", "")
+    if not status:
+        dep_status = (app.get("active_deployment") or {}).get("status") or {}
+        status = dep_status.get("state", "")
+    raw_creator = app.get("creator", "")
+    creator = raw_creator.get("username", "") if isinstance(raw_creator, dict) else str(raw_creator or "")
+
+    config_dict = {
+        "url": app.get("url", ""),
+        "app_id": app.get("id", ""),
+        "compute_size": app.get("compute_size", ""),
+        "deployment_type": "databricks_app",
+        "deployment_method": "app",
+        "sp_client_id": app.get("service_principal_client_id", "") or "",
+    }
+
+    resource_endpoint = ""
+    resources = app.get("resources") or []
+    if resources:
+        config_dict["resources"] = []
+        for r in resources:
+            r_entry = {"name": r.get("name", ""), "description": r.get("description", "")}
+            for rtype in ("serving_endpoint", "sql_warehouse", "experiment", "secret"):
+                if rtype in r:
+                    r_entry["type"] = rtype
+                    if rtype == "serving_endpoint":
+                        nested = r.get("serving_endpoint") or {}
+                        if isinstance(nested, dict) and nested.get("name"):
+                            r_entry["endpoint_name"] = nested["name"]
+                            resource_endpoint = resource_endpoint or nested["name"]
+                    break
+            config_dict["resources"].append(r_entry)
+
+    # Stage 3: read the app's own source (workspace-local; fail-open if unreadable).
+    signals = (_read_app_signals(base, headers, app.get("default_source_code_path", ""))
+               if read_source else {"deps": "", "app_yaml": ""})
+    env_endpoint = _endpoint_from_app_yaml(signals["app_yaml"])
+    linked_endpoint = resource_endpoint or env_endpoint or ""
+    app_class, framework, confidence, classified_by = classify_app_source(
+        signals["deps"], signals["app_yaml"])
+
+    if linked_endpoint:
+        config_dict["linked_endpoint"] = linked_endpoint
+
+    return {
+        "agent_id": _make_id(name, ws_id),
+        "workspace_id": ws_id,
+        "name": name,
+        "type": _app_class_to_type(app_class),
+        "endpoint_name": name,
+        "endpoint_status": status,
+        "model_name": "",
+        "served_entity_name": "",
+        "creator": creator,
+        "description": app.get("description", ""),
+        "config": json.dumps(config_dict),
+        "source": source,
+        "is_extensive": source != "api",
+        "workload_class": app_class,
+        "subtype": None,
+        "framework": framework,
+        "interface_task": None,
+        "uses_llm": None,
+        "linked_endpoint": linked_endpoint or None,
+        "confidence": confidence,
+        "classified_by": classified_by,
+        "classifier_version": _CLASSIFIER_VERSION,
+        "raw_signals": json.dumps({"source_readable": bool(signals["deps"] or signals["app_yaml"])}),
+    }
+
+
 def discover_apps() -> List[Dict[str, Any]]:
-    """Discover Databricks Apps via REST API."""
+    """Discover Databricks Apps via REST API (classified; refined in resolve_apps())."""
     base = _get_host()
     headers = _get_headers()
     agents = []
@@ -275,69 +563,15 @@ def discover_apps() -> List[Dict[str, Any]]:
             ws_id = _get_workspace_id()
 
             for app in body.get("apps", []):
-                name = app.get("name", "")
-
-                # Status: prefer compute_status over deployment status
-                cs = app.get("compute_status") or {}
-                status = cs.get("state", "")
-                if not status:
-                    active = app.get("active_deployment") or {}
-                    dep_status = active.get("status") or {}
-                    status = dep_status.get("state", "")
-
-                url = app.get("url", "")
-                description = app.get("description", "")
-                raw_creator = app.get("creator", "")
-                creator = raw_creator.get("username", "") if isinstance(raw_creator, dict) else str(raw_creator or "")
-
-                config_dict = {
-                    "url": url,
-                    "app_id": app.get("id", ""),
-                    "compute_size": app.get("compute_size", ""),
-                    "deployment_type": "databricks_app",
-                    "deployment_method": "app",
-                }
-
-                resources = app.get("resources") or []
-                if resources:
-                    config_dict["resources"] = []
-                    for r in resources:
-                        r_entry = {"name": r.get("name", ""), "description": r.get("description", "")}
-                        for rtype in ("serving_endpoint", "sql_warehouse", "experiment", "secret"):
-                            if rtype in r:
-                                r_entry["type"] = rtype
-                                if rtype == "serving_endpoint":
-                                    nested = r.get("serving_endpoint") or {}
-                                    if isinstance(nested, dict) and nested.get("name"):
-                                        r_entry["endpoint_name"] = nested["name"]
-                                break
-                        config_dict["resources"].append(r_entry)
-
-                # Only include apps that have a serving_endpoint resource
-                if not any(r.get("type") == "serving_endpoint" for r in config_dict.get("resources", [])):
-                    continue
-
-                agents.append({
-                    "agent_id": _make_id(name, ws_id),
-                    "workspace_id": ws_id,
-                    "name": name,
-                    "type": "custom_app",
-                    "endpoint_name": name,
-                    "endpoint_status": status,
-                    "model_name": "",
-                    "served_entity_name": "",
-                    "creator": creator,
-                    "description": description,
-                    "config": json.dumps(config_dict),
-                    "source": "api",
-                    "is_extensive": False,
-                })
+                # Classify every app (no serving_endpoint gate); resolve_apps()
+                # finalizes endpoint-frontend + behavioral signals afterward.
+                agents.append(_build_app_record(app, ws_id, "api", base, headers))
 
             next_page_token = body.get("next_page_token")
             if not next_page_token:
                 break
 
-        print(f"  Databricks Apps: {len(agents)} agent apps")
+        print(f"  Databricks Apps: {len(agents)} apps classified")
     except Exception as e:
         print(f"  ERROR discovering apps: {e}")
     return agents
@@ -428,17 +662,20 @@ def discover_from_system_tables() -> List[Dict[str, Any]]:
             task_type = r.task or ""
             creator = str(r.creator or "")
 
-            # Classify agent type from config only (no prefix guessing).
-            # System tables lack tile_endpoint_metadata, so FOUNDATION_MODEL
-            # endpoints with agent task are classified as generic custom_agent.
-            # The API source (current workspace) has precise tile metadata.
-            if entity_type == "FOUNDATION_MODEL":
-                if task_type == "agent/v1/responses":
-                    agent_type = "custom_agent"  # Agent Bricks — precise type comes from API source
-                else:
-                    continue  # plain foundation model — skip
-            else:
-                agent_type = _ENTITY_TYPE_MAP.get(entity_type, "custom_agent")
+            # Stage-1 classification from entity_type + task. System tables lack
+            # tile metadata, so Agent Bricks (genai_agent) gets its precise subtype
+            # from the API source via dedup priority. Empty-task CUSTOM_MODEL → unknown
+            # (NOT a blanket custom_agent — that was the false-positive bug).
+            workload_class, subtype, interface_task, confidence, classified_by = (
+                classify_served_entity(entity_type, task_type, None, r.model_name or ""))
+
+            # Stock platform models (foundation/embedding) and feature specs are not
+            # part of the inventory — skip. Custom models (traditional_ml / llm / multimodal)
+            # ARE kept and labeled (not dropped).
+            if workload_class in ("foundation_model", "embedding_model", "feature_serving"):
+                continue
+
+            agent_type = _workload_to_type(workload_class, subtype)
 
             config_dict = {
                 "entity_type": entity_type,
@@ -461,12 +698,218 @@ def discover_from_system_tables() -> List[Dict[str, Any]]:
                 "config": json.dumps(config_dict),
                 "source": "system_table",
                 "is_extensive": True,
+                **_classification_fields(
+                    workload_class, subtype, interface_task, confidence, classified_by,
+                    {"entity_type": entity_type, "task": task_type}),
             })
 
         print(f"  System tables: {len(agents)} agents")
     except Exception as e:
         print(f"  ERROR querying system tables: {e}")
     return agents
+
+
+def enrich_unknown_with_behavior(agents, window_days=30):
+    """Stage 2: refine empty-task CUSTOM_MODEL `unknown` rows using runtime behavior.
+
+    Joins `system.serving.endpoint_usage` (by served_entity_id → endpoint) over a
+    recent window:
+      - co-located `feedback` served entity (Agent Framework marker) → genai_agent
+      - emits tokens / streams                                       → llm (uses_llm)
+      - traffic but zero tokens                                      → traditional_ml
+      - no traffic in window                                         → stays unknown
+
+    Behavior proves "uses an LLM", not "is an agent" (the dashboard lesson), so token
+    emission yields `llm` — not genai_agent — unless the feedback marker fires.
+    Fail-open: any error leaves the unknown rows unchanged. Mutates `agents` in place.
+    """
+    unknown = [a for a in agents if a.get("workload_class") == "unknown"]
+    if not unknown:
+        return
+    try:
+        beh_rows = spark.sql(f"""
+            WITH u AS (
+                SELECT served_entity_id,
+                       SUM(COALESCE(input_token_count, 0) + COALESCE(output_token_count, 0)) AS toks,
+                       MAX(CASE WHEN request_streaming THEN 1 ELSE 0 END) AS streamed,
+                       COUNT(*) AS reqs
+                FROM system.serving.endpoint_usage
+                WHERE request_time >= current_timestamp() - INTERVAL {int(window_days)} DAYS
+                GROUP BY served_entity_id
+            ),
+            se AS (
+                SELECT served_entity_id, workspace_id, endpoint_name
+                FROM system.serving.served_entities
+                WHERE endpoint_delete_time IS NULL
+            )
+            SELECT se.workspace_id AS ws, se.endpoint_name AS ep,
+                   SUM(u.toks) AS toks, MAX(u.streamed) AS streamed, SUM(u.reqs) AS reqs
+            FROM u JOIN se USING (served_entity_id)
+            GROUP BY se.workspace_id, se.endpoint_name
+        """).collect()
+        behavior = {(str(r.ws), r.ep): (int(r.toks or 0), int(r.streamed or 0), int(r.reqs or 0))
+                    for r in beh_rows}
+
+        fb_rows = spark.sql("""
+            SELECT DISTINCT workspace_id AS ws, endpoint_name AS ep
+            FROM system.serving.served_entities
+            WHERE endpoint_delete_time IS NULL
+              AND (lower(served_entity_name) LIKE '%feedback%' OR lower(entity_name) LIKE '%feedback%')
+        """).collect()
+        feedback = {(str(r.ws), r.ep) for r in fb_rows}
+    except Exception as e:
+        print(f"  Stage 2 behavioral enrichment unavailable (fail-open): {e}")
+        return
+
+    counts = {"genai_agent": 0, "llm": 0, "traditional_ml": 0, "unknown": 0}
+    for a in unknown:
+        key = (str(a.get("workspace_id", "")), a.get("endpoint_name", ""))
+        if key in feedback:
+            a.update(workload_class="genai_agent", type="custom_agent",
+                     confidence="high", classified_by="feedback_sibling", uses_llm=True)
+            counts["genai_agent"] += 1
+            continue
+        beh = behavior.get(key)
+        if not beh or beh[2] == 0:
+            counts["unknown"] += 1            # no traffic — leave for Stage 3
+            continue
+        toks, streamed, _reqs = beh
+        if toks > 0 or streamed:
+            a.update(workload_class="llm", type=_workload_to_type("llm", None),
+                     uses_llm=True, confidence="high", classified_by="behavior_tokens")
+            counts["llm"] += 1
+        else:
+            a.update(workload_class="traditional_ml", type=_workload_to_type("traditional_ml", None),
+                     uses_llm=False, confidence="med", classified_by="behavior_no_tokens")
+            counts["traditional_ml"] += 1
+    print(f"  Stage 2 behavioral: refined {len(unknown)} unknown → {counts}")
+
+
+def resolve_apps(agents, window_days=30):
+    """Finalize app classification: link frontends to backing genai_agent endpoints
+    and apply the app service-principal behavioral signal. Runs after serving
+    classification (so the genai_agent set is final). Mutates `agents` in place.
+
+    Precedence: source agent_app > endpoint-link (agent_frontend_app) > LLM-use
+    (ai_enabled_app) > regular_app > unknown. "Uses an LLM" never promotes to agent.
+    """
+    apps = []
+    for a in agents:
+        try:
+            cfg = json.loads(a.get("config") or "{}")
+        except Exception:
+            cfg = {}
+        if cfg.get("deployment_method") == "app":
+            apps.append((a, cfg))
+    if not apps:
+        return
+
+    agent_eps = {(str(a.get("workspace_id", "")), a.get("endpoint_name", ""))
+                 for a in agents if a.get("workload_class") == "genai_agent"}
+
+    # App-SP behavioral: which app service principals call serving endpoints w/ tokens.
+    llm_sps = set()
+    sp_ids = {cfg.get("sp_client_id") for _a, cfg in apps if cfg.get("sp_client_id")}
+    if sp_ids:
+        try:
+            in_list = ",".join("'" + s.replace("'", "") + "'" for s in sp_ids)
+            rows = spark.sql(f"""
+                SELECT requester,
+                       SUM(COALESCE(input_token_count, 0) + COALESCE(output_token_count, 0)) AS toks
+                FROM system.serving.endpoint_usage
+                WHERE requester IN ({in_list})
+                  AND request_time >= current_timestamp() - INTERVAL {int(window_days)} DAYS
+                GROUP BY requester
+            """).collect()
+            llm_sps = {r.requester for r in rows if int(r.toks or 0) > 0}
+        except Exception as e:
+            print(f"  App-SP behavioral unavailable (fail-open): {e}")
+
+    counts = {}
+    for a, cfg in apps:
+        ws = str(a.get("workspace_id", ""))
+        le = a.get("linked_endpoint") or ""
+        spid = cfg.get("sp_client_id")
+        sp_llm = bool(spid) and spid in llm_sps
+        cur = a.get("workload_class")
+
+        if cur == "agent_app":
+            final = "agent_app"
+        elif le and (ws, le) in agent_eps:
+            final = "agent_frontend_app"
+            a["confidence"], a["classified_by"] = "high", "endpoint_link"
+        elif cur == "ai_enabled_app" or sp_llm:
+            final = "ai_enabled_app"
+            if sp_llm and cur != "ai_enabled_app":
+                a["confidence"], a["classified_by"] = "med", "behavior_sp_tokens"
+        elif cur == "regular_app":
+            final = "regular_app"
+        else:
+            final = "unknown"
+
+        a["workload_class"] = final
+        a["type"] = _app_class_to_type(final)
+        a["uses_llm"] = final in ("agent_app", "agent_frontend_app", "ai_enabled_app") or sp_llm
+        counts[final] = counts.get(final, 0) + 1
+    print(f"  Apps resolved: {counts} (from {len(apps)} apps)")
+
+
+def apply_model_classification(agents):
+    """Serving Stage 3 (consumer): upgrade unresolved serving rows from the
+    `model_classification` side-channel table (produced by 12_classify_models).
+
+    Decoupled + fail-open + upgrade-only: no-op if the table is absent/empty, never
+    overrides a high-confidence task/tile/feedback verdict, and only touches the
+    dormant `unknown` (and behavioral-medium) serving customs. The authoritative
+    artifact read happens in the producer, never here. Mutates `agents` in place.
+    """
+    table = f"{CATALOG}.{SCHEMA}.model_classification"
+    try:
+        if not spark.catalog.tableExists(table):
+            print("  Stage 3: model_classification not present yet (no-op)")
+            return
+        rows = spark.sql(f"""
+            SELECT model_full_name, workload_class, framework, confidence
+            FROM {table}
+            WHERE probe_status = 'resolved' AND workload_class != 'unknown'
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY model_full_name
+                ORDER BY CASE confidence WHEN 'high' THEN 0 WHEN 'med' THEN 1 ELSE 2 END
+            ) = 1
+        """).collect()
+    except Exception as e:
+        print(f"  Stage 3 model_classification unavailable (fail-open): {e}")
+        return
+
+    lookup = {r.model_full_name: (r.workload_class, r.framework, r.confidence) for r in rows}
+    if not lookup:
+        return
+
+    upgraded = 0
+    for a in agents:
+        # Don't override settled high-confidence verdicts (task/tile/feedback).
+        if a.get("confidence") == "high" and a.get("classified_by") in (
+                "task", "tile_metadata", "feedback_sibling"):
+            continue
+        if a.get("workload_class") not in ("unknown", "llm", "traditional_ml", "multimodal"):
+            continue
+        hit = lookup.get(a.get("model_name") or "")
+        if not hit:
+            continue
+        wc, fw, conf = hit
+        # Ignore stale/unrecognized producer verdicts (e.g. an older classifier's
+        # cached class) — leave the row as Stage 1/2 classified it.
+        if wc not in ("genai_agent", "llm", "multimodal", "traditional_ml"):
+            continue
+        a["workload_class"] = wc
+        a["type"] = _workload_to_type(wc, None)
+        a["framework"] = fw or a.get("framework")
+        a["confidence"] = conf or "high"
+        a["classified_by"] = "artifact"
+        if wc in ("llm", "multimodal"):
+            a["uses_llm"] = True
+        upgraded += 1
+    print(f"  Stage 3 artifact: upgraded {upgraded} rows ({len(lookup)} resolved models in table)")
 
 
 def discover_genie_from_audit_logs() -> List[Dict[str, Any]]:
@@ -700,63 +1143,10 @@ def _fetch_apps_for_workspace(
 
             body = resp.json()
             for app in body.get("apps", []):
-                name = app.get("name", "")
-
-                # Status
-                cs = app.get("compute_status") or {}
-                status = cs.get("state", "")
-                if not status:
-                    active = app.get("active_deployment") or {}
-                    dep_status = active.get("status") or {}
-                    status = dep_status.get("state", "")
-
-                url = app.get("url", "")
-                description = app.get("description", "")
-                raw_creator = app.get("creator", "")
-                creator = raw_creator.get("username", "") if isinstance(raw_creator, dict) else str(raw_creator or "")
-
-                config_dict: Dict[str, Any] = {
-                    "url": url,
-                    "app_id": app.get("id", ""),
-                    "compute_size": app.get("compute_size", ""),
-                    "deployment_type": "databricks_app",
-                    "deployment_method": "app",
-                }
-
-                resources = app.get("resources") or []
-                if resources:
-                    config_dict["resources"] = []
-                    for r in resources:
-                        r_entry: Dict[str, Any] = {"name": r.get("name", ""), "description": r.get("description", "")}
-                        for rtype in ("serving_endpoint", "sql_warehouse", "experiment", "secret"):
-                            if rtype in r:
-                                r_entry["type"] = rtype
-                                if rtype == "serving_endpoint":
-                                    nested = r.get("serving_endpoint") or {}
-                                    if isinstance(nested, dict) and nested.get("name"):
-                                        r_entry["endpoint_name"] = nested["name"]
-                                break
-                        config_dict["resources"].append(r_entry)
-
-                # Only include apps that have a serving_endpoint resource
-                if not any(r.get("type") == "serving_endpoint" for r in config_dict.get("resources", [])):
-                    continue
-
-                agents.append({
-                    "agent_id": _make_id(name, ws_id),
-                    "workspace_id": ws_id,
-                    "name": name,
-                    "type": "custom_app",
-                    "endpoint_name": name,
-                    "endpoint_status": status,
-                    "model_name": "",
-                    "served_entity_name": "",
-                    "creator": creator,
-                    "description": description,
-                    "config": json.dumps(config_dict),
-                    "source": "cross_workspace_api",
-                    "is_extensive": True,
-                })
+                # Skip remote source reads (slow + usually ACL-blocked); cross-ws apps
+                # rely on endpoint-link (resource) + behavior in resolve_apps().
+                agents.append(_build_app_record(app, ws_id, "cross_workspace_api", host,
+                                                headers, read_source=False))
 
             next_page_token = body.get("next_page_token")
             if not next_page_token:
@@ -846,9 +1236,27 @@ all_agents.extend(discover_genie_from_audit_logs())
 print("=" * 60)
 print(f"Total discovered: {len(all_agents)} agents")
 
-# Filter to valid types only
-all_agents = [a for a in all_agents if a.get("type") in _VALID_AGENT_TYPES]
-print(f"After type filter: {len(all_agents)} agents")
+# Stage 2: refine empty-task CUSTOM_MODEL `unknown` rows from runtime behavior.
+enrich_unknown_with_behavior(all_agents)
+
+# Apps: finalize endpoint-frontend links + app-SP behavioral (after serving
+# classification so the genai_agent set is complete).
+resolve_apps(all_agents)
+
+# Stage 3: upgrade dormant `unknown` serving rows from the model_classification
+# side-channel (fail-open, no-op until 12_classify_models has populated it).
+apply_model_classification(all_agents)
+
+# Pre-filter classification distribution (the Stage-1 flip diff vs the old taxonomy)
+from collections import Counter as _Counter
+_pre = _Counter((a.get("workload_class") or a.get("type") or "?") for a in all_agents)
+print("Workload-class distribution (pre-filter):")
+for _cls, _n in sorted(_pre.items(), key=lambda kv: -kv[1]):
+    print(f"  {_n:6d}  {_cls}")
+
+# Persist agents + the `unknown` review queue; drop definitively-non-agent serving.
+all_agents = [a for a in all_agents if a.get("type") in _PERSISTED_TYPES]
+print(f"After persist filter: {len(all_agents)} rows")
 
 # Deduplicate: prefer API > system_table > audit_log sources.
 # For agents with the same agent_id, keep the best source.
@@ -893,15 +1301,30 @@ final.extend(by_endpoint_ws.values())
 deduped = final
 print(f"After dedup: {len(deduped)} unique agents (from {len(all_agents)} raw)")
 
-# Add discovery timestamp
+# Add discovery timestamp + normalize classification columns so every row carries
+# the full schema (serving rows already set these; others get derived defaults).
 for a in deduped:
     a["discovered_at"] = now
+    a.setdefault("workload_class",
+                 _TYPE_TO_CLASS_FALLBACK.get(a.get("type", ""), a.get("type", "")))
+    a.setdefault("subtype", None)
+    a.setdefault("framework", None)
+    a.setdefault("interface_task", None)
+    a.setdefault("uses_llm", None)
+    a.setdefault("linked_endpoint", None)
+    a.setdefault("confidence", None)
+    a.setdefault("classified_by", None)
+    a.setdefault("classifier_version", _CLASSIFIER_VERSION)
+    a.setdefault("raw_signals", None)
 
 # COMMAND ----------
 
 # Convert to Spark DataFrame and write as Delta
 if deduped:
-    rows = [Row(**a) for a in deduped]
+    # Build rows as tuples in exact schema order (positional, length-safe) — robust
+    # to dict key order / missing optional fields across heterogeneous producers.
+    _field_names = [f.name for f in DISCOVERED_AGENTS_SCHEMA.fields]
+    rows = [tuple(a.get(fn) for fn in _field_names) for a in deduped]
     df = spark.createDataFrame(rows, schema=DISCOVERED_AGENTS_SCHEMA)
 
     # Overwrite the table each run — this is the latest snapshot
@@ -910,7 +1333,8 @@ if deduped:
     ).saveAsTable(DELTA_TABLE)
 
     print(f"Wrote {df.count()} agents to {DELTA_TABLE}")
-    display(df.groupBy("type", "source").count().orderBy("type", "source"))
+    display(df.groupBy("workload_class", "type", "source").count()
+              .orderBy("workload_class", "type", "source"))
 else:
     print("No agents discovered — skipping write")
 
@@ -924,6 +1348,7 @@ else:
 if spark.catalog.tableExists(DELTA_TABLE):
     summary = spark.sql(f"""
         SELECT
+            workload_class,
             type,
             source,
             COUNT(*) as agent_count,
@@ -931,7 +1356,7 @@ if spark.catalog.tableExists(DELTA_TABLE):
             MIN(discovered_at) as earliest,
             MAX(discovered_at) as latest
         FROM {DELTA_TABLE}
-        GROUP BY type, source
+        GROUP BY workload_class, type, source
         ORDER BY agent_count DESC
     """)
     display(summary)
