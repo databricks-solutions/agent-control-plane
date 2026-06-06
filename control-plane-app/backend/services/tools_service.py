@@ -53,8 +53,8 @@ def ensure_tools_tables():
     for stmt in ddl_statements:
         try:
             execute_update(stmt)
-        except Exception as exc:
-            logger.warning("Tools DDL warning: %s", exc)
+        except Exception:
+            logger.exception("Tools DDL failed (statement=%s)", stmt[:80])
     logger.info("Tools tables ensured")
 
 
@@ -451,11 +451,17 @@ def refresh_tools():
         _refresh_in_progress = True
         logger.info("Starting tools discovery …")
 
+        # Self-heal: the table is normally created by workflows/02_sync_to_lakebase
+        # Phase 7, but calling this defensively here means the Tools page works
+        # even if the workflow hasn't run yet (fresh deploy) or if the app SP
+        # somehow lost its read-only access to that table at boot.
+        ensure_tools_tables()
+
         # Clear old MCP entries (they may be stale serving-endpoint records)
         try:
             execute_update("DELETE FROM tool_registry WHERE type = 'mcp_server'")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("DELETE FROM tool_registry failed: %s", exc)
 
         # 1) Managed MCP — UC connections with is_mcp_connection
         mcp_conns = _discover_mcp_connections()
@@ -481,8 +487,12 @@ def refresh_tools():
         logger.info("   → UC functions: %s", len(funcs))
 
         logger.info("Tools discovery complete")
-    except Exception as exc:
-        logger.warning("Tools refresh failed: %s", exc)
+    except Exception:
+        # Log with traceback. Returning silently here is what hid the
+        # "tool_registry does not exist" failure in the Ecolab sandbox —
+        # /api/v1/tools/sync answered 200 while the underlying refresh
+        # blew up on the missing table.
+        logger.exception("Tools refresh failed")
     finally:
         _refresh_in_progress = False
         _refresh_lock.release()

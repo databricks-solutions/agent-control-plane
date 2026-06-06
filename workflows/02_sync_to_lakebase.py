@@ -1916,6 +1916,77 @@ billing_conn.close()
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Phase 7: ensure app-managed tables
+# MAGIC
+# MAGIC `tool_registry` and `request_logs` are populated lazily by the deployed
+# MAGIC app (Tools page discovery + per-request audit logging). The app's
+# MAGIC startup hook tries to `CREATE TABLE IF NOT EXISTS` these on first boot,
+# MAGIC but the app's service principal does not always have Lakebase DDL
+# MAGIC privileges — when it doesn't, the failure is swallowed in a daemon
+# MAGIC thread and the Tools page renders empty with a 500 from `/tools/overview`.
+# MAGIC
+# MAGIC The workflow run-as identity is `databricks_superuser`, so DDL here is
+# MAGIC always safe. Creating the tables upfront makes the app independent of
+# MAGIC its own DDL grants.
+
+# COMMAND ----------
+
+print("\n" + "═" * 70)
+print("Phase 7: app-managed tables (tool_registry, request_logs)")
+print("═" * 70)
+
+_app_ddls = [
+    """CREATE TABLE IF NOT EXISTS tool_registry (
+        tool_id         TEXT PRIMARY KEY,
+        name            TEXT NOT NULL,
+        type            TEXT NOT NULL,
+        sub_type        TEXT,
+        endpoint_name   TEXT,
+        catalog_name    TEXT,
+        schema_name     TEXT,
+        description     TEXT,
+        status          TEXT,
+        config          JSONB,
+        last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_tr_type ON tool_registry (type)",
+    """CREATE TABLE IF NOT EXISTS request_logs (
+        request_id      TEXT PRIMARY KEY,
+        agent_id        TEXT,
+        model_id        TEXT,
+        user_id         TEXT,
+        timestamp       TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        query_text      TEXT,
+        response_text   TEXT,
+        latency_ms      NUMERIC(12,2),
+        status_code     INTEGER,
+        input_tokens    INTEGER DEFAULT 0,
+        output_tokens   INTEGER DEFAULT 0,
+        cost_usd        NUMERIC(12,6) DEFAULT 0,
+        error_message   TEXT,
+        endpoint_type   TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_rl_agent ON request_logs (agent_id)",
+    "CREATE INDEX IF NOT EXISTS idx_rl_ts    ON request_logs (timestamp DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_rl_user  ON request_logs (user_id)",
+]
+
+app_conn = get_lakebase_connection()
+for ddl in _app_ddls:
+    try:
+        with app_conn.cursor() as cur:
+            cur.execute(ddl)
+        app_conn.commit()
+        print(f"  ✅ {ddl.split()[2:5]}")
+    except Exception as e:
+        app_conn.rollback()
+        print(f"  ⚠️  DDL warning: {e}")
+app_conn.close()
+print("  Phase 7 complete")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Final Summary
 
 # COMMAND ----------

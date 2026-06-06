@@ -86,13 +86,20 @@ EXPECTED = [
     "vector_search_health_history",
     "kb_billing_daily",              # only populated when Vector Search indexes exist
     "billing_cache_meta",
+    # App-managed tables created in Phase 7 of 02_sync_to_lakebase. These were
+    # historically created lazily by the app's startup hook, but the app SP
+    # does not always have Lakebase DDL privileges — when it doesn't, the
+    # Tools page rendered empty with a 500 from /api/tools/overview while the
+    # job still reported SUCCESS. Asserted as EXPECTED (existence required,
+    # 0 rows allowed before first user activity).
+    "tool_registry",
+    "request_logs",
 ]
 
 OPTIONAL = [
     # Created lazily by the app on first user action. Don't assert existence.
     "playground_sessions",
     "playground_messages",
-    "request_logs",
     "workspace_registry",
     "agent_permissions_cache",
     "agent_registry",
