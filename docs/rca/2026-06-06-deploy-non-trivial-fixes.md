@@ -164,20 +164,60 @@ For reference, what `a-hakketh@ecolab.com` actually has in this workspace as of 
 - [x] Roll the reusable changes into a PR ([#18](https://github.com/databricks-solutions/agent-control-plane/pull/18)).
 - [x] Add a Lakebase smoke check task to the discovery workflow so this regression class fails loud instead of silently leaving the app empty (`workflows/10_smoke_check_lakebase.py`, wired as `smoke_check_lakebase` task in `databricks.yml`, depends on `sync_to_lakebase`).
 - [x] Author CI/CD deployment-pattern ADR for the production rollout ([2026-06-06-cicd-deployment-pattern.md](../decisions/2026-06-06-cicd-deployment-pattern.md)).
-- [ ] Update `docs/installation.md` to reference items 1, 2, and 3.
+- [x] Root-cause and fix the empty `billing_user_cost_daily` / `billing_product_daily` tables (item 5 — missing SELECT on `system.billing.list_prices` + silent-failure path in `09_discover_billing.py`).
+- [ ] Update `docs/installation.md` to reference items 1, 2, 3, and the `system.billing` schema-level grant from item 5.
 
 ### New findings from the smoke check (2026-06-06)
 
-The first end-to-end smoke run on the Ecolab sandbox surfaced **two `REQUIRED` tables that are empty post-sync** despite their upstream feeds being populated:
+The first end-to-end smoke run on the Ecolab sandbox surfaced **two `REQUIRED` tables that are empty post-sync** despite their upstream feeds being populated. Both have now been root-caused and fixed.
 
-| Empty table | Status | Notes |
-|---|---|---|
-| `billing_user_cost_daily` | empty (0 rows) | Aggregated from `billing_user_endpoint_daily` (21,668 rows). The aggregation step in `02_sync_to_lakebase.py` is producing 0 rows; either the aggregate query has a wrong predicate or the sync task is silently catching an exception. |
-| `billing_product_daily` | empty (0 rows) | Same pattern — `billing_token_daily` has 3,931 rows but the per-product roll-up is empty. |
+## 5. Discovery silently writes 0 rows to all `system.billing.usage`-derived tables when the runtime identity lacks SELECT on `system.billing.list_prices`
 
-Two `EXPECTED` tables also empty — these are likely legitimate for this workspace and are flagged as warnings, not failures:
+**Symptom.** After the gateway DDL fix in item 4 lands and the workflow re-runs successfully (`result=SUCCESS`), three Lakebase tables are still empty:
 
-- `billing_serving_daily` — no Mosaic Model Serving usage in the last 90 days.
-- `gateway_inference_logs` — Mosaic AI Gateway inference logging is not enabled on any endpoint.
+- `billing_serving_daily` (0 rows in Lakebase) — drives Cost Overview by endpoint × SKU.
+- `billing_product_daily` (0 rows in Lakebase) — drives the All Products breakdown.
+- `billing_user_cost_daily` (0 rows in Lakebase) — drives per-user Endpoint Costs.
 
-These are scoped out of PR #18 (which is the gateway DDL fix). Open as a separate ticket: investigate the `billing_*_daily` aggregation paths in `09_discover_billing.py` / `02_sync_to_lakebase.py` and decide whether the gap is a query bug or a workspace-data-shape issue.
+The other two billing tables (`billing_token_daily`, `billing_user_endpoint_daily`) populate correctly. Token usage IS rendering on the Governance page; only the cost-related sections are blank.
+
+**Root cause.** `workflows/09_discover_billing.py` issues five SQL statements via `_execute_sql`. Three of them (queries 1, 3, 5) `LEFT JOIN system.billing.list_prices` to compute `total_cost_usd`. The deployer / workflow run-as identity (`a-hakketh@ecolab.com`) had `SELECT ON SCHEMA system.billing` for *some* tables (granted ad-hoc) but **not** on `list_prices`. The JOIN fails with:
+
+```
+[INSUFFICIENT_PERMISSIONS] User does not have SELECT on Table 'system.billing.list_prices'. SQLSTATE: 42501
+```
+
+The `_execute_sql` helper in `09_discover_billing.py` swallowed the failure:
+
+```python
+if status != "SUCCEEDED":
+    err = resp.get("status", {}).get("error", {})
+    print(f"  SQL {status}: {err.get('message', '')[:300]}")
+    return []   # <-- silent zero-row path
+```
+
+That `return []` propagated as `serving_rows = 0`, which the writer happily persisted as a 0-row Delta table, which the sync task happily synced to a 0-row Lakebase table. The discovery task reports `result_state: SUCCESS` because the helper caught the API error before the notebook could fail.
+
+Critically, queries 2 and 4 (`token`, `user_endpoint`) hit `system.serving.endpoint_usage` only — no `list_prices` join, no permission gap, so they populated correctly. That's why token usage was showing while cost overviews were not.
+
+**Fix (two parts):**
+
+1. **Permission grant.** Granted `SELECT ON SCHEMA system.billing` to the discovery identity:
+   ```sql
+   GRANT SELECT ON SCHEMA system.billing TO `a-hakketh@ecolab.com`
+   ```
+   Verified via `SHOW GRANTS ON TABLE system.billing.list_prices`. After the grant, the same JOIN over the last 7 days returns 771,370 rows.
+
+2. **Make the silent path loud.** `workflows/09_discover_billing.py:170` — `_execute_sql` now `raise`s a `RuntimeError` with the API error code and message when the statement does not succeed, instead of returning `[]`. This converts future permission gaps from "0 rows in production with green CI" to "task FAILED with SQLSTATE in the error message". The smoke check would have caught this regardless, but failing the discovery task at the source is closer to the bug and gives a more actionable message than "EMPTY required table" three steps downstream.
+
+**Verification.** After the grant + helper fix re-deployed and the workflow re-ran (run `415862563272753`):
+
+| Table | Discovery rows | Lakebase rows |
+|---|---:|---:|
+| `billing_serving_daily` | 15,040 | 15,040 |
+| `billing_product_daily` | 9,806 | 9,806 |
+| `billing_user_cost_daily` | 4,472 | 4,472 |
+| `billing_token_daily` | 3,932 | 3,932 |
+| `billing_user_endpoint_daily` | 21,674 | 21,674 |
+
+**Documentation gap.** `docs/installation.md` should list `SELECT ON SCHEMA system.billing` (not just `system.billing.usage`) as the discovery-identity grant — this is the difference between "Governance has token counts" and "Governance has actual cost numbers". Also worth noting: the `LEFT JOIN system.billing.list_prices` predicate means cost discovery is *all-or-nothing* on the join — partial grants produce silent zeros, not partial data.
