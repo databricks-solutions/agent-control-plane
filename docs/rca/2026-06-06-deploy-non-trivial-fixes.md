@@ -165,6 +165,7 @@ For reference, what `a-hakketh@ecolab.com` actually has in this workspace as of 
 - [x] Add a Lakebase smoke check task to the discovery workflow so this regression class fails loud instead of silently leaving the app empty (`workflows/10_smoke_check_lakebase.py`, wired as `smoke_check_lakebase` task in `databricks.yml`, depends on `sync_to_lakebase`).
 - [x] Author CI/CD deployment-pattern ADR for the production rollout ([2026-06-06-cicd-deployment-pattern.md](../decisions/2026-06-06-cicd-deployment-pattern.md)).
 - [x] Root-cause and fix the empty `billing_user_cost_daily` / `billing_product_daily` tables (item 5 — missing SELECT on `system.billing.list_prices` + silent-failure path in `09_discover_billing.py`).
+- [x] Root-cause and fix the empty Tools page (item 6 — `tool_registry` table never created because the app SP doesn't have Lakebase DDL privs and the daemon-thread startup hook ran past its timeout; refresh helper swallowed all errors).
 - [ ] Update `docs/installation.md` to reference items 1, 2, 3, and the `system.billing` schema-level grant from item 5.
 
 ### New findings from the smoke check (2026-06-06)
@@ -221,3 +222,63 @@ Critically, queries 2 and 4 (`token`, `user_endpoint`) hit `system.serving.endpo
 | `billing_user_endpoint_daily` | 21,674 | 21,674 |
 
 **Documentation gap.** `docs/installation.md` should list `SELECT ON SCHEMA system.billing` (not just `system.billing.usage`) as the discovery-identity grant — this is the difference between "Governance has token counts" and "Governance has actual cost numbers". Also worth noting: the `LEFT JOIN system.billing.list_prices` predicate means cost discovery is *all-or-nothing* on the join — partial grants produce silent zeros, not partial data.
+
+---
+
+## 6. Tools page renders empty / 500s when app SP lacks Lakebase DDL privileges
+
+**Symptom.** After the deployment is otherwise healthy (Governance tabs working, Gateway tabs working, agents discovered), the **Tools** section in the app is broken across all four tabs:
+
+- `/api/v1/tools/overview` — returns HTTP 500 `Internal Server Error`
+- `/api/v1/tools/mcp-servers` — returns HTTP 500
+- `/api/v1/tools/functions` — returns HTTP 500
+- `/api/v1/tools/usage` — returns 200 with `[]`
+
+The frontend Tools tabs all render empty.
+
+The `/api/v1/tools/sync` endpoint (the only POST route on this router) returns HTTP 200 `{"status":"ok","message":"Tools refresh complete"}` regardless — it lies.
+
+**Root cause.** Three layered failures masked each other:
+
+1. **The `tool_registry` Lakebase table was never created.** App startup runs `_init_tools` in a daemon thread that calls `ensure_tools_tables()` (which `CREATE TABLE IF NOT EXISTS tool_registry ...`) followed by `maybe_refresh_async()`. The whole `_run_all_inits` fan-out is wrapped in `t.join(timeout=120)`, after which the server starts regardless. On Ecolab the daemon thread either crashed before `_init_tools` ran, ran past the 120 s budget, or hit a Lakebase auth issue under load — in all three cases the server boots without `tool_registry`.
+
+2. **`ensure_tools_tables()` swallowed real DDL failures.** Each statement was wrapped in `try/except: logger.warning(...)`, so even when the DDL truly failed (e.g. SP doesn't have `CREATE` on the schema), the only signal was a warning line that was buried among others and rolled out of the app's short log retention.
+
+3. **`refresh_tools()` swallowed the entire body.** The function was wrapped in `try/except Exception: logger.warning("Tools refresh failed: %s", exc)`. When `_upsert_tools` or `_discover_uc_functions` blew up against the missing table, the warning printed once and the lock released — and `/api/v1/tools/sync` happily returned 200. There was no traceback in logs and no error in the API response: a perfect silent break.
+
+The dashboard route `/api/v1/tools/overview` raised the underlying `psycopg2.errors.UndefinedTable: relation "tool_registry" does not exist` to FastAPI's default 500 handler. That was the only externally visible signal that anything was wrong, and it took five minutes of `grep -B3 -A3 "GET /api/v1/tools/overview HTTP/1.1\\\" 500"` against `databricks apps logs` to find the underlying cause.
+
+The same architectural issue exists for `request_logs` — it's another app-managed table created by the request-audit middleware, also fails silently if DDL isn't possible.
+
+**Fix (three parts):**
+
+1. **Move app-managed table DDL into the workflow.** Added Phase 7 to `workflows/02_sync_to_lakebase.py` that creates `tool_registry` and `request_logs` from the workflow run-as identity (which is `databricks_superuser` on the Lakebase PG instance). The app no longer needs DDL privileges to function — only `SELECT/INSERT/UPDATE/DELETE` on existing tables. This parallels the pattern for `discovered_agents`, `gateway_usage_*`, and 20+ other tables already created here.
+
+2. **Make `tools_service._refresh_tools` self-heal and stop swallowing errors.**
+   - `refresh_tools()` now calls `ensure_tools_tables()` at the top of its body, so if the workflow hasn't run yet (fresh deploy) the read path can recover on its own.
+   - The catch-all in `refresh_tools()` now uses `logger.exception(...)` instead of `logger.warning(...)`, giving a full traceback when something fails.
+   - Per-statement exception handlers in `ensure_tools_tables()` now use `logger.exception(...)` with the offending DDL statement included.
+
+3. **Add `tool_registry` and `request_logs` to the smoke check.** Both are now in the `EXPECTED` bucket of `workflows/10_smoke_check_lakebase.py` — existence is asserted on every workflow run; 0 rows is a WARN not a failure (legitimate before any user activity), but the table being missing now flips `result_state` to FAILED with an actionable message.
+
+**Why "EXPECTED" rather than "REQUIRED" for these.** Both tables are populated by user/app activity (the SP discovers MCP servers + UC functions on first request; request_logs accumulates as users interact with the app). On a freshly deployed sandbox with no activity yet, 0 rows is correct. The failure mode we're guarding against is "table missing entirely", which now correctly fires a smoke-check error instead of a 500 in the dashboard.
+
+**Verification.** After the workflow re-ran with the Phase 7 patch (run `881046971716582`):
+
+```sh
+$ curl -sS -H "Authorization: Bearer $TOKEN" \
+    https://ai-control-plane-6239133969168510.10.azure.databricksapps.com/api/v1/tools/overview
+{"total_tools":3,"mcp_servers":3,"uc_functions":0,"managed_count":3,
+ "custom_app_count":0,"is_refreshing":false,"last_refreshed":"2026-06-06T..."}
+```
+
+| Tab | Before | After |
+|---|---|---|
+| Overview     | HTTP 500 (UndefinedTable: tool_registry) | 3 MCP servers, 0 UC functions |
+| MCP Servers  | HTTP 500                                  | 3 entries: Atlassian / Google Drive / SharePoint (system-managed) |
+| UC Functions | HTTP 500                                  | Empty (legitimate — no functions in `ai_control_plane.control_plane`; SP also only sees 6 catalogs) |
+| Usage        | `[]` (worked because no Lakebase touch)   | `[]` (legitimate — no MLflow traces with TOOL/FUNCTION spans yet) |
+
+The remaining "empty" UC Functions and Usage tabs are correct given the current sandbox state — there are zero UC functions in the project's catalog, and no MLflow traces with tool spans. Both will populate naturally as agents using UC function tools are deployed.
+
+**Documentation gap.** `docs/installation.md` does not currently call out that the app SP needs read access to `ai_control_plane.control_plane`'s UC functions (and any other catalogs the deployer wants surfaced in the Tools tab). This is a workspace-by-workspace concern (catalog grants are deployer-discretion); should be flagged in the Tools page as "no functions found — grant `USE CATALOG` to the app SP" rather than silently empty.
