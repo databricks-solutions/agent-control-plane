@@ -170,8 +170,7 @@ def _execute_sql(sql: str) -> List[Dict[str, Any]]:
     try:
         resp = w.api_client.do("POST", "/api/2.0/sql/statements", body=body)
     except Exception as exc:
-        print(f"  SQL failed: {exc}")
-        return []
+        raise RuntimeError(f"SQL submission failed: {exc}") from exc
     status = resp.get("status", {}).get("state", "")
     sid = resp.get("statement_id", "")
     if status in ("PENDING", "RUNNING") and sid:
@@ -186,8 +185,13 @@ def _execute_sql(sql: str) -> List[Dict[str, Any]]:
                 break
     if status != "SUCCEEDED":
         err = resp.get("status", {}).get("error", {})
-        print(f"  SQL {status}: {err.get('message', '')[:300]}")
-        return []
+        # Promote to a task failure. Returning [] silently here is what masked
+        # the missing SELECT on system.billing.list_prices for weeks — every
+        # billing_*_daily Lakebase table downstream of these queries was
+        # written empty and the discovery task still reported SUCCESS.
+        raise RuntimeError(
+            f"SQL {status}: {err.get('error_code','')} {err.get('message','')[:500]}"
+        )
 
     cols = [c["name"] for c in resp.get("manifest", {}).get("schema", {}).get("columns", [])]
     total_chunks = int(resp.get("manifest", {}).get("total_chunk_count") or 0)
