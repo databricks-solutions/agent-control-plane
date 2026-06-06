@@ -1464,42 +1464,47 @@ gw_conn = get_lakebase_connection()
 gw_daily_count = 0
 gw_hourly_count = 0
 
-with gw_conn.cursor() as cur:
-    for ddl in [
-        """CREATE TABLE IF NOT EXISTS gateway_usage_daily (
-            usage_date      DATE NOT NULL,
-            endpoint_name   TEXT NOT NULL,
-            requester       TEXT DEFAULT '',
-            request_count   BIGINT DEFAULT 0,
-            input_tokens    BIGINT DEFAULT 0,
-            output_tokens   BIGINT DEFAULT 0,
-            error_count     BIGINT DEFAULT 0,
-            rate_limited_count BIGINT DEFAULT 0,
-            last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            PRIMARY KEY (usage_date, endpoint_name, requester)
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_gud_date ON gateway_usage_daily (usage_date DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_gud_ep ON gateway_usage_daily (endpoint_name)",
-        # ADD COLUMN for tables that pre-existed without rate_limited_count
-        "ALTER TABLE gateway_usage_daily  ADD COLUMN IF NOT EXISTS rate_limited_count BIGINT DEFAULT 0",
-        "ALTER TABLE gateway_usage_hourly ADD COLUMN IF NOT EXISTS rate_limited_count BIGINT DEFAULT 0",
-        """CREATE TABLE IF NOT EXISTS gateway_usage_hourly (
-            hour            TEXT NOT NULL,
-            endpoint_name   TEXT DEFAULT '',
-            request_count   BIGINT DEFAULT 0,
-            input_tokens    BIGINT DEFAULT 0,
-            output_tokens   BIGINT DEFAULT 0,
-            error_count     BIGINT DEFAULT 0,
-            rate_limited_count BIGINT DEFAULT 0,
-            last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            PRIMARY KEY (hour, endpoint_name)
-        )""",
-    ]:
-        try:
+_gw_ddls = [
+    """CREATE TABLE IF NOT EXISTS gateway_usage_daily (
+        usage_date      DATE NOT NULL,
+        endpoint_name   TEXT NOT NULL,
+        requester       TEXT DEFAULT '',
+        request_count   BIGINT DEFAULT 0,
+        input_tokens    BIGINT DEFAULT 0,
+        output_tokens   BIGINT DEFAULT 0,
+        error_count     BIGINT DEFAULT 0,
+        rate_limited_count BIGINT DEFAULT 0,
+        last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        PRIMARY KEY (usage_date, endpoint_name, requester)
+    )""",
+    """CREATE TABLE IF NOT EXISTS gateway_usage_hourly (
+        hour            TEXT NOT NULL,
+        endpoint_name   TEXT DEFAULT '',
+        request_count   BIGINT DEFAULT 0,
+        input_tokens    BIGINT DEFAULT 0,
+        output_tokens   BIGINT DEFAULT 0,
+        error_count     BIGINT DEFAULT 0,
+        rate_limited_count BIGINT DEFAULT 0,
+        last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        PRIMARY KEY (hour, endpoint_name)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_gud_date ON gateway_usage_daily (usage_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_gud_ep ON gateway_usage_daily (endpoint_name)",
+    # ADD COLUMN for tables that pre-existed without rate_limited_count
+    "ALTER TABLE gateway_usage_daily  ADD COLUMN IF NOT EXISTS rate_limited_count BIGINT DEFAULT 0",
+    "ALTER TABLE gateway_usage_hourly ADD COLUMN IF NOT EXISTS rate_limited_count BIGINT DEFAULT 0",
+]
+# Run each DDL in its own transaction so a single failure cannot abort the
+# whole batch (psycopg2 marks the transaction aborted on any error and
+# silently no-ops subsequent statements until rollback).
+for ddl in _gw_ddls:
+    try:
+        with gw_conn.cursor() as cur:
             cur.execute(ddl)
-        except Exception as e:
-            print(f"  DDL warning: {e}")
-    gw_conn.commit()
+        gw_conn.commit()
+    except Exception as e:
+        gw_conn.rollback()
+        print(f"  DDL warning: {e}")
 
 # COMMAND ----------
 
