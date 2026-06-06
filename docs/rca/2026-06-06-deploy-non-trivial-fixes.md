@@ -166,7 +166,8 @@ For reference, what `a-hakketh@ecolab.com` actually has in this workspace as of 
 - [x] Author CI/CD deployment-pattern ADR for the production rollout ([2026-06-06-cicd-deployment-pattern.md](../decisions/2026-06-06-cicd-deployment-pattern.md)).
 - [x] Root-cause and fix the empty `billing_user_cost_daily` / `billing_product_daily` tables (item 5 — missing SELECT on `system.billing.list_prices` + silent-failure path in `09_discover_billing.py`).
 - [x] Root-cause and fix the empty Tools page (item 6 — `tool_registry` table never created because the app SP doesn't have Lakebase DDL privs and the daemon-thread startup hook ran past its timeout; refresh helper swallowed all errors).
-- [ ] Update `docs/installation.md` to reference items 1, 2, 3, and the `system.billing` schema-level grant from item 5.
+- [x] Document the `databricks bundle deploy` parameter-regression footgun (item 7 — placeholder defaults silently overwrite a working job; bit me while verifying item 6).
+- [ ] Update `docs/installation.md` to reference items 1, 2, 3, the `system.billing` schema-level grant from item 5, and the `--var=` requirements from item 7.
 
 ### New findings from the smoke check (2026-06-06)
 
@@ -282,3 +283,68 @@ $ curl -sS -H "Authorization: Bearer $TOKEN" \
 The remaining "empty" UC Functions and Usage tabs are correct given the current sandbox state — there are zero UC functions in the project's catalog, and no MLflow traces with tool spans. Both will populate naturally as agents using UC function tools are deployed.
 
 **Documentation gap.** `docs/installation.md` does not currently call out that the app SP needs read access to `ai_control_plane.control_plane`'s UC functions (and any other catalogs the deployer wants surfaced in the Tools tab). This is a workspace-by-workspace concern (catalog grants are deployer-discretion); should be flagged in the Tools page as "no functions found — grant `USE CATALOG` to the app SP" rather than silently empty.
+
+---
+
+## 7. `databricks bundle deploy` without explicit `--var` flags actively breaks a working job
+
+**Symptom.** While verifying the item-6 fix, ran `databricks bundle deploy --target dev -p a-hakketh` from the `workflows/` directory to register the newly-added `smoke_check_lakebase` task. The CLI reported `Deployment complete!`. The next workflow run then failed every task with:
+
+```
+[PARSE_SYNTAX_ERROR] Syntax error at or near '<'. SQLSTATE: 42601
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
+                                          ^^^^^^^^^^^^^^^^
+```
+
+Inspecting the deployed job revealed `base_parameters` had been overwritten with the literal placeholder strings:
+
+```json
+"base_parameters": {
+  "billing_retention_days": "90",
+  "catalog": "<your-catalog>",
+  "schema": "control_plane",
+  "warehouse_id": "<your-warehouse-id>"
+}
+```
+
+**Root cause.** `workflows/databricks.yml` defines the `dev` target with template-style placeholder defaults:
+
+```yaml
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      catalog: <your-catalog>                   # e.g. main, my_catalog
+      lakebase_dns: <your-lakebase-dns>         # e.g. ep-xxxx.database.cloud.databricks.com
+      warehouse_id: <your-warehouse-id>         # SQL warehouse ID
+      account_id: <your-account-id>             # Databricks account ID
+```
+
+These are not Bundle interpolation tokens; they are literal string defaults. A subsequent `databricks bundle deploy --target dev` without `--var=` overrides happily writes those literal values into the running job's parameters. The CLI does not warn that you are about to overwrite a working configuration with a placeholder.
+
+The previous (working) deploy was done by someone who knew to pass `--var="catalog=ai_control_plane" --var="warehouse_id=..."`. There is no record of those values in the repo and no `.databricks-bundle.local.yml` overlay — the parameters were ephemeral to that one CLI invocation.
+
+**Fix (immediate).** Re-deploy with all variables supplied:
+
+```sh
+cd workflows
+databricks bundle deploy --target dev -p a-hakketh \
+  --var="catalog=ai_control_plane" \
+  --var="schema=control_plane" \
+  --var="lakebase_dns=ep-spring-fire-e142re65.database.eastus2.azuredatabricks.net" \
+  --var="lakebase_endpoint_path=" \
+  --var="lakebase_instance=ai-control-plane-db" \
+  --var="warehouse_id=e372b03bb75f880e" \
+  --var="account_id=7edf83f2-6ac4-4461-94ed-48f0e96724b1"
+```
+
+Confirmed end-to-end (run `430345618113642`): all 11 tasks SUCCESS, smoke check passed with 12/12 REQUIRED tables OK and `tool_registry` + `request_logs` present in the EXPECTED bucket.
+
+**Fix (durable).** Two complementary changes worth doing in a follow-up PR:
+
+1. Replace the `<your-...>` placeholder defaults with values that *fail loud* if not overridden — e.g. `default: __UNSET__` plus a CI-time check in `deploy.sh` / the GitHub Actions workflow that grep-rejects any value matching `__UNSET__` after rendering. The current behaviour silently overwrites prod-like configurations.
+
+2. Persist target-specific values to a `.databricks-bundle.<target>.local.yml` (gitignored) overlay loaded automatically by the CLI, so a `databricks bundle deploy` from any workstation without explicit `--var=` flags is either a no-op (correctly resolved from the overlay) or fails fast on missing overlay.
+
+**Documentation gap.** `docs/installation.md` should explicitly enumerate the required `--var=` flags for `databricks bundle deploy`, OR direct deployers to author a local overlay file with the values pinned. Right now a fresh deployer who follows the README steps will succeed *only if* they happen to pass the right flags — and a successful re-deploy by someone who has those flags is actively destructive to a job configured by anyone who didn't.
