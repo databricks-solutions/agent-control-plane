@@ -196,6 +196,19 @@ resources:
               warehouse_id: ${var.warehouse_id}
           environment_key: default
 
+        - task_key: smoke_check_lakebase
+          description: "Assert every Lakebase table the dashboard reads from exists with the expected row content. Fails the workflow if a required table is missing or empty (e.g. silent CREATE TABLE skips)."
+          depends_on:
+            - task_key: sync_to_lakebase
+          notebook_task:
+            notebook_path: ./10_smoke_check_lakebase.py
+            base_parameters:
+              lakebase_dns: ${var.lakebase_dns}
+              lakebase_database: ${var.lakebase_database}
+              lakebase_instance: ${var.lakebase_instance}
+              lakebase_endpoint_path: ${var.lakebase_endpoint_path}
+          environment_key: default
+
       environments:
         - environment_key: default
           spec:

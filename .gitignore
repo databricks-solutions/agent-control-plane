@@ -35,3 +35,4 @@ Thumbs.db
 
 # Local brainstorm / parking-lot notes (not part of the project)
 ideas/
+.claude/

@@ -134,18 +134,10 @@ echo "Deployment triggered. Monitor with:"
 echo "  databricks apps get $APP_NAME $PROFILE_FLAG"
 
 # ── Grant the app SP access to Lakebase ───────────────────────
-# Idempotent — safe to re-run. Needs psycopg2 and databricks-sdk locally.
+# In this Ecolab workspace, public Lakebase Postgres connectivity is blocked
+# from the laptop ("Public access is not allowed for workspace ..."). Run the
+# equivalent grant inside the workspace as a one-shot job instead — see the
+# project's run_grant_sp_lakebase_job.sh helper.
 echo ""
-echo "Granting app SP access to Lakebase ..."
-PROFILE_ENV=""
-if [[ -n "$PROFILE_FLAG" ]]; then
-  PROFILE_ENV="DATABRICKS_CONFIG_PROFILE=${PROFILE_FLAG#--profile }"
-fi
-env $PROFILE_ENV \
-  APP_NAME="$APP_NAME" \
-  LAKEBASE_DNS="$LAKEBASE_DNS" \
-  LAKEBASE_DATABASE="$LAKEBASE_DATABASE" \
-  LAKEBASE_ENDPOINT_PATH="${LAKEBASE_ENDPOINT_PATH:-}" \
-  LAKEBASE_INSTANCE="${LAKEBASE_INSTANCE:-}" \
-  python3 grant_sp_lakebase.py \
-  || echo "  ⚠ grant_sp_lakebase.py failed — you may need to run it manually. See docs/installation.md."
+echo "Skipping local grant_sp_lakebase.py — run via in-workspace job:"
+echo "  bash run_grant_sp_lakebase_job.sh ${PROFILE_FLAG:-}"
