@@ -160,7 +160,24 @@ For reference, what `a-hakketh@ecolab.com` actually has in this workspace as of 
 
 ## Open follow-ups
 
-- [ ] Re-deploy the bundle once `terraform init`'s registry timeout clears (the laptop's network was flaky during the 2026-06-06 redeploy attempt) and run the discovery workflow once to materialise `gateway_usage_daily` / `gateway_usage_hourly` in Lakebase.
-- [ ] Verify the Gateway page renders non-empty data after the workflow rerun.
-- [ ] Roll the four reusable changes (`deploy.sh`, `grant_sp_lakebase_notebook.py`, `run_grant_sp_lakebase_job.sh`, the `workflows/02_sync_to_lakebase.py` Phase 6 fix) into a single PR.
+- [x] Re-deploy and verify gateway tables populate after the Phase 6 fix (done 2026-06-06; 21,303 daily / 2,606 hourly rows).
+- [x] Roll the reusable changes into a PR ([#18](https://github.com/databricks-solutions/agent-control-plane/pull/18)).
+- [x] Add a Lakebase smoke check task to the discovery workflow so this regression class fails loud instead of silently leaving the app empty (`workflows/10_smoke_check_lakebase.py`, wired as `smoke_check_lakebase` task in `databricks.yml`, depends on `sync_to_lakebase`).
+- [x] Author CI/CD deployment-pattern ADR for the production rollout ([2026-06-06-cicd-deployment-pattern.md](../decisions/2026-06-06-cicd-deployment-pattern.md)).
 - [ ] Update `docs/installation.md` to reference items 1, 2, and 3.
+
+### New findings from the smoke check (2026-06-06)
+
+The first end-to-end smoke run on the Ecolab sandbox surfaced **two `REQUIRED` tables that are empty post-sync** despite their upstream feeds being populated:
+
+| Empty table | Status | Notes |
+|---|---|---|
+| `billing_user_cost_daily` | empty (0 rows) | Aggregated from `billing_user_endpoint_daily` (21,668 rows). The aggregation step in `02_sync_to_lakebase.py` is producing 0 rows; either the aggregate query has a wrong predicate or the sync task is silently catching an exception. |
+| `billing_product_daily` | empty (0 rows) | Same pattern — `billing_token_daily` has 3,931 rows but the per-product roll-up is empty. |
+
+Two `EXPECTED` tables also empty — these are likely legitimate for this workspace and are flagged as warnings, not failures:
+
+- `billing_serving_daily` — no Mosaic Model Serving usage in the last 90 days.
+- `gateway_inference_logs` — Mosaic AI Gateway inference logging is not enabled on any endpoint.
+
+These are scoped out of PR #18 (which is the gateway DDL fix). Open as a separate ticket: investigate the `billing_*_daily` aggregation paths in `09_discover_billing.py` / `02_sync_to_lakebase.py` and decide whether the gap is a query bug or a workspace-data-shape issue.
