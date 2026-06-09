@@ -167,7 +167,7 @@ For reference, what `a-hakketh@ecolab.com` actually has in this workspace as of 
 - [x] Root-cause and fix the empty `billing_user_cost_daily` / `billing_product_daily` tables (item 5 — missing SELECT on `system.billing.list_prices` + silent-failure path in `09_discover_billing.py`).
 - [x] Root-cause and fix the empty Tools page (item 6 — `tool_registry` table never created because the app SP doesn't have Lakebase DDL privs and the daemon-thread startup hook ran past its timeout; refresh helper swallowed all errors).
 - [x] Document the `databricks bundle deploy` parameter-regression footgun (item 7 — placeholder defaults silently overwrite a working job; bit me while verifying item 6).
-- [ ] Update `docs/installation.md` to reference items 1, 2, 3, the `system.billing` schema-level grant from item 5, and the `--var=` requirements from item 7.
+- [x] Update `docs/installation.md` to reference the `system.billing` / `system.serving` schema-level grants from item 5 (Step 8). _(Remaining: items 1, 2, 3 and the `--var=` requirements from item 7.)_
 
 ### New findings from the smoke check (2026-06-06)
 

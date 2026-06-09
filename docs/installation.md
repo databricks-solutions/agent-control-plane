@@ -206,7 +206,32 @@ databricks bundle run agent_discovery --target dev
 # The workflow will then run on schedule (every 30 min by default)
 ```
 
-## Step 8: Grant System Table Access (Optional)
+## Step 8: Grant System Table Access
+
+The discovery workflows run as the **workflow run-as identity** (see Step 7); the
+grants below must target *that* principal. Cross-workspace observability
+additionally needs the **app's service principal** to read `system.mlflow`.
+
+### Billing & serving (required for Governance / AI Gateway cost)
+
+The billing discovery (`09_discover_billing.py`) joins `system.billing.list_prices`
+to compute cost in USD. A run-as identity with `SELECT` on `system.billing.usage`
+but **not** on `list_prices` produces empty Cost Overview / Endpoint Costs / All
+Products dashboards. As of the billing fail-loud fix, that missing grant now fails
+the discovery task immediately (`SQLSTATE: 42501`) rather than silently writing
+0-row tables — grant the whole schema so a future table addition doesn't reintroduce
+the gap:
+
+```sql
+-- Run as the workflow run-as identity (Step 7). Replace <run-as> accordingly.
+GRANT USE SCHEMA ON SCHEMA system.billing TO `<run-as>`;
+GRANT SELECT ON SCHEMA system.billing TO `<run-as>`;   -- covers usage + list_prices
+
+GRANT USE SCHEMA ON SCHEMA system.serving TO `<run-as>`;
+GRANT SELECT ON SCHEMA system.serving TO `<run-as>`;   -- served_entities + endpoint_usage
+```
+
+### MLflow (required for cross-workspace observability)
 
 For cross-workspace observability, the app's service principal needs access to `system.mlflow` tables:
 
