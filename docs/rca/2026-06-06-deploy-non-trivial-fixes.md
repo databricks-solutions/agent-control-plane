@@ -163,7 +163,7 @@ For reference, what `a-hakketh@ecolab.com` actually has in this workspace as of 
 - [x] Re-deploy and verify gateway tables populate after the Phase 6 fix (done 2026-06-06; 21,303 daily / 2,606 hourly rows).
 - [x] Roll the reusable changes into a PR ([#18](https://github.com/databricks-solutions/agent-control-plane/pull/18)).
 - [x] Add a Lakebase smoke check task to the discovery workflow so this regression class fails loud instead of silently leaving the app empty (`workflows/10_smoke_check_lakebase.py`, wired as `smoke_check_lakebase` task in `databricks.yml`, depends on `sync_to_lakebase`).
-- [x] Author CI/CD deployment-pattern ADR for the production rollout ([2026-06-06-cicd-deployment-pattern.md](../decisions/2026-06-06-cicd-deployment-pattern.md)).
+- [x] Author CI/CD deployment-pattern ADR for the production rollout (`docs/decisions/2026-06-06-cicd-deployment-pattern.md`, shipped separately in the CI/CD PR).
 - [x] Root-cause and fix the empty `billing_user_cost_daily` / `billing_product_daily` tables (item 5 — missing SELECT on `system.billing.list_prices` + silent-failure path in `09_discover_billing.py`).
 - [x] Root-cause and fix the empty Tools page (item 6 — `tool_registry` table never created because the app SP doesn't have Lakebase DDL privs and the daemon-thread startup hook ran past its timeout; refresh helper swallowed all errors).
 - [x] Document the `databricks bundle deploy` parameter-regression footgun (item 7 — placeholder defaults silently overwrite a working job; bit me while verifying item 6).
