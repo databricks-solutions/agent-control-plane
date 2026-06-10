@@ -1,6 +1,6 @@
-name: Deploy → Ecolab sandbox
+name: Deploy → sandbox
 
-# Triggers a Databricks bundle deploy (workflow + app) into the Ecolab sandbox
+# Triggers a Databricks bundle deploy (workflow + app) into the sandbox
 # workspace, then triggers the discovery workflow once and gates promotion on
 # the smoke_check_lakebase task. See docs/decisions/2026-06-06-cicd-deployment-pattern.md.
 #

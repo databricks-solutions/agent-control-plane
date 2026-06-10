@@ -134,10 +134,10 @@ echo "Deployment triggered. Monitor with:"
 echo "  databricks apps get $APP_NAME $PROFILE_FLAG"
 
 # ── Grant the app SP access to Lakebase ───────────────────────
-# In this Ecolab workspace, public Lakebase Postgres connectivity is blocked
-# from the laptop ("Public access is not allowed for workspace ..."). Run the
-# equivalent grant inside the workspace as a one-shot job instead — see the
-# project's run_grant_sp_lakebase_job.sh helper.
+# Some workspaces block public Lakebase Postgres connectivity from the laptop
+# ("Public access is not allowed for workspace ..."). When this happens, run
+# the equivalent grant inside the workspace as a one-shot job instead — see
+# run_grant_sp_lakebase_job.sh in this directory.
 echo ""
 echo "Skipping local grant_sp_lakebase.py — run via in-workspace job:"
 echo "  bash run_grant_sp_lakebase_job.sh ${PROFILE_FLAG:-}"

@@ -1,12 +1,12 @@
-# Findings log: Non-trivial fixes during initial Ecolab sandbox deployment
+# Findings log: Non-trivial fixes during initial sandbox deployment
 
 **Date:** 2026-06-04 → 2026-06-06
 **Status:** Open log — items listed are deployment-blocking issues that exceeded the README/`docs/installation.md` instructions and required code or process changes.
-**Workspace:** Ecolab sandbox (`adb-6239133969168510.10.azuredatabricks.net`, account `7edf83f2-6ac4-4461-94ed-48f0e96724b1`)
+**Workspace:** Sandbox (workspace and account identifiers redacted)
 
 ## Summary
 
-The `agent-control-plane` README + `docs/installation.md` describe the happy-path setup: workspace admin runs `databricks bundle deploy`, runs `deploy.sh`, and the app + workflow start serving. In the Ecolab sandbox this path is blocked at four points by environmental constraints not covered in the docs. Each blocker was resolved with a code or process change captured below so the next deployer (us or someone else) does not have to re-discover them.
+The `agent-control-plane` README + `docs/installation.md` describe the happy-path setup: workspace admin runs `databricks bundle deploy`, runs `deploy.sh`, and the app + workflow start serving. On this sandbox that path was blocked at four points by environmental constraints not covered in the docs. Each blocker was resolved with a code or process change captured below so the next deployer does not have to re-discover them.
 
 ---
 
@@ -18,11 +18,11 @@ The `agent-control-plane` README + `docs/installation.md` describe the happy-pat
 PERMISSION_DENIED: User does not have CREATE CATALOG on Metastore 'primary'
 ```
 
-The user (`thijs.hakkenberg@ecolab.com`) is a workspace `admins` group member.
+The user (a workspace admin) is a member of the `admins` group.
 
 **Root cause.** Workspace admin is a *workspace-scoped* role; UC metastore admin is *account-level* and orthogonal. The README assumes the deployer has both but does not say so explicitly.
 
-**Fix.** Request metastore-admin elevation on a privileged identity (in our case the `a-hakketh@ecolab.com` admin account). Confirm with:
+**Fix.** Request metastore-admin elevation on a privileged identity (a dedicated admin account, not the day-to-day developer account). Confirm with:
 
 ```sh
 databricks api post /api/2.0/sql/statements -p <profile> --json \
@@ -35,9 +35,9 @@ Then deploy with `-p <admin-profile>`. **Documentation gap:** `docs/installation
 
 ## 2. SSO session reuse silently authenticates the wrong identity
 
-**Symptom.** `databricks auth login -p a-hakketh --host <url>` returned "successfully authenticated" without prompting for password — it had silently reused the existing Microsoft / Ecolab SSO browser session for `thijs.hakkenberg@ecolab.com`. Every subsequent CLI call ran as `thijs`, *not* `a-hakketh`, despite the profile name.
+**Symptom.** `databricks auth login -p admin-profile --host <url>` returned "successfully authenticated" without prompting for password — it had silently reused the existing Microsoft 365 / corporate SSO browser session for the day-to-day developer account. Every subsequent CLI call ran as the developer account, *not* the admin account, despite the profile name.
 
-**Root cause.** The Databricks browser-OAuth flow honours an existing IdP cookie. If the browser is already signed in to Microsoft 365 with another work account, the OIDC step doesn't re-prompt.
+**Root cause.** The Databricks browser-OAuth flow honours an existing IdP cookie. If the browser is already signed in to Microsoft 365 (or any IdP) with another work account, the OIDC step doesn't re-prompt.
 
 **Fix.**
 1. Open an incognito window before the next `databricks auth login`.
@@ -57,10 +57,10 @@ Then deploy with `-p <admin-profile>`. **Documentation gap:** `docs/installation
 
 ```
 psycopg2.OperationalError: External authorization failed.
-Public access is not allowed for workspace 6239133969168510.
+Public access is not allowed for workspace <workspace-id>.
 ```
 
-This persists even on the Ecolab corporate VPN. The Lakebase endpoint resolves to a public IP; the rejection is server-side, based on a workspace-attached Network Policy that disallows public ingress to Lakebase.
+This persists even on the corporate VPN. The Lakebase endpoint resolves to a public IP; the rejection is server-side, based on a workspace-attached Network Policy that disallows public ingress to Lakebase.
 
 **Root cause.** Workspace network policy blocks public PG access. There is no laptop-side fix — the connection has to originate from inside the workspace.
 
@@ -138,9 +138,9 @@ Expected: `[('gateway_inference_logs',), ('gateway_usage_daily',), ('gateway_usa
 
 ---
 
-## Identity / permission audit (a-hakketh)
+## Identity / permission audit (admin profile)
 
-For reference, what `a-hakketh@ecolab.com` actually has in this workspace as of 2026-06-06:
+For reference, what the privileged admin account had on the sandbox workspace as of 2026-06-06:
 
 | Layer | Status | Probe |
 |---|---|---|
@@ -151,7 +151,7 @@ For reference, what `a-hakketh@ecolab.com` actually has in this workspace as of 
 | UC `SELECT` on `system.ai_gateway.usage` | Yes (9M rows / 7d) | same |
 | UC `SELECT` on `system.access.audit` | Yes (19B rows / 7d) | same |
 | Lakebase `databricks_superuser` membership | Yes — confirmed via `pg_auth_members` | in-workspace inspector |
-| SQL warehouse `e372b03bb75f880e` (Starter) | `CAN_MANAGE` via `admins` group | `warehouses get-permissions` |
+| SQL warehouse (Starter) | `CAN_MANAGE` via `admins` group | `warehouses get-permissions` |
 | Account-level API (`/api/2.0/accounts/...`) | **No** — workspace OAuth profile returns `400 Unable to load OAuth Config` | direct curl |
 
 **Conclusion of the permission probe.** The "not all views populated" symptom that triggered this audit was *not* a permissions issue. Every UC system-table grant is in place. The actual bug is the Phase 6 DDL transaction pattern in `02_sync_to_lakebase.py` (item 4 above). The lack of account-level API access via the workspace-scoped OAuth profile is expected and only matters for operations like `account workspaces list` (not used by the deployed app at runtime).
@@ -171,7 +171,7 @@ For reference, what `a-hakketh@ecolab.com` actually has in this workspace as of 
 
 ### New findings from the smoke check (2026-06-06)
 
-The first end-to-end smoke run on the Ecolab sandbox surfaced **two `REQUIRED` tables that are empty post-sync** despite their upstream feeds being populated. Both have now been root-caused and fixed.
+The first end-to-end smoke run on the sandbox surfaced **two `REQUIRED` tables that are empty post-sync** despite their upstream feeds being populated. Both have now been root-caused and fixed.
 
 ## 5. Discovery silently writes 0 rows to all `system.billing.usage`-derived tables when the runtime identity lacks SELECT on `system.billing.list_prices`
 
@@ -183,7 +183,7 @@ The first end-to-end smoke run on the Ecolab sandbox surfaced **two `REQUIRED` t
 
 The other two billing tables (`billing_token_daily`, `billing_user_endpoint_daily`) populate correctly. Token usage IS rendering on the Governance page; only the cost-related sections are blank.
 
-**Root cause.** `workflows/09_discover_billing.py` issues five SQL statements via `_execute_sql`. Three of them (queries 1, 3, 5) `LEFT JOIN system.billing.list_prices` to compute `total_cost_usd`. The deployer / workflow run-as identity (`a-hakketh@ecolab.com`) had `SELECT ON SCHEMA system.billing` for *some* tables (granted ad-hoc) but **not** on `list_prices`. The JOIN fails with:
+**Root cause.** `workflows/09_discover_billing.py` issues five SQL statements via `_execute_sql`. Three of them (queries 1, 3, 5) `LEFT JOIN system.billing.list_prices` to compute `total_cost_usd`. The deployer / workflow run-as identity had `SELECT ON SCHEMA system.billing` for *some* tables (granted ad-hoc) but **not** on `list_prices`. The JOIN fails with:
 
 ```
 [INSUFFICIENT_PERMISSIONS] User does not have SELECT on Table 'system.billing.list_prices'. SQLSTATE: 42501
@@ -206,7 +206,7 @@ Critically, queries 2 and 4 (`token`, `user_endpoint`) hit `system.serving.endpo
 
 1. **Permission grant.** Granted `SELECT ON SCHEMA system.billing` to the discovery identity:
    ```sql
-   GRANT SELECT ON SCHEMA system.billing TO `a-hakketh@ecolab.com`
+   GRANT SELECT ON SCHEMA system.billing TO `<discovery-identity>`
    ```
    Verified via `SHOW GRANTS ON TABLE system.billing.list_prices`. After the grant, the same JOIN over the last 7 days returns 771,370 rows.
 
@@ -241,7 +241,7 @@ The `/api/v1/tools/sync` endpoint (the only POST route on this router) returns H
 
 **Root cause.** Three layered failures masked each other:
 
-1. **The `tool_registry` Lakebase table was never created.** App startup runs `_init_tools` in a daemon thread that calls `ensure_tools_tables()` (which `CREATE TABLE IF NOT EXISTS tool_registry ...`) followed by `maybe_refresh_async()`. The whole `_run_all_inits` fan-out is wrapped in `t.join(timeout=120)`, after which the server starts regardless. On Ecolab the daemon thread either crashed before `_init_tools` ran, ran past the 120 s budget, or hit a Lakebase auth issue under load — in all three cases the server boots without `tool_registry`.
+1. **The `tool_registry` Lakebase table was never created.** App startup runs `_init_tools` in a daemon thread that calls `ensure_tools_tables()` (which `CREATE TABLE IF NOT EXISTS tool_registry ...`) followed by `maybe_refresh_async()`. The whole `_run_all_inits` fan-out is wrapped in `t.join(timeout=120)`, after which the server starts regardless. On this sandbox the daemon thread either crashed before `_init_tools` ran, ran past the 120 s budget, or hit a Lakebase auth issue under load — in all three cases the server boots without `tool_registry`.
 
 2. **`ensure_tools_tables()` swallowed real DDL failures.** Each statement was wrapped in `try/except: logger.warning(...)`, so even when the DDL truly failed (e.g. SP doesn't have `CREATE` on the schema), the only signal was a warning line that was buried among others and rolled out of the app's short log retention.
 
@@ -268,7 +268,7 @@ The same architectural issue exists for `request_logs` — it's another app-mana
 
 ```sh
 $ curl -sS -H "Authorization: Bearer $TOKEN" \
-    https://ai-control-plane-6239133969168510.10.azure.databricksapps.com/api/v1/tools/overview
+    https://<app-host>.databricksapps.com/api/v1/tools/overview
 {"total_tools":3,"mcp_servers":3,"uc_functions":0,"managed_count":3,
  "custom_app_count":0,"is_refreshing":false,"last_refreshed":"2026-06-06T..."}
 ```
@@ -288,7 +288,7 @@ The remaining "empty" UC Functions and Usage tabs are correct given the current 
 
 ## 7. `databricks bundle deploy` without explicit `--var` flags actively breaks a working job
 
-**Symptom.** While verifying the item-6 fix, ran `databricks bundle deploy --target dev -p a-hakketh` from the `workflows/` directory to register the newly-added `smoke_check_lakebase` task. The CLI reported `Deployment complete!`. The next workflow run then failed every task with:
+**Symptom.** While verifying the item-6 fix, ran `databricks bundle deploy --target dev -p <profile>` from the `workflows/` directory to register the newly-added `smoke_check_lakebase` task. The CLI reported `Deployment complete!`. The next workflow run then failed every task with:
 
 ```
 [PARSE_SYNTAX_ERROR] Syntax error at or near '<'. SQLSTATE: 42601
@@ -329,14 +329,14 @@ The previous (working) deploy was done by someone who knew to pass `--var="catal
 
 ```sh
 cd workflows
-databricks bundle deploy --target dev -p a-hakketh \
-  --var="catalog=ai_control_plane" \
+databricks bundle deploy --target dev -p <profile> \
+  --var="catalog=<your-catalog>" \
   --var="schema=control_plane" \
-  --var="lakebase_dns=ep-spring-fire-e142re65.database.eastus2.azuredatabricks.net" \
+  --var="lakebase_dns=<your-lakebase-dns>" \
   --var="lakebase_endpoint_path=" \
-  --var="lakebase_instance=ai-control-plane-db" \
-  --var="warehouse_id=e372b03bb75f880e" \
-  --var="account_id=7edf83f2-6ac4-4461-94ed-48f0e96724b1"
+  --var="lakebase_instance=<your-lakebase-instance>" \
+  --var="warehouse_id=<your-warehouse-id>" \
+  --var="account_id=<your-account-id>"
 ```
 
 Confirmed end-to-end (run `430345618113642`): all 11 tasks SUCCESS, smoke check passed with 12/12 REQUIRED tables OK and `tool_registry` + `request_logs` present in the EXPECTED bucket.

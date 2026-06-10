@@ -1,4 +1,4 @@
-# ADR: CI/CD deployment pattern for Ecolab production rollout
+# ADR: CI/CD deployment pattern for production rollout
 
 **Status:** Proposed (2026-06-06)
 **Related:**
@@ -7,9 +7,9 @@
 
 ## Context
 
-We just landed an Ecolab sandbox deployment of `agent-control-plane`. The deployment surfaced a regression class that the existing pipeline does not catch: the `02_sync_to_lakebase` Phase 6 transaction bug created Delta tables successfully, reported `result=SUCCESS`, but silently failed to materialise `gateway_usage_daily` / `gateway_usage_hourly` in Lakebase. The deployed app then logged a continuous stream of `UndefinedTable` errors and rendered the Gateway page empty. The job result and the dashboard state disagreed.
+We just landed an initial sandbox deployment of `agent-control-plane`. The deployment surfaced a regression class that the existing pipeline does not catch: the `02_sync_to_lakebase` Phase 6 transaction bug created Delta tables successfully, reported `result=SUCCESS`, but silently failed to materialise `gateway_usage_daily` / `gateway_usage_hourly` in Lakebase. The deployed app then logged a continuous stream of `UndefinedTable` errors and rendered the Gateway page empty. The job result and the dashboard state disagreed.
 
-The fix (PR #18) now lives on a fork because we don't have push access to `databricks-solutions/agent-control-plane`. To roll the same stack into Ecolab production responsibly, we want every future update to clear two gates before reaching prod: build-time tests of the code, and post-deploy smoke checks of the actual data plane (Lakebase tables exist with rows, app endpoints return non-empty payloads). This ADR defines that deployment pattern.
+The fix (PR #18) currently lives on a fork. To roll the same stack into production responsibly, we want every future update to clear two gates before reaching prod: build-time tests of the code, and post-deploy smoke checks of the actual data plane (Lakebase tables exist with rows, app endpoints return non-empty payloads). This ADR defines that deployment pattern.
 
 ## Decision
 
@@ -19,11 +19,11 @@ The fix (PR #18) now lives on a fork because we don't have push access to `datab
 
 | Environment | Workspace | Trigger | Promotion criteria |
 |---|---|---|---|
-| `sandbox` | Ecolab sandbox `adb-6239133969168510` | Every push to `main` of our prod-tracking fork | Smoke task passes; manual sign-off optional |
-| `stage` | A second Ecolab workspace (TBD — request from platform team) | Manual dispatch after sandbox smoke is green for ≥24h | Smoke + Playwright regression both pass |
-| `prod` | Ecolab production workspace (TBD — request from platform team) | Manual dispatch with two-person approval | Stage has been green for ≥24h; smoke + regression pass against prod after deploy |
+| `sandbox` | Sandbox workspace | Every push to `main` of the prod-tracking fork | Smoke task passes; manual sign-off optional |
+| `stage` | Stage workspace (TBD — request from platform team) | Manual dispatch after sandbox smoke is green for ≥24h | Smoke + Playwright regression both pass |
+| `prod` | Production workspace (TBD — request from platform team) | Manual dispatch with two-person approval | Stage has been green for ≥24h; smoke + regression pass against prod after deploy |
 
-We do not propose merging to `databricks-solutions/agent-control-plane`'s `main` as the prod trigger. The upstream is shared with other customers. Ecolab tracks its own internal repo (or fork) and pulls in upstream `main` periodically.
+We do not propose merging to `databricks-solutions/agent-control-plane`'s `main` as the prod trigger. The upstream is shared with other customers. Each adopting team should track its own internal repo (or fork) and pull in upstream `main` periodically.
 
 ### Pipeline shape
 
@@ -65,7 +65,7 @@ This catches three regression classes that the existing job result does not:
 | Option | Pro | Con |
 |---|---|---|
 | **GitHub Actions** | Already authenticated for the fork; community-supported `databricks/setup-cli` action; secrets handled by GH; easy fork→main promotion gate via PR | Requires a GH-side OAuth secret per target workspace |
-| Azure DevOps Pipelines | Aligns with Ecolab's existing ADO-centric tooling | Crosses repo boundaries (GH for source, ADO for CI); harder to configure with a public-fork PR model |
+| Azure DevOps Pipelines | Aligns with ADO-centric tooling some adopters already use | Crosses repo boundaries (GH for source, ADO for CI); harder to configure with a public-fork PR model |
 | Databricks Workflows-only | Self-contained, no external CI | Can't run `bundle deploy` from inside Databricks (chicken-and-egg); poor model for blocking promotion on cross-environment results |
 | Run smoke ad-hoc on laptop | Zero infra | Easy to skip; no audit trail of what shipped where; doesn't scale beyond one engineer |
 
@@ -93,7 +93,7 @@ The existing `tests/governance-workspace-filter.spec.ts` is the seed. Extend it 
 
 **Run the smoke check as a CI-side script that hits the deployed app's `/api/v1/*/page-data` endpoints.** This would catch *frontend* rendering issues that pure Lakebase checks miss. Rejected as the *primary* gate because (a) endpoint behaviour depends on the signed-in user's UC grants, which makes "is this empty because of permissions or because of missing data?" hard to answer from CI; (b) the SSO loop is brittle in CI; (c) it's still on the table as a *secondary* gate (Playwright in stage/prod fills this role).
 
-**Promote via merge to upstream `main`.** Rejected — upstream is multi-tenant; we'd be coupling Ecolab's release cadence to the upstream maintainers'. Pull from upstream weekly into the fork's `main`; promote from there.
+**Promote via merge to upstream `main`.** Rejected — upstream is multi-tenant; coupling our release cadence to the upstream maintainers' is fragile. Pull from upstream weekly into the fork's `main`; promote from there.
 
 **One smoke notebook per page (gateway, governance, observability, …).** Rejected — over-engineered for the current surface area. One contract file in one notebook is auditable in one diff. We can split later if it grows past a screen.
 

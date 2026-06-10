@@ -489,7 +489,7 @@ def refresh_tools():
         logger.info("Tools discovery complete")
     except Exception:
         # Log with traceback. Returning silently here is what hid the
-        # "tool_registry does not exist" failure in the Ecolab sandbox —
+        # "tool_registry does not exist" failure observed during onboarding —
         # /api/v1/tools/sync answered 200 while the underlying refresh
         # blew up on the missing table.
         logger.exception("Tools refresh failed")
