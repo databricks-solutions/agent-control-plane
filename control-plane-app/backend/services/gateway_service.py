@@ -672,6 +672,57 @@ def get_uag_v2_usage() -> Dict[str, Any]:
     }
 
 
+def get_uag_mcp_tools() -> Dict[str, Any]:
+    """Per-tool MCP activity from `uag_mcp_tool_daily` (sourced from
+    system.ai_gateway.usage rows where service_type = MCP_SERVICE).
+
+    Returns {as_of, totals, tools}. Degrades to empty when the table isn't
+    synced or the workspace routes no MCP traffic through UAG v2.
+    """
+    from backend.database import execute_query
+    empty = {"as_of": None, "totals": {}, "tools": []}
+    try:
+        rows = execute_query(
+            """SELECT service_name, tool_name, server_type, request_count,
+                      error_count, unique_users, max_event_time
+               FROM uag_mcp_tool_daily
+               ORDER BY request_count DESC LIMIT 200"""
+        )
+    except Exception as exc:
+        logger.warning("uag_mcp_tool_daily not available: %s", exc)
+        return empty
+    if not rows:
+        return empty
+
+    def _i(r, k):
+        return int(r.get(k) or 0)
+
+    total_req = sum(_i(r, "request_count") for r in rows)
+    total_err = sum(_i(r, "error_count") for r in rows)
+    services = {r.get("service_name") for r in rows if r.get("service_name")}
+    as_of = max((r.get("max_event_time") for r in rows if r.get("max_event_time")), default=None)
+    return {
+        "as_of": as_of,
+        "totals": {
+            "request_count": total_req,
+            "error_count": total_err,
+            "services": len(services),
+            "tools": len(rows),
+        },
+        "tools": [
+            {
+                "service_name": r.get("service_name", ""),
+                "tool_name": r.get("tool_name") or "",
+                "server_type": r.get("server_type") or "",
+                "request_count": _i(r, "request_count"),
+                "error_count": _i(r, "error_count"),
+                "unique_users": _i(r, "unique_users"),
+            }
+            for r in rows
+        ],
+    }
+
+
 def get_usage_summary(days: int = 7) -> List[Dict[str, Any]]:
     """Per-endpoint usage summary from Lakebase cache."""
     from backend.database import execute_query

@@ -12,7 +12,7 @@
 # MAGIC serving), so it is additive — not a replacement for billing (dollar cost)
 # MAGIC or serving.endpoint_usage (broad coverage + rate-limit hits).
 # MAGIC
-# MAGIC **Tables written:** `uag_usage_summary`
+# MAGIC **Tables written:** `uag_usage_summary`, `uag_usage_breakdown`, `uag_mcp_tool_daily`
 
 # COMMAND ----------
 
@@ -53,7 +53,8 @@ spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
 
 UAG_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_summary"
 UAG_BREAKDOWN_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_breakdown"
-print(f"Target tables: {UAG_TABLE}, {UAG_BREAKDOWN_TABLE} | retention {RETENTION_DAYS}d")
+UAG_MCP_TOOL_TABLE = f"{CATALOG}.{SCHEMA}.uag_mcp_tool_daily"
+print(f"Target tables: {UAG_TABLE}, {UAG_BREAKDOWN_TABLE}, {UAG_MCP_TOOL_TABLE} | retention {RETENTION_DAYS}d")
 
 # COMMAND ----------
 
@@ -74,7 +75,7 @@ UAG_SCHEMA = StructType([
 ])
 
 # Flexible breakdown: one row per (dimension, key). dimension ∈
-# {requester_type, destination_model, api_type} — additive v2 cuts.
+# {requester_type, destination_model, api_type, service_type, route_action} — additive v2 cuts.
 UAG_BREAKDOWN_SCHEMA = StructType([
     StructField("dimension", StringType(), False),
     StructField("key", StringType(), False),
@@ -82,6 +83,19 @@ UAG_BREAKDOWN_SCHEMA = StructType([
     StructField("input_tokens", LongType(), True),
     StructField("output_tokens", LongType(), True),
     StructField("cached_tokens", LongType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+# Per-tool MCP activity (service_type = MCP_SERVICE). One row per
+# (service_name, tool_name, server_type) over the retention window.
+UAG_MCP_TOOL_SCHEMA = StructType([
+    StructField("service_name", StringType(), False),
+    StructField("tool_name", StringType(), True),
+    StructField("server_type", StringType(), True),
+    StructField("request_count", LongType(), True),
+    StructField("error_count", LongType(), True),
+    StructField("unique_users", LongType(), True),
+    StructField("max_event_time", StringType(), True),
     StructField("discovered_at", TimestampType(), False),
 ])
 
@@ -172,12 +186,13 @@ print(f"✅ Wrote {len(rows_raw)} rows to {UAG_TABLE}")
 
 # COMMAND ----------
 
-# Breakdowns: agent-vs-human (requester_type), by model (destination_model), by api_type.
-print("▸ Querying ai_gateway.usage breakdowns (requester_type / destination_model / api_type) …")
+# Breakdowns: agent-vs-human (requester_type), model (destination_model), api_type,
+# service_type (model vs MCP vs provider), and route_action (routing outcomes).
+print("▸ Querying ai_gateway.usage breakdowns (requester_type / destination_model / api_type / service_type / route_action) …")
 try:
     bd_rows = _execute_sql(f"""
         WITH base AS (
-            SELECT requester_type, destination_model, api_type, input_tokens, output_tokens,
+            SELECT requester_type, destination_model, api_type, service_type, input_tokens, output_tokens,
                    COALESCE(token_details.cache_read_input_tokens, 0)
                  + COALESCE(token_details.cache_creation_input_tokens, 0) AS cached
             FROM system.ai_gateway.usage
@@ -195,6 +210,19 @@ try:
         SELECT 'api_type', COALESCE(api_type, 'unknown'),
                COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
         FROM base GROUP BY api_type
+        UNION ALL
+        -- service_type: exclude legacy untyped rows so the model/MCP/provider split is meaningful
+        SELECT 'service_type', service_type,
+               COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
+        FROM base WHERE service_type IS NOT NULL AND service_type != '' GROUP BY service_type
+        UNION ALL
+        -- route_action: explode routing attempts (fans out rows) → request counts only, tokens N/A
+        SELECT 'route_action', COALESCE(a.action, 'unknown'),
+               COUNT(*), 0, 0, 0
+        FROM system.ai_gateway.usage
+             LATERAL VIEW explode(routing_information.attempts) t AS a
+        WHERE event_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
+        GROUP BY a.action
     """)
     print(f"  ✅ {len(bd_rows)} breakdown rows")
 except Exception as exc:
@@ -212,7 +240,45 @@ print(f"✅ Wrote {len(bd_rows)} rows to {UAG_BREAKDOWN_TABLE}")
 
 # COMMAND ----------
 
+# Per-tool MCP activity — service_type = MCP_SERVICE rows carry service_name (UC FQN)
+# and mcp_metadata.{tool_name, server_type}. tool_name can be null (server-level call).
+print("▸ Querying ai_gateway.usage MCP tool activity (service_type = MCP_SERVICE) …")
+try:
+    mcp_rows_raw = _execute_sql(f"""
+        SELECT
+            service_name,
+            mcp_metadata.tool_name                              AS tool_name,
+            mcp_metadata.server_type                            AS server_type,
+            COUNT(*)                                            AS request_count,
+            SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS error_count,
+            COUNT(DISTINCT requester)                           AS unique_users,
+            CAST(MAX(event_time) AS STRING)                     AS max_event_time
+        FROM system.ai_gateway.usage
+        WHERE event_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
+          AND service_type = 'MCP_SERVICE'
+          AND service_name IS NOT NULL
+        GROUP BY service_name, mcp_metadata.tool_name, mcp_metadata.server_type
+        ORDER BY request_count DESC
+    """)
+    print(f"  ✅ {len(mcp_rows_raw)} MCP tool rows")
+except Exception as exc:
+    mcp_rows_raw = []
+    print(f"  ⚠️  MCP tool query unavailable: {exc}")
+
+if mcp_rows_raw:
+    rows = [(r.get("service_name", ""), r.get("tool_name"), r.get("server_type"),
+             to_int(r.get("request_count")), to_int(r.get("error_count")), to_int(r.get("unique_users")),
+             r.get("max_event_time"), now)
+            for r in mcp_rows_raw]
+    spark.createDataFrame(rows, UAG_MCP_TOOL_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_MCP_TOOL_TABLE)
+else:
+    spark.createDataFrame([], UAG_MCP_TOOL_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_MCP_TOOL_TABLE)
+print(f"✅ Wrote {len(mcp_rows_raw)} rows to {UAG_MCP_TOOL_TABLE}")
+
+# COMMAND ----------
+
 result = {"status": "success", "uag_endpoint_rows": len(rows_raw), "uag_breakdown_rows": len(bd_rows),
-          "retention_days": RETENTION_DAYS, "discovered_at": now.isoformat()}
+          "uag_mcp_tool_rows": len(mcp_rows_raw), "retention_days": RETENTION_DAYS,
+          "discovered_at": now.isoformat()}
 print(json.dumps(result, indent=2))
 dbutils.notebook.exit(json.dumps(result))

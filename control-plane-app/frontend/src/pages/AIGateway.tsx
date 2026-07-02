@@ -12,6 +12,7 @@ import {
   useGatewayUsageTimeseries,
   useGatewayUsageByUser,
   useUagV2Usage,
+  useUagMcpTools,
   type UagBreakdownRow,
   useGatewayInferenceLogs,
   useGatewayMetrics,
@@ -281,9 +282,77 @@ function UagV2Section() {
             subtitle="Requests by API surface"
             rows={uag.breakdowns.api_type}
           />
+          <UagBreakdownCard
+            title="Service Type"
+            subtitle="Model vs. MCP vs. provider (typed traffic)"
+            rows={uag.breakdowns.service_type}
+            labelMap={{
+              MODEL_SERVICE: 'Model',
+              MCP_SERVICE: 'MCP',
+              MODEL_PROVIDER_SERVICE: 'Provider',
+              unknown: 'Unknown',
+            }}
+          />
+          <UagBreakdownCard
+            title="Routing Outcomes"
+            subtitle="Requests by routing attempt"
+            rows={uag.breakdowns.route_action}
+            labelMap={{ INITIAL_ATTEMPT: 'Initial', FALLBACK: 'Fallback', unknown: 'Unknown' }}
+          />
         </div>
       )}
+
+      <UagMcpToolsCard />
     </div>
+  )
+}
+
+/* Top MCP tools — service_type=MCP_SERVICE rows from system.ai_gateway.usage. */
+function UagMcpToolsCard() {
+  const { data: mcp, isLoading } = useUagMcpTools()
+  const tools = mcp?.tools || []
+  if (isLoading || tools.length === 0) return null
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          Top MCP Tools
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
+            {mcp!.totals.services ?? 0} services · {mcp!.totals.tools ?? 0} tools
+          </span>
+        </CardTitle>
+        <p className="text-[11px] text-gray-400 dark:text-gray-500">
+          MCP tool invocations governed through Unity AI Gateway v2
+          {mcp?.as_of && <> · as of {new Date(mcp.as_of).toLocaleString()}</>}
+        </p>
+      </CardHeader>
+      <CardContent>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
+              <th className="py-2 font-medium">MCP Service</th>
+              <th className="py-2 font-medium">Tool</th>
+              <th className="py-2 font-medium">Type</th>
+              <th className="py-2 font-medium text-right">Requests</th>
+              <th className="py-2 font-medium text-right">Errors</th>
+              <th className="py-2 font-medium text-right">Users</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tools.slice(0, 15).map((t, i) => (
+              <tr key={`${t.service_name}-${t.tool_name}-${i}`} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
+                <td className="py-1.5 font-mono text-xs truncate max-w-[240px]" title={t.service_name}>{t.service_name}</td>
+                <td className="py-1.5">{t.tool_name || <span className="text-gray-400">(server)</span>}</td>
+                <td className="py-1.5 text-gray-500 dark:text-gray-400">{t.server_type || '—'}</td>
+                <td className="py-1.5 text-right tabular-nums">{t.request_count.toLocaleString()}</td>
+                <td className="py-1.5 text-right tabular-nums">{t.error_count.toLocaleString()}</td>
+                <td className="py-1.5 text-right tabular-nums">{t.unique_users.toLocaleString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
   )
 }
 
