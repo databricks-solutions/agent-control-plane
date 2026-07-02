@@ -1697,10 +1697,13 @@ with uag_conn.cursor() as cur:
     uag_conn.commit()
 print(f"▸ Syncing {UAG_MCP_TOOL_TABLE} → uag_mcp_tool_daily ...")
 try:
+    # Read Delta BEFORE truncating: a transient read failure after an early
+    # TRUNCATE would otherwise leave the Lakebase cache empty (silent, since
+    # this table is EXPECTED-not-REQUIRED in the smoke check).
+    mcp_rows = spark.read.table(UAG_MCP_TOOL_TABLE).collect()
     with uag_conn.cursor() as cur:
         cur.execute("TRUNCATE TABLE uag_mcp_tool_daily")
         uag_conn.commit()
-    mcp_rows = spark.read.table(UAG_MCP_TOOL_TABLE).collect()
     if mcp_rows:
         values = [(r.service_name, r.tool_name, r.server_type, int(r.request_count or 0),
                    int(r.error_count or 0), int(r.unique_users or 0), r.max_event_time, now)

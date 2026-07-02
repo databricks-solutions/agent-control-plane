@@ -174,6 +174,14 @@ export default function AIGatewayPage() {
   )
 }
 
+/* Spark stringifies timestamps as "YYYY-MM-DD HH:MM:SS[.fff]" (space, no 'T'),
+ * which Safari parses as Invalid Date. Swap the space for 'T' before formatting;
+ * fall back to the raw string if it still won't parse. */
+function fmtAsOf(s: string): string {
+  const d = new Date(s.includes('T') ? s : s.replace(' ', 'T'))
+  return isNaN(d.getTime()) ? s : d.toLocaleString()
+}
+
 /* ── Unity AI Gateway v2 (Beta) Section ───────────────────────── */
 
 function UagV2Section() {
@@ -207,7 +215,7 @@ function UagV2Section() {
             </span>
             {uag?.as_of && (
               <span className="ml-auto text-[10px] font-normal text-gray-400 dark:text-gray-500">
-                as of {new Date(uag.as_of).toLocaleString()}
+                as of {fmtAsOf(uag.as_of)}
               </span>
             )}
           </CardTitle>
@@ -295,7 +303,7 @@ function UagV2Section() {
           />
           <UagBreakdownCard
             title="Routing Outcomes"
-            subtitle="Requests by routing attempt"
+            subtitle="Attempts by outcome (initial vs. fallback)"
             rows={uag.breakdowns.route_action}
             labelMap={{ INITIAL_ATTEMPT: 'Initial', FALLBACK: 'Fallback', unknown: 'Unknown' }}
           />
@@ -323,7 +331,7 @@ function UagMcpToolsCard() {
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
           MCP tool invocations governed through Unity AI Gateway v2
-          {mcp?.as_of && <> · as of {new Date(mcp.as_of).toLocaleString()}</>}
+          {mcp?.as_of && <> · as of {fmtAsOf(mcp.as_of)}</>}
         </p>
       </CardHeader>
       <CardContent>
@@ -339,7 +347,7 @@ function UagMcpToolsCard() {
             </tr>
           </thead>
           <tbody>
-            {tools.slice(0, 15).map((t, i) => (
+            {tools.map((t, i) => (
               <tr key={`${t.service_name}-${t.tool_name}-${i}`} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
                 <td className="py-1.5 font-mono text-xs truncate max-w-[240px]" title={t.service_name}>{t.service_name}</td>
                 <td className="py-1.5">{t.tool_name || <span className="text-gray-400">(server)</span>}</td>

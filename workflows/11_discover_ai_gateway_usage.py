@@ -216,7 +216,13 @@ try:
                COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
         FROM base WHERE service_type IS NOT NULL AND service_type != '' GROUP BY service_type
         UNION ALL
-        -- route_action: explode routing attempts (fans out rows) → request counts only, tokens N/A
+        -- route_action: per-ATTEMPT outcome, not per-request — a fallback adds a
+        -- second attempt row, so counts are attempt-grain (the UI labels this
+        -- "attempts", not requests, and it won't tie out to the request KPI).
+        -- Plain explode drops rows with no routing attempts, which scopes this to
+        -- v2-routed traffic — parallel to the service_type cut excluding untyped
+        -- legacy rows (explode_outer would flood it with a ~96% 'unknown' bucket).
+        -- Tokens N/A (explode fans out rows).
         SELECT 'route_action', COALESCE(a.action, 'unknown'),
                COUNT(*), 0, 0, 0
         FROM system.ai_gateway.usage
