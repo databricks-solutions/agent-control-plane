@@ -603,7 +603,27 @@ export interface UagV2Usage {
     requester_type?: UagBreakdownRow[]
     destination_model?: UagBreakdownRow[]
     api_type?: UagBreakdownRow[]
+    service_type?: UagBreakdownRow[]
+    route_action?: UagBreakdownRow[]
   }
+}
+
+export interface UagMcpTools {
+  as_of: string | null
+  totals: Partial<{
+    request_count: number
+    error_count: number
+    services: number
+    tools: number
+  }>
+  tools: Array<{
+    service_name: string
+    tool_name: string
+    server_type: string
+    request_count: number
+    error_count: number
+    unique_users: number
+  }>
 }
 
 export interface UagBreakdownRow {
@@ -621,6 +641,18 @@ export function useUagV2Usage() {
     queryFn: async () => {
       const { data } = await apiClient.get('/gateway/uag-v2-usage')
       return data as UagV2Usage
+    },
+    staleTime: GW_STALE,
+  })
+}
+
+/** Per-tool MCP activity from system.ai_gateway.usage (service_type = MCP_SERVICE). */
+export function useUagMcpTools() {
+  return useQuery({
+    queryKey: ['gateway', 'uag-mcp-tools'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/uag-mcp-tools')
+      return data as UagMcpTools
     },
     staleTime: GW_STALE,
   })

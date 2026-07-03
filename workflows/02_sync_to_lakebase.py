@@ -1677,6 +1677,50 @@ try:
 except Exception as exc:
     print(f"  ⚠️  uag_usage_breakdown sync failed: {exc}")
 
+# Sync uag_mcp_tool_daily (per-tool MCP activity). tool_name is nullable
+# (server-level calls), so no composite PK — full-refresh via TRUNCATE + INSERT.
+UAG_MCP_TOOL_TABLE = f"{CATALOG}.{SCHEMA}.uag_mcp_tool_daily"
+uag_mcp_count = 0
+with uag_conn.cursor() as cur:
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS uag_mcp_tool_daily (
+            service_name   TEXT NOT NULL,
+            tool_name      TEXT,
+            server_type    TEXT,
+            request_count  BIGINT DEFAULT 0,
+            error_count    BIGINT DEFAULT 0,
+            unique_users   BIGINT DEFAULT 0,
+            max_event_time TEXT,
+            last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_umt_service ON uag_mcp_tool_daily (service_name)")
+    uag_conn.commit()
+print(f"▸ Syncing {UAG_MCP_TOOL_TABLE} → uag_mcp_tool_daily ...")
+try:
+    # Read Delta BEFORE truncating: a transient read failure after an early
+    # TRUNCATE would otherwise leave the Lakebase cache empty (silent, since
+    # this table is EXPECTED-not-REQUIRED in the smoke check).
+    mcp_rows = spark.read.table(UAG_MCP_TOOL_TABLE).collect()
+    with uag_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE uag_mcp_tool_daily")
+        uag_conn.commit()
+    if mcp_rows:
+        values = [(r.service_name, r.tool_name, r.server_type, int(r.request_count or 0),
+                   int(r.error_count or 0), int(r.unique_users or 0), r.max_event_time, now)
+                  for r in mcp_rows]
+        uag_mcp_count = len(values)
+        with uag_conn.cursor() as cur:
+            execute_values(cur,
+                """INSERT INTO uag_mcp_tool_daily
+                   (service_name, tool_name, server_type, request_count, error_count,
+                    unique_users, max_event_time, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+            uag_conn.commit()
+    print(f"  ✅ {uag_mcp_count} UAG MCP tool rows synced")
+except Exception as exc:
+    print(f"  ⚠️  uag_mcp_tool_daily sync failed: {exc}")
+
 uag_conn.close()
 
 # COMMAND ----------

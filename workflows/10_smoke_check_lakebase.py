@@ -85,6 +85,7 @@ EXPECTED = [
     "vector_search_indexes",         # endpoints can exist with 0 indexes
     "vector_search_health_history",
     "kb_billing_daily",              # only populated when Vector Search indexes exist
+    "uag_mcp_tool_daily",            # only populated when MCP services route through UAG v2
     "billing_cache_meta",
     # App-managed tables created in Phase 7 of 02_sync_to_lakebase. These were
     # historically created lazily by the app's startup hook, but the app SP

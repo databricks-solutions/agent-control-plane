@@ -588,6 +588,16 @@ def ensure_gateway_usage_columns() -> None:
             logger.warning("gateway_usage column ensure skipped: %s", exc)
 
 
+def _row_int(r: Dict[str, Any], k: str) -> int:
+    """Coerce a nullable Lakebase numeric column to int."""
+    return int(r.get(k) or 0)
+
+
+def _max_as_of(rows: List[Dict[str, Any]]) -> Optional[str]:
+    """Latest max_event_time across rows — the cache's 'as of' timestamp."""
+    return max((r.get("max_event_time") for r in rows if r.get("max_event_time")), default=None)
+
+
 def get_uag_v2_usage() -> Dict[str, Any]:
     """Unity AI Gateway (v2) usage summary from `uag_usage_summary` (sourced from
     system.ai_gateway.usage — v2-routed endpoints only, ~20-min fresh).
@@ -612,9 +622,7 @@ def get_uag_v2_usage() -> Dict[str, Any]:
     if not rows:
         return empty
 
-    def _i(r, k):
-        return int(r.get(k) or 0)
-
+    _i = _row_int
     total_req = sum(_i(r, "request_count") for r in rows)
     total_in = sum(_i(r, "input_tokens") for r in rows)
     total_out = sum(_i(r, "output_tokens") for r in rows)
@@ -622,7 +630,7 @@ def get_uag_v2_usage() -> Dict[str, Any]:
     total_cache_create = sum(_i(r, "cache_creation_tokens") for r in rows)
     cached = total_cache_read + total_cache_create
     cache_pct = round(100.0 * total_cache_read / total_in, 1) if total_in else 0.0
-    as_of = max((r.get("max_event_time") for r in rows if r.get("max_event_time")), default=None)
+    as_of = _max_as_of(rows)
 
     # Additive breakdowns (agent-vs-human / by model / by api_type) — same source table.
     breakdowns: Dict[str, list] = {}
@@ -666,6 +674,60 @@ def get_uag_v2_usage() -> Dict[str, Any]:
                 "p95_ttfb_ms": _i(r, "p95_ttfb_ms"),
                 "error_count": _i(r, "error_count"),
                 "unique_users": _i(r, "unique_users"),
+            }
+            for r in rows
+        ],
+    }
+
+
+def get_uag_mcp_tools() -> Dict[str, Any]:
+    """Per-tool MCP activity from `uag_mcp_tool_daily` (sourced from
+    system.ai_gateway.usage rows where service_type = MCP_SERVICE).
+
+    Returns {as_of, totals, tools}. Degrades to empty when the table isn't
+    synced or the workspace routes no MCP traffic through UAG v2.
+    """
+    from backend.database import execute_query
+    empty = {"as_of": None, "totals": {}, "tools": []}
+    # Account-wide totals from an unbounded aggregate — deriving them from the
+    # capped list below would undercount services/tools/requests past the LIMIT.
+    try:
+        agg = execute_query(
+            """SELECT COUNT(*) AS tools, COUNT(DISTINCT service_name) AS services,
+                      COALESCE(SUM(request_count), 0) AS request_count,
+                      COALESCE(SUM(error_count), 0) AS error_count,
+                      MAX(max_event_time) AS as_of
+               FROM uag_mcp_tool_daily"""
+        )
+    except Exception as exc:
+        logger.warning("uag_mcp_tool_daily not available: %s", exc)
+        return empty
+    totals = agg[0] if agg else {}
+    if not totals or _row_int(totals, "tools") == 0:
+        return empty
+
+    rows = execute_query(
+        """SELECT service_name, tool_name, server_type, request_count,
+                  error_count, unique_users
+           FROM uag_mcp_tool_daily
+           ORDER BY request_count DESC LIMIT 25"""
+    )
+    return {
+        "as_of": totals.get("as_of"),
+        "totals": {
+            "request_count": _row_int(totals, "request_count"),
+            "error_count": _row_int(totals, "error_count"),
+            "services": _row_int(totals, "services"),
+            "tools": _row_int(totals, "tools"),
+        },
+        "tools": [
+            {
+                "service_name": r.get("service_name", ""),
+                "tool_name": r.get("tool_name") or "",
+                "server_type": r.get("server_type") or "",
+                "request_count": _row_int(r, "request_count"),
+                "error_count": _row_int(r, "error_count"),
+                "unique_users": _row_int(r, "unique_users"),
             }
             for r in rows
         ],

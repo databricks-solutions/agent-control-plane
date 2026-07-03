@@ -175,8 +175,17 @@ def usage_by_user(days: int = Query(default=7, le=90)):
 @router.get("/uag-v2-usage")
 def uag_v2_usage():
     """Unity AI Gateway (v2) usage summary from system.ai_gateway.usage —
-    v2-routed endpoints only, ~20-min fresh (cached tokens + latency/TTFB)."""
+    v2-routed endpoints only, ~20-min fresh (cached tokens + latency/TTFB).
+    Breakdowns include requester_type, destination_model, api_type,
+    service_type (model/MCP/provider) and route_action (routing outcomes)."""
     return gateway_service.get_uag_v2_usage()
+
+
+@router.get("/uag-mcp-tools")
+def uag_mcp_tools():
+    """Per-tool MCP activity from system.ai_gateway.usage (service_type =
+    MCP_SERVICE): service name, tool, server type, calls, users."""
+    return gateway_service.get_uag_mcp_tools()
 
 
 @router.get("/inference-logs")
