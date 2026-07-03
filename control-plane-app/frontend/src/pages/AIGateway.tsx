@@ -21,6 +21,7 @@ import {
   useCurrentUser,
 } from '@/api/hooks'
 import { RefreshButton } from '@/components/RefreshButton'
+import { formatAsOf } from '@/lib/formatters'
 import { SortableHeader, useSort, sortRows } from '@/components/SortableTable'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -129,6 +130,18 @@ export default function AIGatewayPage() {
         </div>
       </div>
 
+      {/* Product direction */}
+      <div className="flex items-start gap-2.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3.5 py-2.5 text-[13px] text-indigo-900 dark:border-indigo-900/50 dark:bg-indigo-950/30 dark:text-indigo-200">
+        <Sparkles className="w-4 h-4 mt-0.5 flex-shrink-0 text-indigo-500 dark:text-indigo-400" />
+        <p className="leading-snug">
+          <span className="font-semibold">Unity AI Gateway is where this is headed.</span>{' '}
+          It's Databricks' native control plane for AI governance. We integrate its capabilities
+          as soon as their APIs are available — start with the{' '}
+          <span className="font-medium">Unity AI Gateway v2 (Beta)</span> tab — and retire legacy
+          views here as they're superseded. Expect this page to shift toward Unity AI Gateway over time.
+        </p>
+      </div>
+
       {/* Tab bar */}
       <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700 overflow-x-auto">
         {tabs.map(({ id, label, icon: Icon, beta }) => (
@@ -174,14 +187,6 @@ export default function AIGatewayPage() {
   )
 }
 
-/* Spark stringifies timestamps as "YYYY-MM-DD HH:MM:SS[.fff]" (space, no 'T'),
- * which Safari parses as Invalid Date. Swap the space for 'T' before formatting;
- * fall back to the raw string if it still won't parse. */
-function fmtAsOf(s: string): string {
-  const d = new Date(s.includes('T') ? s : s.replace(' ', 'T'))
-  return isNaN(d.getTime()) ? s : d.toLocaleString()
-}
-
 /* ── Unity AI Gateway v2 (Beta) Section ───────────────────────── */
 
 function UagV2Section() {
@@ -215,7 +220,7 @@ function UagV2Section() {
             </span>
             {uag?.as_of && (
               <span className="ml-auto text-[10px] font-normal text-gray-400 dark:text-gray-500">
-                as of {fmtAsOf(uag.as_of)}
+                as of {formatAsOf(uag.as_of)}
               </span>
             )}
           </CardTitle>
@@ -331,7 +336,7 @@ function UagMcpToolsCard() {
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
           MCP tool invocations governed through Unity AI Gateway v2
-          {mcp?.as_of && <> · as of {fmtAsOf(mcp.as_of)}</>}
+          {mcp?.as_of && <> · as of {formatAsOf(mcp.as_of)}</>}
         </p>
       </CardHeader>
       <CardContent>
