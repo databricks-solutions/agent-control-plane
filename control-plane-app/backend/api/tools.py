@@ -5,6 +5,7 @@ from typing import Dict, Any, List
 from backend.services.tools_service import (
     get_tools_overview,
     get_mcp_servers,
+    get_mcp_activity,
     get_uc_functions,
     get_tool_usage,
     refresh_tools,
@@ -23,6 +24,13 @@ def tools_overview() -> Dict[str, Any]:
 def list_mcp_servers() -> List[Dict[str, Any]]:
     """List MCP server / serving endpoints with managed/custom classification."""
     return get_mcp_servers()
+
+
+@router.get("/mcp-activity")
+def mcp_activity() -> Dict[str, Any]:
+    """Server-grouped MCP tool activity from Unity AI Gateway v2 (managed vs
+    UC-registered services, per-tool request/error/user counts)."""
+    return get_mcp_activity()
 
 
 @router.get("/functions")

@@ -559,6 +559,73 @@ def get_mcp_servers() -> List[Dict[str, Any]]:
     return result
 
 
+def get_mcp_activity() -> Dict[str, Any]:
+    """Server-grouped MCP tool activity from `uag_mcp_tool_daily` (Unity AI
+    Gateway v2, service_type = MCP_SERVICE).
+
+    Complements the connection-based inventory in get_mcp_servers(): that lists
+    configured UC MCP connections; this shows what actually routed through the
+    gateway, keyed by UC service FQN. The two are distinct namespaces (a
+    connection named `acorn_mcp` vs a service `system.ai.slack`) and are not
+    joined. Each service is classified Databricks-managed (system.ai.*) vs
+    UC-registered. Degrades to empty when the table is unsynced or no MCP
+    traffic has been routed.
+    """
+    empty: Dict[str, Any] = {"as_of": None, "totals": {}, "servers": []}
+    try:
+        rows = execute_query(
+            """SELECT service_name, tool_name, server_type, request_count,
+                      error_count, unique_users, max_event_time
+               FROM uag_mcp_tool_daily
+               ORDER BY service_name, request_count DESC"""
+        )
+    except Exception as exc:
+        logger.warning("uag_mcp_tool_daily not available: %s", exc)
+        return empty
+    if not rows:
+        return empty
+
+    servers: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        svc = r.get("service_name") or ""
+        s = servers.get(svc)
+        if s is None:
+            s = servers[svc] = {
+                "service_name": svc,
+                "managed": svc.startswith("system.ai."),
+                "server_type": r.get("server_type") or "",
+                "request_count": 0,
+                "error_count": 0,
+                "tool_count": 0,
+                "tools": [],
+            }
+        rc = int(r.get("request_count") or 0)
+        ec = int(r.get("error_count") or 0)
+        s["request_count"] += rc
+        s["error_count"] += ec
+        tool = r.get("tool_name")
+        if tool:
+            s["tool_count"] += 1
+        s["tools"].append({
+            "tool_name": tool or "",
+            "request_count": rc,
+            "error_count": ec,
+            "unique_users": int(r.get("unique_users") or 0),
+        })
+
+    server_list = sorted(servers.values(), key=lambda x: x["request_count"], reverse=True)
+    as_of = max((r.get("max_event_time") for r in rows if r.get("max_event_time")), default=None)
+    return {
+        "as_of": as_of,
+        "totals": {
+            "services": len(server_list),
+            "managed": sum(1 for s in server_list if s["managed"]),
+            "request_count": sum(s["request_count"] for s in server_list),
+        },
+        "servers": server_list,
+    }
+
+
 def get_uc_functions() -> List[Dict[str, Any]]:
     """List all UC function entries from the tool registry."""
     maybe_refresh_async()

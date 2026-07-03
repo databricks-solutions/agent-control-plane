@@ -761,6 +761,31 @@ export function useMcpServers() {
   })
 }
 
+export interface McpActivity {
+  as_of: string | null
+  totals: Partial<{ services: number; managed: number; request_count: number }>
+  servers: Array<{
+    service_name: string
+    managed: boolean
+    server_type: string
+    request_count: number
+    error_count: number
+    tool_count: number
+    tools: Array<{ tool_name: string; request_count: number; error_count: number; unique_users: number }>
+  }>
+}
+
+/** Server-grouped MCP tool activity from Unity AI Gateway v2. */
+export function useMcpActivity() {
+  return useQuery({
+    queryKey: ['tools', 'mcp-activity'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/tools/mcp-activity')
+      return data as McpActivity
+    },
+  })
+}
+
 export function useUcFunctions() {
   return useQuery({
     queryKey: ['tools', 'uc-functions'],
