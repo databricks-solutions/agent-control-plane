@@ -13,6 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { KpiCard } from '@/components/KpiCard'
 import { TablePagination } from '@/components/TablePagination'
+import { formatAsOf } from '@/lib/formatters'
 import {
   Wrench,
   Server,
@@ -286,7 +287,7 @@ export default function ToolsPage() {
 
         return (
           <div className="space-y-4">
-            <McpUsageSection />
+            <McpUsageSection query={q} />
             {mcpLoading ? (
               <div className="flex items-center justify-center h-32 text-gray-400 dark:text-gray-500">Loading…</div>
             ) : filteredMcp.length === 0 ? (
@@ -503,10 +504,15 @@ export default function ToolsPage() {
  * managed (system.ai.*) vs UC-registered split — a distinct namespace from the
  * connection inventory below, so it's shown as its own panel. Hidden when no MCP
  * traffic has routed through the gateway. */
-function McpUsageSection() {
+function McpUsageSection({ query }: { query: string }) {
   const { data, isLoading } = useMcpActivity()
   const [expanded, setExpanded] = useState<string | null>(null)
-  const servers = data?.servers || []
+  const q = query.trim().toLowerCase()
+  const servers = (data?.servers || []).filter((s) =>
+    !q ||
+    s.service_name.toLowerCase().includes(q) ||
+    s.tools.some((t) => t.tool_name.toLowerCase().includes(q))
+  )
   if (isLoading || servers.length === 0) return null
 
   return (
@@ -515,12 +521,12 @@ function McpUsageSection() {
         <CardTitle className="text-base flex items-center gap-2">
           MCP Usage
           <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
-            {data!.totals.services ?? 0} services · {data!.totals.managed ?? 0} managed
+            {servers.length} services · {servers.filter((s) => s.managed).length} managed
           </span>
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
           MCP tool calls governed through Unity AI Gateway v2 (distinct from the configured connections below)
-          {data?.as_of && <> · as of {new Date(data.as_of.includes('T') ? data.as_of : data.as_of.replace(' ', 'T')).toLocaleString()}</>}
+          {data?.as_of && <> · as of {formatAsOf(data.as_of)}</>}
         </p>
       </CardHeader>
       <CardContent>

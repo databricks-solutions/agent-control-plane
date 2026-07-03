@@ -98,6 +98,19 @@ export function formatDateShort(v: any): string {
   return `${base} ${hh}:${mm}`
 }
 
+/** Format a Unity system-table "as of" timestamp for display.
+ *  Spark stringifies timestamps as "YYYY-MM-DD HH:MM:SS[.fff]" — space-separated
+ *  (Invalid Date in Safari) and with no offset though the value is UTC. Normalize
+ *  to ISO-UTC (space→'T', append 'Z') before formatting; fall back to the raw
+ *  string if it still won't parse. */
+export function formatAsOf(v: string | null | undefined): string {
+  if (!v) return ''
+  let s = v.includes('T') ? v : v.replace(' ', 'T')
+  if (!s.endsWith('Z') && !s.includes('+')) s += 'Z'
+  const d = new Date(s)
+  return Number.isNaN(d.getTime()) ? v : d.toLocaleString()
+}
+
 /** Full ISO string for tooltip / title attribute. */
 export function formatDateFull(v: any): string {
   const d = parseDateCell(v)
