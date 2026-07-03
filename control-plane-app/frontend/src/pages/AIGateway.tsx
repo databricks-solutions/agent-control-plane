@@ -21,6 +21,7 @@ import {
   useCurrentUser,
 } from '@/api/hooks'
 import { RefreshButton } from '@/components/RefreshButton'
+import { formatAsOf } from '@/lib/formatters'
 import { SortableHeader, useSort, sortRows } from '@/components/SortableTable'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -174,14 +175,6 @@ export default function AIGatewayPage() {
   )
 }
 
-/* Spark stringifies timestamps as "YYYY-MM-DD HH:MM:SS[.fff]" (space, no 'T'),
- * which Safari parses as Invalid Date. Swap the space for 'T' before formatting;
- * fall back to the raw string if it still won't parse. */
-function fmtAsOf(s: string): string {
-  const d = new Date(s.includes('T') ? s : s.replace(' ', 'T'))
-  return isNaN(d.getTime()) ? s : d.toLocaleString()
-}
-
 /* ── Unity AI Gateway v2 (Beta) Section ───────────────────────── */
 
 function UagV2Section() {
@@ -215,7 +208,7 @@ function UagV2Section() {
             </span>
             {uag?.as_of && (
               <span className="ml-auto text-[10px] font-normal text-gray-400 dark:text-gray-500">
-                as of {fmtAsOf(uag.as_of)}
+                as of {formatAsOf(uag.as_of)}
               </span>
             )}
           </CardTitle>
@@ -331,7 +324,7 @@ function UagMcpToolsCard() {
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
           MCP tool invocations governed through Unity AI Gateway v2
-          {mcp?.as_of && <> · as of {fmtAsOf(mcp.as_of)}</>}
+          {mcp?.as_of && <> · as of {formatAsOf(mcp.as_of)}</>}
         </p>
       </CardHeader>
       <CardContent>

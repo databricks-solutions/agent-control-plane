@@ -767,7 +767,6 @@ export interface McpActivity {
   servers: Array<{
     service_name: string
     managed: boolean
-    server_type: string
     request_count: number
     error_count: number
     tool_count: number

@@ -574,7 +574,7 @@ def get_mcp_activity() -> Dict[str, Any]:
     empty: Dict[str, Any] = {"as_of": None, "totals": {}, "servers": []}
     try:
         rows = execute_query(
-            """SELECT service_name, tool_name, server_type, request_count,
+            """SELECT service_name, tool_name, request_count,
                       error_count, unique_users, max_event_time
                FROM uag_mcp_tool_daily
                ORDER BY service_name, request_count DESC"""
@@ -585,6 +585,10 @@ def get_mcp_activity() -> Dict[str, Any]:
     if not rows:
         return empty
 
+    # Group tool-grain rows into servers. Merge tools by name within a service so
+    # a tool that appears under >1 server_type collapses to one row (summed) —
+    # avoids duplicate tool rows and an inflated tool_count. An empty tool_name
+    # is a server-level call, rendered as "(server)" and excluded from tool_count.
     servers: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         svc = r.get("service_name") or ""
@@ -593,27 +597,31 @@ def get_mcp_activity() -> Dict[str, Any]:
             s = servers[svc] = {
                 "service_name": svc,
                 "managed": svc.startswith("system.ai."),
-                "server_type": r.get("server_type") or "",
                 "request_count": 0,
                 "error_count": 0,
                 "tool_count": 0,
-                "tools": [],
+                "_tools": {},
             }
         rc = int(r.get("request_count") or 0)
         ec = int(r.get("error_count") or 0)
         s["request_count"] += rc
         s["error_count"] += ec
-        tool = r.get("tool_name")
-        if tool:
-            s["tool_count"] += 1
-        s["tools"].append({
-            "tool_name": tool or "",
-            "request_count": rc,
-            "error_count": ec,
-            "unique_users": int(r.get("unique_users") or 0),
-        })
+        tname = r.get("tool_name") or ""
+        t = s["_tools"].get(tname)
+        if t is None:
+            t = s["_tools"][tname] = {"tool_name": tname, "request_count": 0, "error_count": 0, "unique_users": 0}
+        t["request_count"] += rc
+        t["error_count"] += ec
+        # distinct-user counts can't be summed across merged rows; take the max
+        t["unique_users"] = max(t["unique_users"], int(r.get("unique_users") or 0))
 
-    server_list = sorted(servers.values(), key=lambda x: x["request_count"], reverse=True)
+    server_list = []
+    for s in servers.values():
+        tools = sorted(s.pop("_tools").values(), key=lambda x: x["request_count"], reverse=True)
+        s["tool_count"] = sum(1 for t in tools if t["tool_name"])
+        s["tools"] = tools
+        server_list.append(s)
+    server_list.sort(key=lambda x: x["request_count"], reverse=True)
     as_of = max((r.get("max_event_time") for r in rows if r.get("max_event_time")), default=None)
     return {
         "as_of": as_of,
