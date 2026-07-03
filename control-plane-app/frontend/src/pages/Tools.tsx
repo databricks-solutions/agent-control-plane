@@ -1,7 +1,8 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, Fragment } from 'react'
 import {
   useToolsOverview,
   useMcpServers,
+  useMcpActivity,
   useUcFunctions,
   useToolUsage,
   useSyncTools,
@@ -285,6 +286,7 @@ export default function ToolsPage() {
 
         return (
           <div className="space-y-4">
+            <McpUsageSection />
             {mcpLoading ? (
               <div className="flex items-center justify-center h-32 text-gray-400 dark:text-gray-500">Loading…</div>
             ) : filteredMcp.length === 0 ? (
@@ -494,5 +496,102 @@ export default function ToolsPage() {
         )
       })()}
     </div>
+  )
+}
+
+/* MCP usage via Unity AI Gateway v2 (uag_mcp_tool_daily). Server-grouped, with a
+ * managed (system.ai.*) vs UC-registered split — a distinct namespace from the
+ * connection inventory below, so it's shown as its own panel. Hidden when no MCP
+ * traffic has routed through the gateway. */
+function McpUsageSection() {
+  const { data, isLoading } = useMcpActivity()
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const servers = data?.servers || []
+  if (isLoading || servers.length === 0) return null
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          MCP Usage
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
+            {data!.totals.services ?? 0} services · {data!.totals.managed ?? 0} managed
+          </span>
+        </CardTitle>
+        <p className="text-[11px] text-gray-400 dark:text-gray-500">
+          MCP tool calls governed through Unity AI Gateway v2 (distinct from the configured connections below)
+          {data?.as_of && <> · as of {new Date(data.as_of.includes('T') ? data.as_of : data.as_of.replace(' ', 'T')).toLocaleString()}</>}
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                <th className="py-2 font-medium">MCP Service</th>
+                <th className="py-2 font-medium">Class</th>
+                <th className="py-2 font-medium text-right">Tools</th>
+                <th className="py-2 font-medium text-right">Requests</th>
+                <th className="py-2 font-medium text-right">Errors</th>
+              </tr>
+            </thead>
+            <tbody>
+              {servers.map((s) => {
+                const open = expanded === s.service_name
+                return (
+                  <Fragment key={s.service_name}>
+                    <tr
+                      className="border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer"
+                      onClick={() => setExpanded(open ? null : s.service_name)}
+                    >
+                      <td className="py-2.5">
+                        <div className="flex items-center gap-2">
+                          <Server className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                          <span className="font-mono text-xs truncate max-w-[260px]" title={s.service_name}>{s.service_name}</span>
+                        </div>
+                      </td>
+                      <td className="py-2.5">
+                        <Badge variant={s.managed ? 'default' : 'info'} className="text-xs">
+                          {s.managed ? 'Databricks-managed' : 'UC-registered'}
+                        </Badge>
+                      </td>
+                      <td className="py-2.5 text-right tabular-nums">{s.tool_count}</td>
+                      <td className="py-2.5 text-right tabular-nums">{s.request_count.toLocaleString()}</td>
+                      <td className="py-2.5 text-right tabular-nums">{s.error_count.toLocaleString()}</td>
+                    </tr>
+                    {open && (
+                      <tr key={s.service_name + ':tools'} className="bg-gray-50/60 dark:bg-gray-800/30">
+                        <td colSpan={5} className="px-4 py-2">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="text-left text-gray-400 dark:text-gray-500">
+                                <th className="py-1 font-medium">Tool</th>
+                                <th className="py-1 font-medium text-right">Requests</th>
+                                <th className="py-1 font-medium text-right">Errors</th>
+                                <th className="py-1 font-medium text-right">Users</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {s.tools.map((t, i) => (
+                                <tr key={`${s.service_name}:${t.tool_name}:${i}`}>
+                                  <td className="py-1">{t.tool_name || <span className="text-gray-400">(server)</span>}</td>
+                                  <td className="py-1 text-right tabular-nums">{t.request_count.toLocaleString()}</td>
+                                  <td className="py-1 text-right tabular-nums">{t.error_count.toLocaleString()}</td>
+                                  <td className="py-1 text-right tabular-nums">{t.unique_users.toLocaleString()}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
   )
 }
