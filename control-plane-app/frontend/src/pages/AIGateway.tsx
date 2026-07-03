@@ -130,6 +130,18 @@ export default function AIGatewayPage() {
         </div>
       </div>
 
+      {/* Product direction */}
+      <div className="flex items-start gap-2.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3.5 py-2.5 text-[13px] text-indigo-900 dark:border-indigo-900/50 dark:bg-indigo-950/30 dark:text-indigo-200">
+        <Sparkles className="w-4 h-4 mt-0.5 flex-shrink-0 text-indigo-500 dark:text-indigo-400" />
+        <p className="leading-snug">
+          <span className="font-semibold">Unity AI Gateway is where this is headed.</span>{' '}
+          UAG is Databricks' native control plane for AI governance. We integrate its capabilities
+          as they reach general availability — start with the{' '}
+          <span className="font-medium">Unity AI Gateway v2 (Beta)</span> tab — and retire legacy
+          views here as they're superseded. Expect this page to shift toward UAG over time.
+        </p>
+      </div>
+
       {/* Tab bar */}
       <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700 overflow-x-auto">
         {tabs.map(({ id, label, icon: Icon, beta }) => (
