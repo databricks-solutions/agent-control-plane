@@ -135,10 +135,10 @@ export default function AIGatewayPage() {
         <Sparkles className="w-4 h-4 mt-0.5 flex-shrink-0 text-indigo-500 dark:text-indigo-400" />
         <p className="leading-snug">
           <span className="font-semibold">Unity AI Gateway is where this is headed.</span>{' '}
-          UAG is Databricks' native control plane for AI governance. We integrate its capabilities
+          It's Databricks' native control plane for AI governance. We integrate its capabilities
           as they reach general availability — start with the{' '}
           <span className="font-medium">Unity AI Gateway v2 (Beta)</span> tab — and retire legacy
-          views here as they're superseded. Expect this page to shift toward UAG over time.
+          views here as they're superseded. Expect this page to shift toward Unity AI Gateway over time.
         </p>
       </div>
 
