@@ -1721,6 +1721,42 @@ try:
 except Exception as exc:
     print(f"  ⚠️  uag_mcp_tool_daily sync failed: {exc}")
 
+# Sync uag_guardrail_daily (guardrail coverage per guarded endpoint).
+UAG_GUARDRAIL_TABLE = f"{CATALOG}.{SCHEMA}.uag_guardrail_daily"
+uag_gr_count = 0
+with uag_conn.cursor() as cur:
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS uag_guardrail_daily (
+            endpoint_name    TEXT NOT NULL,
+            checked_requests BIGINT DEFAULT 0,
+            unique_users     BIGINT DEFAULT 0,
+            judge_models     TEXT,
+            max_event_time   TEXT,
+            last_synced      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ugr_ep ON uag_guardrail_daily (endpoint_name)")
+    uag_conn.commit()
+print(f"▸ Syncing {UAG_GUARDRAIL_TABLE} → uag_guardrail_daily ...")
+try:
+    gr_rows = spark.read.table(UAG_GUARDRAIL_TABLE).collect()
+    with uag_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE uag_guardrail_daily")
+        uag_conn.commit()
+    if gr_rows:
+        values = [(r.endpoint_name, int(r.checked_requests or 0), int(r.unique_users or 0),
+                   r.judge_models, r.max_event_time, now) for r in gr_rows]
+        uag_gr_count = len(values)
+        with uag_conn.cursor() as cur:
+            execute_values(cur,
+                """INSERT INTO uag_guardrail_daily
+                   (endpoint_name, checked_requests, unique_users, judge_models, max_event_time, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+            uag_conn.commit()
+    print(f"  ✅ {uag_gr_count} UAG guardrail rows synced")
+except Exception as exc:
+    print(f"  ⚠️  uag_guardrail_daily sync failed: {exc}")
+
 uag_conn.close()
 
 # COMMAND ----------

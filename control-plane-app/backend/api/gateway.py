@@ -188,6 +188,14 @@ def uag_mcp_tools():
     return gateway_service.get_uag_mcp_tools()
 
 
+@router.get("/guardrail-coverage")
+def guardrail_coverage():
+    """Guardrail coverage/activity per endpoint from Unity AI Gateway v2
+    (which endpoints are guarded, check volume, judge models). Coverage only —
+    not block/mask outcomes (those need the gated UAG feature-results surface)."""
+    return gateway_service.get_guardrail_coverage()
+
+
 @router.get("/inference-logs")
 def inference_logs(
     limit: int = Query(default=50, le=500),

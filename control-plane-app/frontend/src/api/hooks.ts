@@ -658,6 +658,30 @@ export function useUagMcpTools() {
   })
 }
 
+export interface GuardrailCoverage {
+  as_of: string | null
+  outcomes_available: boolean
+  totals: Partial<{ guarded_endpoints: number; total_endpoints: number; checked_requests: number }>
+  endpoints: Array<{
+    endpoint_name: string
+    checked_requests: number
+    unique_users: number
+    judge_models: string
+  }>
+}
+
+/** Guardrail coverage/activity per endpoint from Unity AI Gateway v2 (not outcomes). */
+export function useGuardrailCoverage() {
+  return useQuery({
+    queryKey: ['gateway', 'guardrail-coverage'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/guardrail-coverage')
+      return data as GuardrailCoverage
+    },
+    staleTime: GW_STALE,
+  })
+}
+
 export function useGatewayInferenceLogs(limit = 50, endpointName?: string) {
   return useQuery({
     queryKey: ['gateway', 'inference-logs', limit, endpointName],

@@ -13,6 +13,7 @@ import {
   useGatewayUsageByUser,
   useUagV2Usage,
   useUagMcpTools,
+  useGuardrailCoverage,
   type UagBreakdownRow,
   useGatewayInferenceLogs,
   useGatewayMetrics,
@@ -316,7 +317,59 @@ function UagV2Section() {
       )}
 
       <UagMcpToolsCard />
+      <GuardrailCoverageCard />
     </div>
+  )
+}
+
+/* Guardrail coverage/activity (uag_guardrail_daily). Which endpoints have UAG v2
+ * guardrails running + by which judge model. Coverage only — NOT block/mask
+ * outcomes (the verdict isn't in system.ai_gateway.usage; it needs the gated
+ * feature-results surface). Hidden when no endpoint has guardrails active. */
+function GuardrailCoverageCard() {
+  const { data, isLoading } = useGuardrailCoverage()
+  const endpoints = data?.endpoints || []
+  if (isLoading || endpoints.length === 0) return null
+  const guarded = data!.totals.guarded_endpoints ?? endpoints.length
+  const total = data!.totals.total_endpoints ?? 0
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          Guardrail Coverage
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+            {guarded}{total ? ` of ${total}` : ''} endpoints guarded
+          </span>
+        </CardTitle>
+        <p className="text-[11px] text-gray-400 dark:text-gray-500">
+          Endpoints with Unity AI Gateway v2 guardrails running + the judge model evaluating them.
+          Coverage &amp; activity only — block/mask outcomes require UAG feature-results (enrollment-gated).
+          {data?.as_of && <> · as of {formatAsOf(data.as_of)}</>}
+        </p>
+      </CardHeader>
+      <CardContent>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
+              <th className="py-2 font-medium">Guarded Endpoint</th>
+              <th className="py-2 font-medium">Judge Model(s)</th>
+              <th className="py-2 font-medium text-right">Checked Requests</th>
+              <th className="py-2 font-medium text-right">Users</th>
+            </tr>
+          </thead>
+          <tbody>
+            {endpoints.slice(0, 15).map((e, i) => (
+              <tr key={`${e.endpoint_name}-${i}`} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
+                <td className="py-1.5 font-mono text-xs truncate max-w-[260px]" title={e.endpoint_name}>{e.endpoint_name}</td>
+                <td className="py-1.5 text-gray-600 dark:text-gray-400">{e.judge_models || '—'}</td>
+                <td className="py-1.5 text-right tabular-nums">{e.checked_requests.toLocaleString()}</td>
+                <td className="py-1.5 text-right tabular-nums">{e.unique_users.toLocaleString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
   )
 }
 

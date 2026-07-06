@@ -54,7 +54,8 @@ spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
 UAG_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_summary"
 UAG_BREAKDOWN_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_breakdown"
 UAG_MCP_TOOL_TABLE = f"{CATALOG}.{SCHEMA}.uag_mcp_tool_daily"
-print(f"Target tables: {UAG_TABLE}, {UAG_BREAKDOWN_TABLE}, {UAG_MCP_TOOL_TABLE} | retention {RETENTION_DAYS}d")
+UAG_GUARDRAIL_TABLE = f"{CATALOG}.{SCHEMA}.uag_guardrail_daily"
+print(f"Target tables: {UAG_TABLE}, {UAG_BREAKDOWN_TABLE}, {UAG_MCP_TOOL_TABLE}, {UAG_GUARDRAIL_TABLE} | retention {RETENTION_DAYS}d")
 
 # COMMAND ----------
 
@@ -95,6 +96,20 @@ UAG_MCP_TOOL_SCHEMA = StructType([
     StructField("request_count", LongType(), True),
     StructField("error_count", LongType(), True),
     StructField("unique_users", LongType(), True),
+    StructField("max_event_time", StringType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+# Guardrail COVERAGE/ACTIVITY, one row per guarded endpoint. NOTE: this is
+# coverage (which endpoints have guardrails running, how often) — NOT block/mask
+# outcomes. The verdict is not in system.ai_gateway.usage (GUARDRAIL rows are the
+# judge-model invocations, which return 200 = "check ran"); outcomes require the
+# enrollment-gated UAG feature-results surface.
+UAG_GUARDRAIL_SCHEMA = StructType([
+    StructField("endpoint_name", StringType(), False),
+    StructField("checked_requests", LongType(), True),
+    StructField("unique_users", LongType(), True),
+    StructField("judge_models", StringType(), True),
     StructField("max_event_time", StringType(), True),
     StructField("discovered_at", TimestampType(), False),
 ])
@@ -283,8 +298,51 @@ print(f"✅ Wrote {len(mcp_rows_raw)} rows to {UAG_MCP_TOOL_TABLE}")
 
 # COMMAND ----------
 
+# Guardrail COVERAGE per guarded endpoint. GUARDRAIL-source rows are the judge-model
+# invocations; the guarded endpoint is the PRIMARY request sharing the request_id, so
+# we join back to attribute checks to the endpoint being protected (its judge model(s)
+# come along). This is coverage/activity only — not block/mask outcomes.
+print("▸ Querying ai_gateway.usage guardrail coverage (invocation_metadata.source = GUARDRAIL) …")
+try:
+    gr_rows_raw = _execute_sql(f"""
+        WITH g AS (
+            SELECT request_id, MAX(destination_model) AS judge_model
+            FROM system.ai_gateway.usage
+            WHERE invocation_metadata.source = 'GUARDRAIL'
+              AND event_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
+            GROUP BY request_id
+        )
+        SELECT p.endpoint_name                                   AS endpoint_name,
+               COUNT(*)                                          AS checked_requests,
+               COUNT(DISTINCT p.requester)                       AS unique_users,
+               concat_ws(', ', array_sort(array_distinct(collect_list(g.judge_model)))) AS judge_models,
+               CAST(MAX(p.event_time) AS STRING)                 AS max_event_time
+        FROM system.ai_gateway.usage p
+             JOIN g ON p.request_id = g.request_id
+        WHERE p.invocation_metadata.source != 'GUARDRAIL'
+          AND p.event_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
+          AND p.endpoint_name IS NOT NULL
+        GROUP BY p.endpoint_name
+        ORDER BY checked_requests DESC
+    """)
+    print(f"  ✅ {len(gr_rows_raw)} guarded-endpoint rows")
+except Exception as exc:
+    gr_rows_raw = []
+    print(f"  ⚠️  guardrail coverage query unavailable: {exc}")
+
+if gr_rows_raw:
+    rows = [(r.get("endpoint_name", ""), to_int(r.get("checked_requests")), to_int(r.get("unique_users")),
+             r.get("judge_models"), r.get("max_event_time"), now)
+            for r in gr_rows_raw]
+    spark.createDataFrame(rows, UAG_GUARDRAIL_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_GUARDRAIL_TABLE)
+else:
+    spark.createDataFrame([], UAG_GUARDRAIL_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_GUARDRAIL_TABLE)
+print(f"✅ Wrote {len(gr_rows_raw)} rows to {UAG_GUARDRAIL_TABLE}")
+
+# COMMAND ----------
+
 result = {"status": "success", "uag_endpoint_rows": len(rows_raw), "uag_breakdown_rows": len(bd_rows),
-          "uag_mcp_tool_rows": len(mcp_rows_raw), "retention_days": RETENTION_DAYS,
-          "discovered_at": now.isoformat()}
+          "uag_mcp_tool_rows": len(mcp_rows_raw), "uag_guardrail_rows": len(gr_rows_raw),
+          "retention_days": RETENTION_DAYS, "discovered_at": now.isoformat()}
 print(json.dumps(result, indent=2))
 dbutils.notebook.exit(json.dumps(result))
