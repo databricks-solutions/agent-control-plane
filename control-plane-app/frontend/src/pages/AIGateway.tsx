@@ -59,17 +59,17 @@ import {
 
 /* ── tab definitions ─────────────────────────────────────────── */
 const baseTabs = [
-  { id: 'overview', label: 'Overview', icon: LayoutDashboard, beta: false },
-  { id: 'metrics', label: 'Metrics', icon: Cpu, beta: false },
-  { id: 'permissions', label: 'Permissions', icon: Shield, beta: false },
-  { id: 'rate-limits', label: 'Rate Limits & Guardrails', icon: ShieldAlert, beta: false },
-  { id: 'uag-v2', label: 'Unity AI Gateway v2', icon: Sparkles, beta: true },
+  { id: 'uag-v2', label: 'Unity AI Gateway v2', icon: Sparkles, beta: true, legacy: false },
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard, beta: false, legacy: true },
+  { id: 'metrics', label: 'Metrics', icon: Cpu, beta: false, legacy: true },
+  { id: 'permissions', label: 'Permissions', icon: Shield, beta: false, legacy: true },
+  { id: 'rate-limits', label: 'Rate Limits & Guardrails', icon: ShieldAlert, beta: false, legacy: true },
 ] as const
 
 type TabId = 'overview' | 'metrics' | 'permissions' | 'rate-limits' | 'uag-v2'
 
 export default function AIGatewayPage() {
-  const [activeTab, setActiveTab] = useState<TabId>('overview')
+  const [activeTab, setActiveTab] = useState<TabId>('uag-v2')
   const [days, setDays] = useState(7)
   const [searchQuery, setSearchQuery] = useState('')
 
@@ -146,7 +146,7 @@ export default function AIGatewayPage() {
 
       {/* Tab bar */}
       <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700 overflow-x-auto">
-        {tabs.map(({ id, label, icon: Icon, beta }) => (
+        {tabs.map(({ id, label, icon: Icon, beta, legacy }) => (
           <button
             key={id}
             onClick={() => setActiveTab(id)}
@@ -161,6 +161,11 @@ export default function AIGatewayPage() {
             {beta && (
               <span className="ml-0.5 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300">
                 Beta
+              </span>
+            )}
+            {legacy && (
+              <span className="ml-0.5 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400">
+                v1
               </span>
             )}
           </button>
