@@ -59,7 +59,7 @@ import {
 
 /* ── tab definitions ─────────────────────────────────────────── */
 const baseTabs = [
-  { id: 'uag-v2', label: 'Unity AI Gateway v2', icon: Sparkles, beta: true, legacy: false },
+  { id: 'uag-v2', label: 'Unity AI Gateway', icon: Sparkles, beta: true, legacy: false },
   { id: 'overview', label: 'Overview', icon: LayoutDashboard, beta: false, legacy: true },
   { id: 'metrics', label: 'Metrics', icon: Cpu, beta: false, legacy: true },
   { id: 'permissions', label: 'Permissions', icon: Shield, beta: false, legacy: true },
@@ -139,7 +139,7 @@ export default function AIGatewayPage() {
           <span className="font-semibold">Unity AI Gateway is where this is headed.</span>{' '}
           It's Databricks' native control plane for AI governance. We integrate its capabilities
           as soon as their APIs are available — start with the{' '}
-          <span className="font-medium">Unity AI Gateway v2 (Beta)</span> tab — and retire legacy
+          <span className="font-medium">Unity AI Gateway (Beta)</span> tab — and retire legacy
           views here as they're superseded. Expect this page to shift toward Unity AI Gateway over time.
         </p>
       </div>
@@ -164,7 +164,7 @@ export default function AIGatewayPage() {
               </span>
             )}
             {legacy && (
-              <span className="ml-0.5 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400">
+              <span className="ml-0.5 px-1.5 py-0.5 rounded text-[9px] font-semibold tracking-wide bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400">
                 v1
               </span>
             )}
@@ -194,7 +194,7 @@ export default function AIGatewayPage() {
   )
 }
 
-/* ── Unity AI Gateway v2 (Beta) Section ───────────────────────── */
+/* ── Unity AI Gateway (Beta) Section ───────────────────────── */
 
 function UagV2Section() {
   const { data: uag, isLoading } = useUagV2Usage()
@@ -218,11 +218,11 @@ function UagV2Section() {
       <Card>
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
-            Unity AI Gateway v2 (Beta) Usage
+            Unity AI Gateway (Beta) Usage
             <span className="group relative inline-flex">
               <Info className="w-3.5 h-3.5 text-gray-400 cursor-help" tabIndex={0} />
               <span role="tooltip" className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 hidden w-72 rounded-lg border border-gray-200 bg-white p-3 text-left text-[11px] font-normal leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">
-                Only requests routed through <strong>Unity AI Gateway v2</strong> endpoints (~20-min fresh) — a subset of all serving. Broader serving usage is under <strong>Metrics</strong>; dollar cost is under <strong>Governance</strong>. Cached-token % and TTFB come only from this source.
+                Only requests routed through <strong>Unity AI Gateway</strong> endpoints (~20-min fresh) — a subset of all serving. Broader serving usage is under <strong>Metrics</strong>; dollar cost is under <strong>Governance</strong>. Cached-token % and TTFB come only from this source.
               </span>
             </span>
             {uag?.as_of && (
@@ -237,7 +237,7 @@ function UagV2Section() {
             <div className="py-12 text-center text-gray-400 dark:text-gray-500">Loading…</div>
           ) : !hasData ? (
             <div className="py-12 text-center text-gray-400 dark:text-gray-500">
-              No Unity AI Gateway v2 usage yet — either no v2-routed traffic in this workspace, or the discovery workflow hasn't synced <code>system.ai_gateway.usage</code> yet.
+              No Unity AI Gateway usage yet — either no gateway-routed traffic in this workspace, or the discovery workflow hasn't synced <code>system.ai_gateway.usage</code> yet.
             </div>
           ) : (
             <>
@@ -411,7 +411,7 @@ function GuardrailCoverageCard() {
           </span>
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
-          Endpoints with Unity AI Gateway v2 guardrails running + the judge model evaluating them.
+          Endpoints with Unity AI Gateway guardrails running + the judge model evaluating them.
           Coverage &amp; activity only — block/mask outcomes require UAG feature-results (enrollment-gated).
           {data?.as_of && <> · as of {formatAsOf(data.as_of)}</>}
         </p>
@@ -475,7 +475,7 @@ function UagMcpToolsCard() {
           </span>
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
-          MCP tool invocations governed through Unity AI Gateway v2
+          MCP tool invocations governed through Unity AI Gateway
           {mcp?.as_of && <> · as of {formatAsOf(mcp.as_of)}</>}
         </p>
       </CardHeader>
