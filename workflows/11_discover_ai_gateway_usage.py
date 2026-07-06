@@ -203,11 +203,12 @@ print(f"✅ Wrote {len(rows_raw)} rows to {UAG_TABLE}")
 
 # Breakdowns: agent-vs-human (requester_type), model (destination_model), api_type,
 # service_type (model vs MCP vs provider), and route_action (routing outcomes).
-print("▸ Querying ai_gateway.usage breakdowns (requester_type / destination_model / api_type / service_type / route_action) …")
+print("▸ Querying ai_gateway.usage breakdowns (requester_type / destination_model / api_type / source / service_type / route_action) …")
 try:
     bd_rows = _execute_sql(f"""
         WITH base AS (
-            SELECT requester_type, destination_model, api_type, service_type, input_tokens, output_tokens,
+            SELECT requester_type, destination_model, api_type, service_type,
+                   invocation_metadata.source AS source, input_tokens, output_tokens,
                    COALESCE(token_details.cache_read_input_tokens, 0)
                  + COALESCE(token_details.cache_creation_input_tokens, 0) AS cached
             FROM system.ai_gateway.usage
@@ -222,9 +223,20 @@ try:
                COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
         FROM base GROUP BY destination_model
         UNION ALL
-        SELECT 'api_type', COALESCE(api_type, 'unknown'),
+        -- api_type is only set for external-client LLM traffic; ai_query()/AI Functions
+        -- (source=AI_QUERY) carry no api_type, so label them rather than dump into 'unknown'.
+        SELECT 'api_type',
+               CASE WHEN COALESCE(api_type,'') != '' THEN api_type
+                    WHEN source = 'AI_QUERY' THEN 'ai_query (SQL)'
+                    ELSE 'unknown' END,
                COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
-        FROM base GROUP BY api_type
+        FROM base GROUP BY 2
+        UNION ALL
+        -- source: where the traffic originates (AI_QUERY / EXTERNAL_CLIENT / GUARDRAIL) —
+        -- explains the api_type mix (most volume is ai_query, which has no api_type).
+        SELECT 'source', COALESCE(source, 'unknown'),
+               COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
+        FROM base GROUP BY source
         UNION ALL
         -- service_type: exclude legacy untyped rows so the model/MCP/provider split is meaningful
         SELECT 'service_type', service_type,

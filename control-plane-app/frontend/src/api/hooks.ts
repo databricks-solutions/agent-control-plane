@@ -603,6 +603,7 @@ export interface UagV2Usage {
     requester_type?: UagBreakdownRow[]
     destination_model?: UagBreakdownRow[]
     api_type?: UagBreakdownRow[]
+    source?: UagBreakdownRow[]
     service_type?: UagBreakdownRow[]
     route_action?: UagBreakdownRow[]
   }

@@ -292,8 +292,19 @@ function UagV2Section() {
             limit={8}
           />
           <UagBreakdownCard
+            title="Traffic Source"
+            subtitle="Where requests originate"
+            rows={uag.breakdowns.source}
+            labelMap={{
+              AI_QUERY: 'ai_query (SQL)',
+              EXTERNAL_CLIENT: 'External client',
+              GUARDRAIL: 'Guardrail check',
+              unknown: 'Unknown',
+            }}
+          />
+          <UagBreakdownCard
             title="By API Type"
-            subtitle="Requests by API surface"
+            subtitle="Client API surface (ai_query carries none)"
             rows={uag.breakdowns.api_type}
           />
           <UagBreakdownCard
@@ -328,9 +339,22 @@ function UagV2Section() {
  * feature-results surface). Hidden when no endpoint has guardrails active. */
 function GuardrailCoverageCard() {
   const { data, isLoading } = useGuardrailCoverage()
+  const sort = useSort('checked_requests', 'desc')
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
   const endpoints = data?.endpoints || []
+  const sorted = useMemo(() => sortRows(endpoints, sort.sort, (e: any, k) => {
+    if (k === 'endpoint_name') return (e.endpoint_name || '').toLowerCase()
+    if (k === 'judge_models') return (e.judge_models || '').toLowerCase()
+    if (k === 'checked_requests') return Number(e.checked_requests || 0)
+    if (k === 'unique_users') return Number(e.unique_users || 0)
+    return 0
+  }), [endpoints, sort.sort])
   if (isLoading || endpoints.length === 0) return null
   const guarded = data!.totals.guarded_endpoints ?? endpoints.length
+  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize))
+  const safePage = Math.min(page, totalPages - 1)
+  const paged = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize)
   return (
     <Card>
       <CardHeader>
@@ -347,26 +371,29 @@ function GuardrailCoverageCard() {
         </p>
       </CardHeader>
       <CardContent>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
-              <th className="py-2 font-medium">Guarded Endpoint</th>
-              <th className="py-2 font-medium">Judge Model(s)</th>
-              <th className="py-2 font-medium text-right">Checked Requests</th>
-              <th className="py-2 font-medium text-right">Users</th>
-            </tr>
-          </thead>
-          <tbody>
-            {endpoints.slice(0, 15).map((e, i) => (
-              <tr key={`${e.endpoint_name}-${i}`} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
-                <td className="py-1.5 font-mono text-xs truncate max-w-[260px]" title={e.endpoint_name}>{e.endpoint_name}</td>
-                <td className="py-1.5 text-gray-600 dark:text-gray-400">{e.judge_models || '—'}</td>
-                <td className="py-1.5 text-right tabular-nums">{e.checked_requests.toLocaleString()}</td>
-                <td className="py-1.5 text-right tabular-nums">{e.unique_users.toLocaleString()}</td>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
+                <SortableHeader label="Guarded Endpoint" sortKey="endpoint_name" current={sort.sort} onToggle={sort.toggle} />
+                <SortableHeader label="Judge Model(s)" sortKey="judge_models" current={sort.sort} onToggle={sort.toggle} />
+                <SortableHeader label="Checked Requests" sortKey="checked_requests" current={sort.sort} onToggle={sort.toggle} align="right" />
+                <SortableHeader label="Users" sortKey="unique_users" current={sort.sort} onToggle={sort.toggle} align="right" />
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {paged.map((e: any, i: number) => (
+                <tr key={`${e.endpoint_name}-${i}`} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
+                  <td className="py-1.5 font-mono text-xs truncate max-w-[260px]" title={e.endpoint_name}>{e.endpoint_name}</td>
+                  <td className="py-1.5 text-gray-600 dark:text-gray-400">{e.judge_models || '—'}</td>
+                  <td className="py-1.5 text-right tabular-nums">{e.checked_requests.toLocaleString()}</td>
+                  <td className="py-1.5 text-right tabular-nums">{e.unique_users.toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <TablePagination page={safePage} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
       </CardContent>
     </Card>
   )
@@ -375,8 +402,23 @@ function GuardrailCoverageCard() {
 /* Top MCP tools — service_type=MCP_SERVICE rows from system.ai_gateway.usage. */
 function UagMcpToolsCard() {
   const { data: mcp, isLoading } = useUagMcpTools()
+  const sort = useSort('request_count', 'desc')
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
   const tools = mcp?.tools || []
+  const sorted = useMemo(() => sortRows(tools, sort.sort, (t: any, k) => {
+    if (k === 'service_name') return (t.service_name || '').toLowerCase()
+    if (k === 'tool_name') return (t.tool_name || '').toLowerCase()
+    if (k === 'server_type') return (t.server_type || '').toLowerCase()
+    if (k === 'request_count') return Number(t.request_count || 0)
+    if (k === 'error_count') return Number(t.error_count || 0)
+    if (k === 'unique_users') return Number(t.unique_users || 0)
+    return 0
+  }), [tools, sort.sort])
   if (isLoading || tools.length === 0) return null
+  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize))
+  const safePage = Math.min(page, totalPages - 1)
+  const paged = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize)
   return (
     <Card>
       <CardHeader>
@@ -392,30 +434,33 @@ function UagMcpToolsCard() {
         </p>
       </CardHeader>
       <CardContent>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
-              <th className="py-2 font-medium">MCP Service</th>
-              <th className="py-2 font-medium">Tool</th>
-              <th className="py-2 font-medium">Type</th>
-              <th className="py-2 font-medium text-right">Requests</th>
-              <th className="py-2 font-medium text-right">Errors</th>
-              <th className="py-2 font-medium text-right">Users</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tools.map((t, i) => (
-              <tr key={`${t.service_name}-${t.tool_name}-${i}`} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
-                <td className="py-1.5 font-mono text-xs truncate max-w-[240px]" title={t.service_name}>{t.service_name}</td>
-                <td className="py-1.5">{t.tool_name || <span className="text-gray-400">(server)</span>}</td>
-                <td className="py-1.5 text-gray-500 dark:text-gray-400">{t.server_type || '—'}</td>
-                <td className="py-1.5 text-right tabular-nums">{t.request_count.toLocaleString()}</td>
-                <td className="py-1.5 text-right tabular-nums">{t.error_count.toLocaleString()}</td>
-                <td className="py-1.5 text-right tabular-nums">{t.unique_users.toLocaleString()}</td>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
+                <SortableHeader label="MCP Service" sortKey="service_name" current={sort.sort} onToggle={sort.toggle} />
+                <SortableHeader label="Tool" sortKey="tool_name" current={sort.sort} onToggle={sort.toggle} />
+                <SortableHeader label="Type" sortKey="server_type" current={sort.sort} onToggle={sort.toggle} />
+                <SortableHeader label="Requests" sortKey="request_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+                <SortableHeader label="Errors" sortKey="error_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+                <SortableHeader label="Users" sortKey="unique_users" current={sort.sort} onToggle={sort.toggle} align="right" />
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {paged.map((t: any, i: number) => (
+                <tr key={`${t.service_name}-${t.tool_name}-${i}`} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
+                  <td className="py-1.5 font-mono text-xs truncate max-w-[240px]" title={t.service_name}>{t.service_name}</td>
+                  <td className="py-1.5">{t.tool_name || <span className="text-gray-400">(server)</span>}</td>
+                  <td className="py-1.5 text-gray-500 dark:text-gray-400">{t.server_type || '—'}</td>
+                  <td className="py-1.5 text-right tabular-nums">{t.request_count.toLocaleString()}</td>
+                  <td className="py-1.5 text-right tabular-nums">{t.error_count.toLocaleString()}</td>
+                  <td className="py-1.5 text-right tabular-nums">{t.unique_users.toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <TablePagination page={safePage} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
       </CardContent>
     </Card>
   )
