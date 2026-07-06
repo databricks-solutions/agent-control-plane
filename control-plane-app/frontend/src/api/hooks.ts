@@ -603,6 +603,7 @@ export interface UagV2Usage {
     requester_type?: UagBreakdownRow[]
     destination_model?: UagBreakdownRow[]
     api_type?: UagBreakdownRow[]
+    source?: UagBreakdownRow[]
     service_type?: UagBreakdownRow[]
     route_action?: UagBreakdownRow[]
   }
@@ -653,6 +654,29 @@ export function useUagMcpTools() {
     queryFn: async () => {
       const { data } = await apiClient.get('/gateway/uag-mcp-tools')
       return data as UagMcpTools
+    },
+    staleTime: GW_STALE,
+  })
+}
+
+export interface GuardrailCoverage {
+  as_of: string | null
+  totals: Partial<{ guarded_endpoints: number; checked_requests: number }>
+  endpoints: Array<{
+    endpoint_name: string
+    checked_requests: number
+    unique_users: number
+    judge_models: string
+  }>
+}
+
+/** Guardrail coverage/activity per endpoint from Unity AI Gateway v2 (not outcomes). */
+export function useGuardrailCoverage() {
+  return useQuery({
+    queryKey: ['gateway', 'guardrail-coverage'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/guardrail-coverage')
+      return data as GuardrailCoverage
     },
     staleTime: GW_STALE,
   })

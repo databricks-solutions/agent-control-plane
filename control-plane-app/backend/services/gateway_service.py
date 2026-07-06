@@ -734,6 +734,60 @@ def get_uag_mcp_tools() -> Dict[str, Any]:
     }
 
 
+def get_guardrail_coverage() -> Dict[str, Any]:
+    """Guardrail COVERAGE / activity from `uag_guardrail_daily` — which endpoints
+    have Unity AI Gateway v2 guardrails running, how often, and by which judge
+    model(s).
+
+    IMPORTANT: this is coverage/activity only, NOT block/mask outcomes. The
+    guardrail verdict is not present in system.ai_gateway.usage (guardrail rows
+    are the judge-model invocations, which succeed with 200); outcomes require
+    the enrollment-gated UAG feature-results surface. Degrades to empty when the
+    table is unsynced or no endpoint has guardrails active.
+    """
+    from backend.database import execute_query, execute_one
+    empty: Dict[str, Any] = {"as_of": None, "totals": {}, "endpoints": []}
+    # Totals from an unbounded aggregate (the row list below is capped for display).
+    # No coverage ratio: a comparable "total guardable endpoints" denominator isn't
+    # derivable here (uag_usage_summary counts MCP + judge endpoints too), so we
+    # report the guarded count rather than a misleading "X of Y".
+    try:
+        agg = execute_one(
+            """SELECT COUNT(*) AS guarded_endpoints,
+                      COALESCE(SUM(checked_requests), 0) AS checked_requests,
+                      MAX(max_event_time) AS as_of
+               FROM uag_guardrail_daily"""
+        )
+    except Exception as exc:
+        logger.warning("uag_guardrail_daily not available: %s", exc)
+        return empty
+    agg = dict(agg) if agg else {}
+    if _row_int(agg, "guarded_endpoints") == 0:
+        return empty
+
+    rows = execute_query(
+        """SELECT endpoint_name, checked_requests, unique_users, judge_models
+           FROM uag_guardrail_daily
+           ORDER BY checked_requests DESC LIMIT 200"""
+    )
+    return {
+        "as_of": agg.get("as_of"),
+        "totals": {
+            "guarded_endpoints": _row_int(agg, "guarded_endpoints"),
+            "checked_requests": _row_int(agg, "checked_requests"),
+        },
+        "endpoints": [
+            {
+                "endpoint_name": r.get("endpoint_name", ""),
+                "checked_requests": _row_int(r, "checked_requests"),
+                "unique_users": _row_int(r, "unique_users"),
+                "judge_models": r.get("judge_models") or "",
+            }
+            for r in rows
+        ],
+    }
+
+
 def get_usage_summary(days: int = 7) -> List[Dict[str, Any]]:
     """Per-endpoint usage summary from Lakebase cache."""
     from backend.database import execute_query
