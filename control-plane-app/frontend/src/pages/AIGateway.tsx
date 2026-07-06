@@ -12,6 +12,7 @@ import {
   useGatewayUsageTimeseries,
   useGatewayUsageByUser,
   useUagV2Usage,
+  useUagV2Timeseries,
   useUagMcpTools,
   useGuardrailCoverage,
   type UagBreakdownRow,
@@ -250,8 +251,10 @@ function UagV2Section() {
                       <SortableHeader label="Endpoint" sortKey="endpoint_name" current={uagSort.sort} onToggle={uagSort.toggle} />
                       <SortableHeader label="Requests" sortKey="request_count" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
                       <SortableHeader label="Cached Tokens" sortKey="cached" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
-                      <SortableHeader label="p50 Latency" sortKey="p50_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
-                      <SortableHeader label="p95 Latency" sortKey="p95_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                      <SortableHeader label="p50" sortKey="p50_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                      <SortableHeader label="p90" sortKey="p90_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                      <SortableHeader label="p95" sortKey="p95_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                      <SortableHeader label="p99" sortKey="p99_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
                       <SortableHeader label="p95 TTFB" sortKey="p95_ttfb_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
                       <SortableHeader label="Users" sortKey="unique_users" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
                     </tr>
@@ -263,7 +266,9 @@ function UagV2Section() {
                         <td className="py-2 text-right">{Number(e.request_count).toLocaleString()}</td>
                         <td className="py-2 text-right">{Number(e.cache_read_tokens + e.cache_creation_tokens).toLocaleString()}</td>
                         <td className="py-2 text-right">{Number(e.p50_latency_ms).toLocaleString()}ms</td>
+                        <td className="py-2 text-right">{Number(e.p90_latency_ms).toLocaleString()}ms</td>
                         <td className="py-2 text-right">{Number(e.p95_latency_ms).toLocaleString()}ms</td>
+                        <td className="py-2 text-right">{Number(e.p99_latency_ms).toLocaleString()}ms</td>
                         <td className="py-2 text-right">{Number(e.p95_ttfb_ms).toLocaleString()}ms</td>
                         <td className="py-2 text-right">{Number(e.unique_users).toLocaleString()}</td>
                       </tr>
@@ -324,11 +329,45 @@ function UagV2Section() {
             rows={uag.breakdowns.route_action}
             labelMap={{ INITIAL_ATTEMPT: 'Initial', FALLBACK: 'Fallback', unknown: 'Unknown' }}
           />
+          <UagBreakdownCard
+            title="By Status Code"
+            subtitle="Requests by HTTP status"
+            rows={uag.breakdowns.status_code}
+          />
+          <UagBreakdownCard
+            title="By Workspace"
+            subtitle="Requests by workspace ID"
+            rows={uag.breakdowns.workspace_id}
+            limit={8}
+          />
         </div>
       )}
 
+      <UagV2TrendCard />
       <UagMcpToolsCard />
       <GuardrailCoverageCard />
+    </div>
+  )
+}
+
+/* Daily UAG v2 usage trend (uag_usage_timeseries_daily) — requests + tokens over
+ * time. Hidden when there's no v2 traffic. */
+function UagV2TrendCard() {
+  const { data, isLoading } = useUagV2Timeseries()
+  const series = data?.series || []
+  if (isLoading || series.length === 0) return null
+  const requestData = series.map((s) => ({ timestamp: s.usage_date, value: Number(s.request_count) }))
+  const tokenData = series.map((s) => ({ timestamp: s.usage_date, value: Number(s.input_tokens) + Number(s.output_tokens) }))
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <Card>
+        <CardHeader><CardTitle className="text-base">Requests / day</CardTitle></CardHeader>
+        <CardContent><LineChart data={requestData} name="Requests" color={DB_CHART.primary} /></CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle className="text-base">Tokens / day</CardTitle></CardHeader>
+        <CardContent><LineChart data={tokenData} name="Total Tokens" color={DB_CHART.success} /></CardContent>
+      </Card>
     </div>
   )
 }
