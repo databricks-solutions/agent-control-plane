@@ -356,8 +356,10 @@ function UagV2TrendCard() {
   const { data, isLoading } = useUagV2Timeseries()
   const series = data?.series || []
   if (isLoading || series.length === 0) return null
-  const requestData = series.map((s) => ({ timestamp: s.usage_date, value: Number(s.request_count) }))
-  const tokenData = series.map((s) => ({ timestamp: s.usage_date, value: Number(s.input_tokens) + Number(s.output_tokens) }))
+  // append a local-midnight time so the date-only string parses in local tz
+  // (not UTC midnight → prior-day label west of UTC)
+  const requestData = series.map((s) => ({ timestamp: `${s.usage_date}T00:00:00`, value: Number(s.request_count) }))
+  const tokenData = series.map((s) => ({ timestamp: `${s.usage_date}T00:00:00`, value: Number(s.input_tokens) + Number(s.output_tokens) }))
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <Card>

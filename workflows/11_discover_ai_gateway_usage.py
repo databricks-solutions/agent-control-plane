@@ -109,7 +109,6 @@ UAG_TIMESERIES_SCHEMA = StructType([
     StructField("request_count", LongType(), True),
     StructField("input_tokens", LongType(), True),
     StructField("output_tokens", LongType(), True),
-    StructField("cached_tokens", LongType(), True),
     StructField("discovered_at", TimestampType(), False),
 ])
 
@@ -259,7 +258,7 @@ try:
                COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
         FROM base GROUP BY status_code
         UNION ALL
-        SELECT 'workspace_id', COALESCE(NULLIF(workspace_id, ''), 'unknown'),
+        SELECT 'workspace_id', COALESCE(NULLIF(CAST(workspace_id AS STRING), ''), 'unknown'),
                COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
         FROM base GROUP BY workspace_id
         UNION ALL
@@ -305,11 +304,10 @@ try:
         SELECT CAST(event_time AS DATE)                                 AS usage_date,
                COUNT(*)                                                 AS request_count,
                COALESCE(SUM(input_tokens), 0)                           AS input_tokens,
-               COALESCE(SUM(output_tokens), 0)                          AS output_tokens,
-               COALESCE(SUM(token_details.cache_read_input_tokens), 0)
-             + COALESCE(SUM(token_details.cache_creation_input_tokens), 0) AS cached_tokens
+               COALESCE(SUM(output_tokens), 0)                          AS output_tokens
         FROM system.ai_gateway.usage
         WHERE event_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
+          AND endpoint_name IS NOT NULL   -- match the summary/KPI population so the trend reconciles
         GROUP BY CAST(event_time AS DATE)
         ORDER BY usage_date
     """)
@@ -320,7 +318,7 @@ except Exception as exc:
 
 if ts_rows_raw:
     rows = [(str(r.get("usage_date")), to_int(r.get("request_count")), to_int(r.get("input_tokens")),
-             to_int(r.get("output_tokens")), to_int(r.get("cached_tokens")), now)
+             to_int(r.get("output_tokens")), now)
             for r in ts_rows_raw]
     spark.createDataFrame(rows, UAG_TIMESERIES_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_TIMESERIES_TABLE)
 else:

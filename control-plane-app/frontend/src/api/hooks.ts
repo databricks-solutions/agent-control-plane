@@ -619,7 +619,6 @@ export interface UagV2Timeseries {
     request_count: number
     input_tokens: number
     output_tokens: number
-    cached_tokens: number
   }>
 }
 

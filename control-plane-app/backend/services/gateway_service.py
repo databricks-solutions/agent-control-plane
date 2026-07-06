@@ -661,6 +661,8 @@ def get_uag_v2_usage() -> Dict[str, Any]:
             "cache_read_pct": cache_pct,
             "endpoints": len(rows),
         },
+        # NOTE: p50/p90/p95/p99 are PER-ENDPOINT percentiles — they are non-additive,
+        # so do not sum/average them into an account-level KPI (that would be wrong).
         "endpoints": [
             {
                 "endpoint_name": r.get("endpoint_name", ""),
@@ -796,7 +798,7 @@ def get_uag_v2_timeseries() -> Dict[str, Any]:
     from backend.database import execute_query
     try:
         rows = execute_query(
-            """SELECT usage_date, request_count, input_tokens, output_tokens, cached_tokens
+            """SELECT usage_date, request_count, input_tokens, output_tokens
                FROM uag_usage_timeseries_daily ORDER BY usage_date"""
         )
     except Exception as exc:
@@ -809,7 +811,6 @@ def get_uag_v2_timeseries() -> Dict[str, Any]:
                 "request_count": _row_int(r, "request_count"),
                 "input_tokens": _row_int(r, "input_tokens"),
                 "output_tokens": _row_int(r, "output_tokens"),
-                "cached_tokens": _row_int(r, "cached_tokens"),
             }
             for r in rows
         ]

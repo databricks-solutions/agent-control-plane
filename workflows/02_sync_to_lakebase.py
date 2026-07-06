@@ -1775,7 +1775,6 @@ with uag_conn.cursor() as cur:
             request_count  BIGINT DEFAULT 0,
             input_tokens   BIGINT DEFAULT 0,
             output_tokens  BIGINT DEFAULT 0,
-            cached_tokens  BIGINT DEFAULT 0,
             last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             PRIMARY KEY (usage_date)
         )""")
@@ -1788,12 +1787,12 @@ try:
         uag_conn.commit()
     if ts_rows:
         values = [(str(r.usage_date), int(r.request_count or 0), int(r.input_tokens or 0),
-                   int(r.output_tokens or 0), int(r.cached_tokens or 0), now) for r in ts_rows]
+                   int(r.output_tokens or 0), now) for r in ts_rows]
         uag_ts_count = len(values)
         with uag_conn.cursor() as cur:
             execute_values(cur,
                 """INSERT INTO uag_usage_timeseries_daily
-                   (usage_date, request_count, input_tokens, output_tokens, cached_tokens, last_synced)
+                   (usage_date, request_count, input_tokens, output_tokens, last_synced)
                    VALUES %s""",
                 values, page_size=500)
             uag_conn.commit()
