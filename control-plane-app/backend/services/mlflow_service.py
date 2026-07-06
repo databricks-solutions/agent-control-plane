@@ -222,6 +222,64 @@ def _execute_system_sql(sql: str) -> List[Dict[str, Any]]:
 
 # ── System table queries (cross-workspace) ─────────────────────
 
+def get_agent_tool_usage() -> Dict[str, Any]:
+    """TOOL/RETRIEVER span usage rolled up per experiment (from `agent_tool_usage`,
+    produced by 07_discover_uc_otel_traces). Answers what UC functions and vector
+    indexes an agent's traces touch.
+
+    Grain is EXPERIMENT — agent traces live under MLflow experiments and the app
+    has no experiment→discovered-agent mapping yet. Degrades to empty when the
+    table is unsynced or no traced agents exist.
+    """
+    empty: Dict[str, Any] = {"totals": {}, "rows": []}
+    try:
+        rows = execute_query(
+            """SELECT experiment_id, tool_name, span_type, call_count, trace_count, last_seen
+               FROM agent_tool_usage ORDER BY call_count DESC LIMIT 1000"""
+        )
+    except Exception as exc:
+        logger.warning("agent_tool_usage not available: %s", exc)
+        return empty
+    if not rows:
+        return empty
+
+    names: Dict[str, str] = {}
+    try:
+        for e in execute_query("SELECT experiment_id, name FROM observability_experiments WHERE name IS NOT NULL"):
+            names.setdefault(e.get("experiment_id"), e.get("name"))
+    except Exception:
+        pass
+
+    def _i(r, k):
+        return int(r.get(k) or 0)
+
+    def _asset(name: str, span_type: str) -> str:
+        # TOOL span names come through as catalog__schema__function; render as a UC FQN.
+        return (name or "").replace("__", ".") if span_type == "TOOL" else (name or "")
+
+    out = [
+        {
+            "experiment_id": r.get("experiment_id") or "",
+            "experiment_name": names.get(r.get("experiment_id")) or "",
+            "asset": _asset(r.get("tool_name"), r.get("span_type") or ""),
+            "span_type": r.get("span_type") or "",
+            "call_count": _i(r, "call_count"),
+            "trace_count": _i(r, "trace_count"),
+            "last_seen": r.get("last_seen") or "",
+        }
+        for r in rows
+    ]
+    return {
+        "totals": {
+            "experiments": len({r["experiment_id"] for r in out if r["experiment_id"]}),
+            "tools": sum(1 for r in out if r["span_type"] == "TOOL"),
+            "retrievers": sum(1 for r in out if r["span_type"] == "RETRIEVER"),
+            "calls": sum(r["call_count"] for r in out),
+        },
+        "rows": out,
+    }
+
+
 def search_experiments_system_tables(max_results: int = 5000) -> List[Dict[str, Any]]:
     """Query system.mlflow.experiments_latest for cross-workspace experiments.
 

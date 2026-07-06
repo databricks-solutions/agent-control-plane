@@ -29,6 +29,13 @@ def _obo_token(request: Request) -> Optional[str]:
 
 # ── Experiments ─────────────────────────────────────────────────
 
+@router.get("/agent-tool-usage")
+async def agent_tool_usage():
+    """TOOL/RETRIEVER span usage per experiment — which UC functions and vector
+    indexes an agent's traces touch."""
+    return mlflow_service.get_agent_tool_usage()
+
+
 @router.get("/experiments")
 async def list_experiments(
     request: Request,

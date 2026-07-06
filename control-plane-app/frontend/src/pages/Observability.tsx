@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useQueryClient, useIsFetching } from '@tanstack/react-query'
 import {
   useAppConfig,
@@ -14,6 +14,7 @@ import {
   useGatewayLogSources,
   useGatewayLogDetail,
   useGatewayLogTimeseries,
+  useAgentToolUsage,
 } from '@/api/hooks'
 import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
 import { RefreshButton } from '@/components/RefreshButton'
@@ -21,6 +22,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { KpiCard } from '@/components/KpiCard'
 import { TablePagination } from '@/components/TablePagination'
+import { SortableHeader, useSort, sortRows } from '@/components/SortableTable'
 import { format } from 'date-fns'
 import {
   LineChart as RcLineChart,
@@ -161,6 +163,7 @@ const tabs = [
   { id: 'gateway', label: 'Gateway Requests', icon: Activity },
   { id: 'experiments', label: 'Experiments', icon: FlaskConical },
   { id: 'runs', label: 'Evaluation Runs', icon: Activity },
+  { id: 'tool-usage', label: 'Tool & Asset Usage', icon: Wrench },
   { id: 'models', label: 'Model Registry', icon: Database },
 ] as const
 
@@ -260,7 +263,86 @@ export default function ObservabilityPage() {
       {activeTab === 'gateway' && <GatewayRequestsPanel />}
       {activeTab === 'experiments' && <ExperimentsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
       {activeTab === 'runs' && <RunsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
+      {activeTab === 'tool-usage' && <ToolUsagePanel />}
       {activeTab === 'models' && <ModelsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
+    </div>
+  )
+}
+
+/* ── Tool & Asset Usage Panel ────────────────────────────────────
+   TOOL / RETRIEVER spans rolled up per experiment (from agent_tool_usage):
+   which UC functions and vector indexes an agent's traces touch. Grain is
+   experiment — the app has no experiment→discovered-agent mapping yet. */
+function ToolUsagePanel() {
+  const { data, isLoading } = useAgentToolUsage()
+  const sort = useSort('call_count', 'desc')
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(15)
+  const rows = data?.rows || []
+  const sorted = useMemo(() => sortRows(rows, sort.sort, (r: any, k) => {
+    if (k === 'call_count' || k === 'trace_count') return Number(r[k] || 0)
+    return (r[k] || '').toString().toLowerCase()
+  }), [rows, sort.sort])
+  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize))
+  const safePage = Math.min(page, totalPages - 1)
+  const paged = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize)
+
+  if (isLoading) return <div className="flex items-center justify-center h-32 text-gray-400 dark:text-gray-500">Loading…</div>
+  if (rows.length === 0) {
+    return (
+      <Card><CardContent className="py-12 text-center text-gray-400 dark:text-gray-500">
+        No tool/asset usage yet — agents need MLflow tracing enabled (TOOL/RETRIEVER spans) and the discovery workflow must have synced their traces.
+      </CardContent></Card>
+    )
+  }
+  const t = data!.totals
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <KpiCard title="Experiments" value={t.experiments ?? 0} format="number" />
+        <KpiCard title="Tools (UC functions)" value={t.tools ?? 0} format="number" />
+        <KpiCard title="Retrieved Assets" value={t.retrievers ?? 0} format="number" />
+        <KpiCard title="Total Calls" value={t.calls ?? 0} format="number" />
+      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Tool & Asset Usage</CardTitle>
+          <p className="text-[11px] text-gray-400 dark:text-gray-500">
+            UC functions (TOOL) and vector indexes (RETRIEVER) an agent's traces touch, per experiment.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
+                  <SortableHeader label="Asset" sortKey="asset" current={sort.sort} onToggle={sort.toggle} />
+                  <SortableHeader label="Type" sortKey="span_type" current={sort.sort} onToggle={sort.toggle} />
+                  <SortableHeader label="Experiment" sortKey="experiment_name" current={sort.sort} onToggle={sort.toggle} />
+                  <SortableHeader label="Calls" sortKey="call_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+                  <SortableHeader label="Traces" sortKey="trace_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+                </tr>
+              </thead>
+              <tbody>
+                {paged.map((r: any, i: number) => (
+                  <tr key={`${r.experiment_id}-${r.asset}-${r.span_type}-${i}`} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
+                    <td className="py-1.5 font-mono text-xs truncate max-w-[320px]" title={r.asset}>{r.asset}</td>
+                    <td className="py-1.5">
+                      <Badge variant={r.span_type === 'RETRIEVER' ? 'info' : 'default'} className="text-xs">
+                        {r.span_type === 'RETRIEVER' ? 'Retriever' : 'Tool'}
+                      </Badge>
+                    </td>
+                    <td className="py-1.5 text-gray-600 dark:text-gray-400 truncate max-w-[220px]" title={r.experiment_name || r.experiment_id}>{r.experiment_name || r.experiment_id || '—'}</td>
+                    <td className="py-1.5 text-right tabular-nums">{r.call_count.toLocaleString()}</td>
+                    <td className="py-1.5 text-right tabular-nums">{r.trace_count.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <TablePagination page={safePage} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+        </CardContent>
+      </Card>
     </div>
   )
 }
