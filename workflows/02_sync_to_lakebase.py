@@ -1584,7 +1584,9 @@ with uag_conn.cursor() as cur:
             cache_read_tokens     BIGINT DEFAULT 0,
             cache_creation_tokens BIGINT DEFAULT 0,
             p50_latency_ms        BIGINT DEFAULT 0,
+            p90_latency_ms        BIGINT DEFAULT 0,
             p95_latency_ms        BIGINT DEFAULT 0,
+            p99_latency_ms        BIGINT DEFAULT 0,
             p95_ttfb_ms           BIGINT DEFAULT 0,
             error_count           BIGINT DEFAULT 0,
             unique_users          BIGINT DEFAULT 0,
@@ -1592,6 +1594,9 @@ with uag_conn.cursor() as cur:
             last_synced           TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             PRIMARY KEY (endpoint_name)
         )""")
+    # ADD COLUMN for tables that pre-existed without the p90/p99 percentiles.
+    cur.execute("ALTER TABLE uag_usage_summary ADD COLUMN IF NOT EXISTS p90_latency_ms BIGINT DEFAULT 0")
+    cur.execute("ALTER TABLE uag_usage_summary ADD COLUMN IF NOT EXISTS p99_latency_ms BIGINT DEFAULT 0")
     uag_conn.commit()
 
 print(f"▸ Syncing {UAG_TABLE} → uag_usage_summary ...")
@@ -1603,7 +1608,8 @@ try:
     if uag_rows:
         values = [(r.endpoint_name, int(r.request_count or 0), int(r.input_tokens or 0),
                    int(r.output_tokens or 0), int(r.cache_read_tokens or 0), int(r.cache_creation_tokens or 0),
-                   int(r.p50_latency_ms or 0), int(r.p95_latency_ms or 0), int(r.p95_ttfb_ms or 0),
+                   int(r.p50_latency_ms or 0), int(r.p90_latency_ms or 0), int(r.p95_latency_ms or 0),
+                   int(r.p99_latency_ms or 0), int(r.p95_ttfb_ms or 0),
                    int(r.error_count or 0), int(r.unique_users or 0), r.max_event_time, now)
                   for r in uag_rows]
         uag_count = len(values)
@@ -1611,8 +1617,8 @@ try:
             execute_values(cur,
                 """INSERT INTO uag_usage_summary
                    (endpoint_name, request_count, input_tokens, output_tokens, cache_read_tokens,
-                    cache_creation_tokens, p50_latency_ms, p95_latency_ms, p95_ttfb_ms,
-                    error_count, unique_users, max_event_time, last_synced)
+                    cache_creation_tokens, p50_latency_ms, p90_latency_ms, p95_latency_ms, p99_latency_ms,
+                    p95_ttfb_ms, error_count, unique_users, max_event_time, last_synced)
                    VALUES %s
                    ON CONFLICT (endpoint_name) DO UPDATE SET
                        request_count = EXCLUDED.request_count,
@@ -1621,7 +1627,9 @@ try:
                        cache_read_tokens = EXCLUDED.cache_read_tokens,
                        cache_creation_tokens = EXCLUDED.cache_creation_tokens,
                        p50_latency_ms = EXCLUDED.p50_latency_ms,
+                       p90_latency_ms = EXCLUDED.p90_latency_ms,
                        p95_latency_ms = EXCLUDED.p95_latency_ms,
+                       p99_latency_ms = EXCLUDED.p99_latency_ms,
                        p95_ttfb_ms = EXCLUDED.p95_ttfb_ms,
                        error_count = EXCLUDED.error_count,
                        unique_users = EXCLUDED.unique_users,
@@ -1756,6 +1764,41 @@ try:
     print(f"  ✅ {uag_gr_count} UAG guardrail rows synced")
 except Exception as exc:
     print(f"  ⚠️  uag_guardrail_daily sync failed: {exc}")
+
+# Sync uag_usage_timeseries_daily (daily requests/tokens for v2 trend charts).
+UAG_TIMESERIES_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_timeseries_daily"
+uag_ts_count = 0
+with uag_conn.cursor() as cur:
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS uag_usage_timeseries_daily (
+            usage_date     TEXT NOT NULL,
+            request_count  BIGINT DEFAULT 0,
+            input_tokens   BIGINT DEFAULT 0,
+            output_tokens  BIGINT DEFAULT 0,
+            last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (usage_date)
+        )""")
+    uag_conn.commit()
+print(f"▸ Syncing {UAG_TIMESERIES_TABLE} → uag_usage_timeseries_daily ...")
+try:
+    ts_rows = spark.read.table(UAG_TIMESERIES_TABLE).collect()
+    with uag_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE uag_usage_timeseries_daily")
+        uag_conn.commit()
+    if ts_rows:
+        values = [(str(r.usage_date), int(r.request_count or 0), int(r.input_tokens or 0),
+                   int(r.output_tokens or 0), now) for r in ts_rows]
+        uag_ts_count = len(values)
+        with uag_conn.cursor() as cur:
+            execute_values(cur,
+                """INSERT INTO uag_usage_timeseries_daily
+                   (usage_date, request_count, input_tokens, output_tokens, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+            uag_conn.commit()
+    print(f"  ✅ {uag_ts_count} UAG time-series rows synced")
+except Exception as exc:
+    print(f"  ⚠️  uag_usage_timeseries_daily sync failed: {exc}")
 
 uag_conn.close()
 

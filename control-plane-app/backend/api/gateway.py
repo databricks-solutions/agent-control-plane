@@ -188,6 +188,12 @@ def uag_mcp_tools():
     return gateway_service.get_uag_mcp_tools()
 
 
+@router.get("/uag-v2-timeseries")
+def uag_v2_timeseries():
+    """Daily UAG v2 usage series (requests + tokens) for trend charts."""
+    return gateway_service.get_uag_v2_timeseries()
+
+
 @router.get("/guardrail-coverage")
 def guardrail_coverage():
     """Guardrail coverage/activity per endpoint from Unity AI Gateway v2

@@ -12,6 +12,7 @@ import {
   useGatewayUsageTimeseries,
   useGatewayUsageByUser,
   useUagV2Usage,
+  useUagV2Timeseries,
   useUagMcpTools,
   useGuardrailCoverage,
   type UagBreakdownRow,
@@ -58,17 +59,17 @@ import {
 
 /* ── tab definitions ─────────────────────────────────────────── */
 const baseTabs = [
-  { id: 'overview', label: 'Overview', icon: LayoutDashboard, beta: false },
-  { id: 'metrics', label: 'Metrics', icon: Cpu, beta: false },
-  { id: 'permissions', label: 'Permissions', icon: Shield, beta: false },
-  { id: 'rate-limits', label: 'Rate Limits & Guardrails', icon: ShieldAlert, beta: false },
-  { id: 'uag-v2', label: 'Unity AI Gateway v2', icon: Sparkles, beta: true },
+  { id: 'uag-v2', label: 'Unity AI Gateway', icon: Sparkles, beta: true, legacy: false },
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard, beta: false, legacy: true },
+  { id: 'metrics', label: 'Metrics', icon: Cpu, beta: false, legacy: true },
+  { id: 'permissions', label: 'Permissions', icon: Shield, beta: false, legacy: true },
+  { id: 'rate-limits', label: 'Rate Limits & Guardrails', icon: ShieldAlert, beta: false, legacy: true },
 ] as const
 
 type TabId = 'overview' | 'metrics' | 'permissions' | 'rate-limits' | 'uag-v2'
 
 export default function AIGatewayPage() {
-  const [activeTab, setActiveTab] = useState<TabId>('overview')
+  const [activeTab, setActiveTab] = useState<TabId>('uag-v2')
   const [days, setDays] = useState(7)
   const [searchQuery, setSearchQuery] = useState('')
 
@@ -138,14 +139,14 @@ export default function AIGatewayPage() {
           <span className="font-semibold">Unity AI Gateway is where this is headed.</span>{' '}
           It's Databricks' native control plane for AI governance. We integrate its capabilities
           as soon as their APIs are available — start with the{' '}
-          <span className="font-medium">Unity AI Gateway v2 (Beta)</span> tab — and retire legacy
+          <span className="font-medium">Unity AI Gateway (Beta)</span> tab — and retire legacy
           views here as they're superseded. Expect this page to shift toward Unity AI Gateway over time.
         </p>
       </div>
 
       {/* Tab bar */}
       <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700 overflow-x-auto">
-        {tabs.map(({ id, label, icon: Icon, beta }) => (
+        {tabs.map(({ id, label, icon: Icon, beta, legacy }) => (
           <button
             key={id}
             onClick={() => setActiveTab(id)}
@@ -160,6 +161,11 @@ export default function AIGatewayPage() {
             {beta && (
               <span className="ml-0.5 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300">
                 Beta
+              </span>
+            )}
+            {legacy && (
+              <span className="ml-0.5 px-1.5 py-0.5 rounded text-[9px] font-semibold tracking-wide bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400">
+                v1
               </span>
             )}
           </button>
@@ -188,7 +194,7 @@ export default function AIGatewayPage() {
   )
 }
 
-/* ── Unity AI Gateway v2 (Beta) Section ───────────────────────── */
+/* ── Unity AI Gateway (Beta) Section ───────────────────────── */
 
 function UagV2Section() {
   const { data: uag, isLoading } = useUagV2Usage()
@@ -212,11 +218,11 @@ function UagV2Section() {
       <Card>
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
-            Unity AI Gateway v2 (Beta) Usage
+            Unity AI Gateway (Beta) Usage
             <span className="group relative inline-flex">
               <Info className="w-3.5 h-3.5 text-gray-400 cursor-help" tabIndex={0} />
               <span role="tooltip" className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 hidden w-72 rounded-lg border border-gray-200 bg-white p-3 text-left text-[11px] font-normal leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">
-                Only requests routed through <strong>Unity AI Gateway v2</strong> endpoints (~20-min fresh) — a subset of all serving. Broader serving usage is under <strong>Metrics</strong>; dollar cost is under <strong>Governance</strong>. Cached-token % and TTFB come only from this source.
+                Only requests routed through <strong>Unity AI Gateway</strong> endpoints (~20-min fresh) — a subset of all serving. Broader serving usage is under <strong>Metrics</strong>; dollar cost is under <strong>Governance</strong>. Cached-token % and TTFB come only from this source.
               </span>
             </span>
             {uag?.as_of && (
@@ -231,7 +237,7 @@ function UagV2Section() {
             <div className="py-12 text-center text-gray-400 dark:text-gray-500">Loading…</div>
           ) : !hasData ? (
             <div className="py-12 text-center text-gray-400 dark:text-gray-500">
-              No Unity AI Gateway v2 usage yet — either no v2-routed traffic in this workspace, or the discovery workflow hasn't synced <code>system.ai_gateway.usage</code> yet.
+              No Unity AI Gateway usage yet — either no gateway-routed traffic in this workspace, or the discovery workflow hasn't synced <code>system.ai_gateway.usage</code> yet.
             </div>
           ) : (
             <>
@@ -250,8 +256,10 @@ function UagV2Section() {
                       <SortableHeader label="Endpoint" sortKey="endpoint_name" current={uagSort.sort} onToggle={uagSort.toggle} />
                       <SortableHeader label="Requests" sortKey="request_count" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
                       <SortableHeader label="Cached Tokens" sortKey="cached" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
-                      <SortableHeader label="p50 Latency" sortKey="p50_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
-                      <SortableHeader label="p95 Latency" sortKey="p95_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                      <SortableHeader label="p50" sortKey="p50_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                      <SortableHeader label="p90" sortKey="p90_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                      <SortableHeader label="p95" sortKey="p95_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
+                      <SortableHeader label="p99" sortKey="p99_latency_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
                       <SortableHeader label="p95 TTFB" sortKey="p95_ttfb_ms" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
                       <SortableHeader label="Users" sortKey="unique_users" current={uagSort.sort} onToggle={uagSort.toggle} align="right" />
                     </tr>
@@ -263,7 +271,9 @@ function UagV2Section() {
                         <td className="py-2 text-right">{Number(e.request_count).toLocaleString()}</td>
                         <td className="py-2 text-right">{Number(e.cache_read_tokens + e.cache_creation_tokens).toLocaleString()}</td>
                         <td className="py-2 text-right">{Number(e.p50_latency_ms).toLocaleString()}ms</td>
+                        <td className="py-2 text-right">{Number(e.p90_latency_ms).toLocaleString()}ms</td>
                         <td className="py-2 text-right">{Number(e.p95_latency_ms).toLocaleString()}ms</td>
+                        <td className="py-2 text-right">{Number(e.p99_latency_ms).toLocaleString()}ms</td>
                         <td className="py-2 text-right">{Number(e.p95_ttfb_ms).toLocaleString()}ms</td>
                         <td className="py-2 text-right">{Number(e.unique_users).toLocaleString()}</td>
                       </tr>
@@ -324,11 +334,47 @@ function UagV2Section() {
             rows={uag.breakdowns.route_action}
             labelMap={{ INITIAL_ATTEMPT: 'Initial', FALLBACK: 'Fallback', unknown: 'Unknown' }}
           />
+          <UagBreakdownCard
+            title="By Status Code"
+            subtitle="Requests by HTTP status"
+            rows={uag.breakdowns.status_code}
+          />
+          <UagBreakdownCard
+            title="By Workspace"
+            subtitle="Requests by workspace ID"
+            rows={uag.breakdowns.workspace_id}
+            limit={8}
+          />
         </div>
       )}
 
+      <UagV2TrendCard />
       <UagMcpToolsCard />
       <GuardrailCoverageCard />
+    </div>
+  )
+}
+
+/* Daily UAG v2 usage trend (uag_usage_timeseries_daily) — requests + tokens over
+ * time. Hidden when there's no v2 traffic. */
+function UagV2TrendCard() {
+  const { data, isLoading } = useUagV2Timeseries()
+  const series = data?.series || []
+  if (isLoading || series.length === 0) return null
+  // append a local-midnight time so the date-only string parses in local tz
+  // (not UTC midnight → prior-day label west of UTC)
+  const requestData = series.map((s) => ({ timestamp: `${s.usage_date}T00:00:00`, value: Number(s.request_count) }))
+  const tokenData = series.map((s) => ({ timestamp: `${s.usage_date}T00:00:00`, value: Number(s.input_tokens) + Number(s.output_tokens) }))
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <Card>
+        <CardHeader><CardTitle className="text-base">Requests / day</CardTitle></CardHeader>
+        <CardContent><LineChart data={requestData} name="Requests" color={DB_CHART.primary} /></CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle className="text-base">Tokens / day</CardTitle></CardHeader>
+        <CardContent><LineChart data={tokenData} name="Total Tokens" color={DB_CHART.success} /></CardContent>
+      </Card>
     </div>
   )
 }
@@ -365,7 +411,7 @@ function GuardrailCoverageCard() {
           </span>
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
-          Endpoints with Unity AI Gateway v2 guardrails running + the judge model evaluating them.
+          Endpoints with Unity AI Gateway guardrails running + the judge model evaluating them.
           Coverage &amp; activity only — block/mask outcomes require UAG feature-results (enrollment-gated).
           {data?.as_of && <> · as of {formatAsOf(data.as_of)}</>}
         </p>
@@ -429,7 +475,7 @@ function UagMcpToolsCard() {
           </span>
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
-          MCP tool invocations governed through Unity AI Gateway v2
+          MCP tool invocations governed through Unity AI Gateway
           {mcp?.as_of && <> · as of {formatAsOf(mcp.as_of)}</>}
         </p>
       </CardHeader>

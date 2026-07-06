@@ -594,7 +594,9 @@ export interface UagV2Usage {
     cache_read_tokens: number
     cache_creation_tokens: number
     p50_latency_ms: number
+    p90_latency_ms: number
     p95_latency_ms: number
+    p99_latency_ms: number
     p95_ttfb_ms: number
     error_count: number
     unique_users: number
@@ -606,7 +608,18 @@ export interface UagV2Usage {
     source?: UagBreakdownRow[]
     service_type?: UagBreakdownRow[]
     route_action?: UagBreakdownRow[]
+    status_code?: UagBreakdownRow[]
+    workspace_id?: UagBreakdownRow[]
   }
+}
+
+export interface UagV2Timeseries {
+  series: Array<{
+    usage_date: string
+    request_count: number
+    input_tokens: number
+    output_tokens: number
+  }>
 }
 
 export interface UagMcpTools {
@@ -677,6 +690,18 @@ export function useGuardrailCoverage() {
     queryFn: async () => {
       const { data } = await apiClient.get('/gateway/guardrail-coverage')
       return data as GuardrailCoverage
+    },
+    staleTime: GW_STALE,
+  })
+}
+
+/** Daily UAG v2 usage series (requests + tokens) for trend charts. */
+export function useUagV2Timeseries() {
+  return useQuery({
+    queryKey: ['gateway', 'uag-v2-timeseries'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/uag-v2-timeseries')
+      return data as UagV2Timeseries
     },
     staleTime: GW_STALE,
   })

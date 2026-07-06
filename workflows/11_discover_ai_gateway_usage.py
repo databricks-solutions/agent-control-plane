@@ -55,7 +55,8 @@ UAG_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_summary"
 UAG_BREAKDOWN_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_breakdown"
 UAG_MCP_TOOL_TABLE = f"{CATALOG}.{SCHEMA}.uag_mcp_tool_daily"
 UAG_GUARDRAIL_TABLE = f"{CATALOG}.{SCHEMA}.uag_guardrail_daily"
-print(f"Target tables: {UAG_TABLE}, {UAG_BREAKDOWN_TABLE}, {UAG_MCP_TOOL_TABLE}, {UAG_GUARDRAIL_TABLE} | retention {RETENTION_DAYS}d")
+UAG_TIMESERIES_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_timeseries_daily"
+print(f"Target tables: {UAG_TABLE}, {UAG_BREAKDOWN_TABLE}, {UAG_MCP_TOOL_TABLE}, {UAG_GUARDRAIL_TABLE}, {UAG_TIMESERIES_TABLE} | retention {RETENTION_DAYS}d")
 
 # COMMAND ----------
 
@@ -67,7 +68,9 @@ UAG_SCHEMA = StructType([
     StructField("cache_read_tokens", LongType(), True),
     StructField("cache_creation_tokens", LongType(), True),
     StructField("p50_latency_ms", LongType(), True),
+    StructField("p90_latency_ms", LongType(), True),
     StructField("p95_latency_ms", LongType(), True),
+    StructField("p99_latency_ms", LongType(), True),
     StructField("p95_ttfb_ms", LongType(), True),
     StructField("error_count", LongType(), True),
     StructField("unique_users", LongType(), True),
@@ -97,6 +100,15 @@ UAG_MCP_TOOL_SCHEMA = StructType([
     StructField("error_count", LongType(), True),
     StructField("unique_users", LongType(), True),
     StructField("max_event_time", StringType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+# Daily usage time-series (one row per day) for trend charts on the v2 tab.
+UAG_TIMESERIES_SCHEMA = StructType([
+    StructField("usage_date", StringType(), False),
+    StructField("request_count", LongType(), True),
+    StructField("input_tokens", LongType(), True),
+    StructField("output_tokens", LongType(), True),
     StructField("discovered_at", TimestampType(), False),
 ])
 
@@ -160,7 +172,9 @@ try:
             COALESCE(SUM(token_details.cache_read_input_tokens), 0)    AS cache_read_tokens,
             COALESCE(SUM(token_details.cache_creation_input_tokens), 0) AS cache_creation_tokens,
             CAST(PERCENTILE_APPROX(latency_ms, 0.5) AS LONG)           AS p50_latency_ms,
+            CAST(PERCENTILE_APPROX(latency_ms, 0.9) AS LONG)           AS p90_latency_ms,
             CAST(PERCENTILE_APPROX(latency_ms, 0.95) AS LONG)          AS p95_latency_ms,
+            CAST(PERCENTILE_APPROX(latency_ms, 0.99) AS LONG)          AS p99_latency_ms,
             CAST(PERCENTILE_APPROX(time_to_first_byte_ms, 0.95) AS LONG) AS p95_ttfb_ms,
             SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END)        AS error_count,
             COUNT(DISTINCT requester)                                  AS unique_users,
@@ -191,7 +205,8 @@ def to_int(x):
 if rows_raw:
     rows = [(r.get("endpoint_name", ""), to_int(r.get("request_count")), to_int(r.get("input_tokens")),
              to_int(r.get("output_tokens")), to_int(r.get("cache_read_tokens")), to_int(r.get("cache_creation_tokens")),
-             to_int(r.get("p50_latency_ms")), to_int(r.get("p95_latency_ms")), to_int(r.get("p95_ttfb_ms")),
+             to_int(r.get("p50_latency_ms")), to_int(r.get("p90_latency_ms")), to_int(r.get("p95_latency_ms")),
+             to_int(r.get("p99_latency_ms")), to_int(r.get("p95_ttfb_ms")),
              to_int(r.get("error_count")), to_int(r.get("unique_users")), r.get("max_event_time"), now)
             for r in rows_raw]
     spark.createDataFrame(rows, UAG_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_TABLE)
@@ -208,7 +223,8 @@ try:
     bd_rows = _execute_sql(f"""
         WITH base AS (
             SELECT requester_type, destination_model, api_type, service_type,
-                   invocation_metadata.source AS source, input_tokens, output_tokens,
+                   invocation_metadata.source AS source, workspace_id,
+                   CAST(status_code AS STRING) AS status_code, input_tokens, output_tokens,
                    COALESCE(token_details.cache_read_input_tokens, 0)
                  + COALESCE(token_details.cache_creation_input_tokens, 0) AS cached
             FROM system.ai_gateway.usage
@@ -237,6 +253,14 @@ try:
         SELECT 'source', COALESCE(source, 'unknown'),
                COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
         FROM base GROUP BY source
+        UNION ALL
+        SELECT 'status_code', COALESCE(status_code, 'unknown'),
+               COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
+        FROM base GROUP BY status_code
+        UNION ALL
+        SELECT 'workspace_id', COALESCE(NULLIF(CAST(workspace_id AS STRING), ''), 'unknown'),
+               COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
+        FROM base GROUP BY workspace_id
         UNION ALL
         -- service_type: exclude legacy untyped rows so the model/MCP/provider split is meaningful
         SELECT 'service_type', service_type,
@@ -270,6 +294,36 @@ if bd_rows:
 else:
     spark.createDataFrame([], UAG_BREAKDOWN_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_BREAKDOWN_TABLE)
 print(f"✅ Wrote {len(bd_rows)} rows to {UAG_BREAKDOWN_TABLE}")
+
+# COMMAND ----------
+
+# Daily usage time-series (requests + tokens per day) for trend charts.
+print("▸ Querying ai_gateway.usage daily time-series …")
+try:
+    ts_rows_raw = _execute_sql(f"""
+        SELECT CAST(event_time AS DATE)                                 AS usage_date,
+               COUNT(*)                                                 AS request_count,
+               COALESCE(SUM(input_tokens), 0)                           AS input_tokens,
+               COALESCE(SUM(output_tokens), 0)                          AS output_tokens
+        FROM system.ai_gateway.usage
+        WHERE event_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
+          AND endpoint_name IS NOT NULL   -- match the summary/KPI population so the trend reconciles
+        GROUP BY CAST(event_time AS DATE)
+        ORDER BY usage_date
+    """)
+    print(f"  ✅ {len(ts_rows_raw)} time-series rows")
+except Exception as exc:
+    ts_rows_raw = []
+    print(f"  ⚠️  time-series query unavailable: {exc}")
+
+if ts_rows_raw:
+    rows = [(str(r.get("usage_date")), to_int(r.get("request_count")), to_int(r.get("input_tokens")),
+             to_int(r.get("output_tokens")), now)
+            for r in ts_rows_raw]
+    spark.createDataFrame(rows, UAG_TIMESERIES_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_TIMESERIES_TABLE)
+else:
+    spark.createDataFrame([], UAG_TIMESERIES_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_TIMESERIES_TABLE)
+print(f"✅ Wrote {len(ts_rows_raw)} rows to {UAG_TIMESERIES_TABLE}")
 
 # COMMAND ----------
 
@@ -360,6 +414,7 @@ print(f"✅ Wrote {len(gr_rows_raw)} rows to {UAG_GUARDRAIL_TABLE}")
 
 result = {"status": "success", "uag_endpoint_rows": len(rows_raw), "uag_breakdown_rows": len(bd_rows),
           "uag_mcp_tool_rows": len(mcp_rows_raw), "uag_guardrail_rows": len(gr_rows_raw),
+          "uag_timeseries_rows": len(ts_rows_raw),
           "retention_days": RETENTION_DAYS, "discovered_at": now.isoformat()}
 print(json.dumps(result, indent=2))
 dbutils.notebook.exit(json.dumps(result))

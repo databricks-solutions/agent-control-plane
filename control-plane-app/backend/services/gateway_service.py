@@ -611,7 +611,7 @@ def get_uag_v2_usage() -> Dict[str, Any]:
         rows = execute_query(
             """SELECT endpoint_name, request_count, input_tokens, output_tokens,
                       cache_read_tokens, cache_creation_tokens,
-                      p50_latency_ms, p95_latency_ms, p95_ttfb_ms,
+                      p50_latency_ms, p90_latency_ms, p95_latency_ms, p99_latency_ms, p95_ttfb_ms,
                       error_count, unique_users, max_event_time
                FROM uag_usage_summary
                ORDER BY request_count DESC LIMIT 200"""
@@ -661,6 +661,8 @@ def get_uag_v2_usage() -> Dict[str, Any]:
             "cache_read_pct": cache_pct,
             "endpoints": len(rows),
         },
+        # NOTE: p50/p90/p95/p99 are PER-ENDPOINT percentiles — they are non-additive,
+        # so do not sum/average them into an account-level KPI (that would be wrong).
         "endpoints": [
             {
                 "endpoint_name": r.get("endpoint_name", ""),
@@ -670,7 +672,9 @@ def get_uag_v2_usage() -> Dict[str, Any]:
                 "cache_read_tokens": _i(r, "cache_read_tokens"),
                 "cache_creation_tokens": _i(r, "cache_creation_tokens"),
                 "p50_latency_ms": _i(r, "p50_latency_ms"),
+                "p90_latency_ms": _i(r, "p90_latency_ms"),
                 "p95_latency_ms": _i(r, "p95_latency_ms"),
+                "p99_latency_ms": _i(r, "p99_latency_ms"),
                 "p95_ttfb_ms": _i(r, "p95_ttfb_ms"),
                 "error_count": _i(r, "error_count"),
                 "unique_users": _i(r, "unique_users"),
@@ -785,6 +789,31 @@ def get_guardrail_coverage() -> Dict[str, Any]:
             }
             for r in rows
         ],
+    }
+
+
+def get_uag_v2_timeseries() -> Dict[str, Any]:
+    """Daily UAG v2 usage series (requests + tokens) from `uag_usage_timeseries_daily`
+    for trend charts on the v2 tab. Degrades to empty when unsynced / no v2 traffic."""
+    from backend.database import execute_query
+    try:
+        rows = execute_query(
+            """SELECT usage_date, request_count, input_tokens, output_tokens
+               FROM uag_usage_timeseries_daily ORDER BY usage_date"""
+        )
+    except Exception as exc:
+        logger.warning("uag_usage_timeseries_daily not available: %s", exc)
+        return {"series": []}
+    return {
+        "series": [
+            {
+                "usage_date": r.get("usage_date", ""),
+                "request_count": _row_int(r, "request_count"),
+                "input_tokens": _row_int(r, "input_tokens"),
+                "output_tokens": _row_int(r, "output_tokens"),
+            }
+            for r in rows
+        ]
     }
 
 

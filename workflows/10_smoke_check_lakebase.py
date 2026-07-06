@@ -87,6 +87,7 @@ EXPECTED = [
     "kb_billing_daily",              # only populated when Vector Search indexes exist
     "uag_mcp_tool_daily",            # only populated when MCP services route through UAG v2
     "uag_guardrail_daily",           # only populated when endpoints have UAG v2 guardrails active
+    "uag_usage_timeseries_daily",    # daily UAG v2 usage series; empty when no v2 traffic
     "billing_cache_meta",
     # App-managed tables created in Phase 7 of 02_sync_to_lakebase. These were
     # historically created lazily by the app's startup hook, but the app SP
