@@ -331,14 +331,13 @@ function GuardrailCoverageCard() {
   const endpoints = data?.endpoints || []
   if (isLoading || endpoints.length === 0) return null
   const guarded = data!.totals.guarded_endpoints ?? endpoints.length
-  const total = data!.totals.total_endpoints ?? 0
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base flex items-center gap-2">
           Guardrail Coverage
           <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
-            {guarded}{total ? ` of ${total}` : ''} endpoints guarded
+            {guarded} endpoint{guarded === 1 ? '' : 's'} guarded
           </span>
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">

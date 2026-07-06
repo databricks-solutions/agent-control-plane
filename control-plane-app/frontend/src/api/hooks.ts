@@ -660,8 +660,7 @@ export function useUagMcpTools() {
 
 export interface GuardrailCoverage {
   as_of: string | null
-  outcomes_available: boolean
-  totals: Partial<{ guarded_endpoints: number; total_endpoints: number; checked_requests: number }>
+  totals: Partial<{ guarded_endpoints: number; checked_requests: number }>
   endpoints: Array<{
     endpoint_name: string
     checked_requests: number

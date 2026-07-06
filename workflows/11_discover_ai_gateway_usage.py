@@ -305,17 +305,22 @@ print(f"✅ Wrote {len(mcp_rows_raw)} rows to {UAG_MCP_TOOL_TABLE}")
 print("▸ Querying ai_gateway.usage guardrail coverage (invocation_metadata.source = GUARDRAIL) …")
 try:
     gr_rows_raw = _execute_sql(f"""
+        -- (verified live on fevm 2026-07-06: GUARDRAIL judge invocations share the
+        -- guarded request's request_id, so the join attributes checks to the
+        -- protected primary endpoint.) collect_set keeps ALL judge models when a
+        -- request runs multiple guardrails; COUNT(DISTINCT request_id) counts
+        -- guarded requests (a request_id can span multiple primary invocation rows).
         WITH g AS (
-            SELECT request_id, MAX(destination_model) AS judge_model
+            SELECT request_id, collect_set(destination_model) AS judges
             FROM system.ai_gateway.usage
             WHERE invocation_metadata.source = 'GUARDRAIL'
               AND event_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
             GROUP BY request_id
         )
         SELECT p.endpoint_name                                   AS endpoint_name,
-               COUNT(*)                                          AS checked_requests,
+               COUNT(DISTINCT p.request_id)                      AS checked_requests,
                COUNT(DISTINCT p.requester)                       AS unique_users,
-               concat_ws(', ', array_sort(array_distinct(collect_list(g.judge_model)))) AS judge_models,
+               concat_ws(', ', array_sort(array_distinct(flatten(collect_list(g.judges))))) AS judge_models,
                CAST(MAX(p.event_time) AS STRING)                 AS max_event_time
         FROM system.ai_gateway.usage p
              JOIN g ON p.request_id = g.request_id

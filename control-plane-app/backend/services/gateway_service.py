@@ -737,7 +737,7 @@ def get_uag_mcp_tools() -> Dict[str, Any]:
 def get_guardrail_coverage() -> Dict[str, Any]:
     """Guardrail COVERAGE / activity from `uag_guardrail_daily` — which endpoints
     have Unity AI Gateway v2 guardrails running, how often, and by which judge
-    model(s). Coverage ratio uses the total endpoint count from uag_usage_summary.
+    model(s).
 
     IMPORTANT: this is coverage/activity only, NOT block/mask outcomes. The
     guardrail verdict is not present in system.ai_gateway.usage (guardrail rows
@@ -746,35 +746,35 @@ def get_guardrail_coverage() -> Dict[str, Any]:
     table is unsynced or no endpoint has guardrails active.
     """
     from backend.database import execute_query, execute_one
-    empty: Dict[str, Any] = {"as_of": None, "outcomes_available": False, "totals": {}, "endpoints": []}
+    empty: Dict[str, Any] = {"as_of": None, "totals": {}, "endpoints": []}
+    # Totals from an unbounded aggregate (the row list below is capped for display).
+    # No coverage ratio: a comparable "total guardable endpoints" denominator isn't
+    # derivable here (uag_usage_summary counts MCP + judge endpoints too), so we
+    # report the guarded count rather than a misleading "X of Y".
     try:
-        rows = execute_query(
-            """SELECT endpoint_name, checked_requests, unique_users, judge_models, max_event_time
-               FROM uag_guardrail_daily
-               ORDER BY checked_requests DESC LIMIT 200"""
+        agg = execute_one(
+            """SELECT COUNT(*) AS guarded_endpoints,
+                      COALESCE(SUM(checked_requests), 0) AS checked_requests,
+                      MAX(max_event_time) AS as_of
+               FROM uag_guardrail_daily"""
         )
     except Exception as exc:
         logger.warning("uag_guardrail_daily not available: %s", exc)
         return empty
-    if not rows:
+    agg = dict(agg) if agg else {}
+    if _row_int(agg, "guarded_endpoints") == 0:
         return empty
 
-    total_endpoints = 0
-    try:
-        r = execute_one("SELECT COUNT(*) AS n FROM uag_usage_summary")
-        total_endpoints = int((r or {}).get("n") or 0)
-    except Exception:
-        pass
-
+    rows = execute_query(
+        """SELECT endpoint_name, checked_requests, unique_users, judge_models
+           FROM uag_guardrail_daily
+           ORDER BY checked_requests DESC LIMIT 200"""
+    )
     return {
-        "as_of": _max_as_of(rows),
-        # No BLOCK/MASK verdicts at this scope — the UI shows coverage only and
-        # flags that outcomes need the gated feature-results surface.
-        "outcomes_available": False,
+        "as_of": agg.get("as_of"),
         "totals": {
-            "guarded_endpoints": len(rows),
-            "total_endpoints": total_endpoints,
-            "checked_requests": sum(_row_int(r, "checked_requests") for r in rows),
+            "guarded_endpoints": _row_int(agg, "guarded_endpoints"),
+            "checked_requests": _row_int(agg, "checked_requests"),
         },
         "endpoints": [
             {
