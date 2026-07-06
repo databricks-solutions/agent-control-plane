@@ -243,19 +243,32 @@ def get_agent_tool_usage() -> Dict[str, Any]:
     if not rows:
         return empty
 
+    exp_ids = {r.get("experiment_id") for r in rows if r.get("experiment_id")}
     names: Dict[str, str] = {}
-    try:
-        for e in execute_query("SELECT experiment_id, name FROM observability_experiments WHERE name IS NOT NULL"):
-            names.setdefault(e.get("experiment_id"), e.get("name"))
-    except Exception:
-        pass
+    if exp_ids:
+        try:
+            placeholders = ",".join("%s" for _ in exp_ids)
+            for e in execute_query(
+                f"SELECT experiment_id, name FROM observability_experiments "
+                f"WHERE name IS NOT NULL AND experiment_id IN ({placeholders})",
+                tuple(exp_ids),
+            ):
+                names.setdefault(e.get("experiment_id"), e.get("name"))
+        except Exception:
+            pass
 
     def _i(r, k):
         return int(r.get(k) or 0)
 
     def _asset(name: str, span_type: str) -> str:
-        # TOOL span names come through as catalog__schema__function; render as a UC FQN.
-        return (name or "").replace("__", ".") if span_type == "TOOL" else (name or "")
+        # TOOL span names arrive as catalog__schema__function (MLflow sanitizes the UC
+        # FQN's dots to '__'). Only reverse when it's exactly that 3-part shape — a
+        # blanket replace would mangle tools like `search__web` or a UC name with '__'.
+        if span_type == "TOOL" and name:
+            parts = name.split("__")
+            if len(parts) == 3 and all(parts):
+                return ".".join(parts)
+        return name or ""
 
     out = [
         {
@@ -272,8 +285,9 @@ def get_agent_tool_usage() -> Dict[str, Any]:
     return {
         "totals": {
             "experiments": len({r["experiment_id"] for r in out if r["experiment_id"]}),
-            "tools": sum(1 for r in out if r["span_type"] == "TOOL"),
-            "retrievers": sum(1 for r in out if r["span_type"] == "RETRIEVER"),
+            # distinct assets, not rollup rows (one tool used in N experiments == 1 tool)
+            "tools": len({r["asset"] for r in out if r["span_type"] == "TOOL"}),
+            "retrievers": len({r["asset"] for r in out if r["span_type"] == "RETRIEVER"}),
             "calls": sum(r["call_count"] for r in out),
         },
         "rows": out,

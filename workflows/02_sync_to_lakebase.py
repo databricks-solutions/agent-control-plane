@@ -1151,23 +1151,24 @@ TOOL_USAGE_DELTA = f"{CATALOG}.{SCHEMA}.agent_tool_usage"
 atu_count = 0
 print(f"▸ Syncing {TOOL_USAGE_DELTA} → agent_tool_usage ...")
 try:
+    # Read first, then truncate+insert in ONE transaction (single commit): a failed
+    # insert rolls back the truncate rather than leaving the table empty.
     atu_rows = spark.read.table(TOOL_USAGE_DELTA).collect()
+    values = [(r.experiment_id, r.tool_name, r.span_type, int(r.call_count or 0),
+               int(r.trace_count or 0), r.last_seen, now) for r in atu_rows]
     with obs_conn.cursor() as cur:
         cur.execute("TRUNCATE TABLE agent_tool_usage")
-        obs_conn.commit()
-    if atu_rows:
-        values = [(r.experiment_id, r.tool_name, r.span_type, int(r.call_count or 0),
-                   int(r.trace_count or 0), r.last_seen, now) for r in atu_rows]
-        atu_count = len(values)
-        with obs_conn.cursor() as cur:
+        if values:
             execute_values(cur,
                 """INSERT INTO agent_tool_usage
                    (experiment_id, tool_name, span_type, call_count, trace_count, last_seen, last_synced)
                    VALUES %s""",
                 values, page_size=500)
-            obs_conn.commit()
+    obs_conn.commit()
+    atu_count = len(values)
     print(f"  ✅ {atu_count} agent tool-usage rows synced")
 except Exception as exc:
+    obs_conn.rollback()
     print(f"  ⚠️  agent_tool_usage sync failed: {exc}")
 
 # COMMAND ----------

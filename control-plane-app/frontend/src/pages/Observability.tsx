@@ -292,6 +292,7 @@ function ToolUsagePanel() {
     return (
       <Card><CardContent className="py-12 text-center text-gray-400 dark:text-gray-500">
         No tool/asset usage yet — agents need MLflow tracing enabled (TOOL/RETRIEVER spans) and the discovery workflow must have synced their traces.
+        Currently sourced from Databricks-native <code>trace_logs</code> tables; OpenTelemetry-shaped traces (<code>*_otel_spans</code>) aren't covered yet.
       </CardContent></Card>
     )
   }
@@ -308,7 +309,9 @@ function ToolUsagePanel() {
         <CardHeader>
           <CardTitle className="text-base">Tool & Asset Usage</CardTitle>
           <p className="text-[11px] text-gray-400 dark:text-gray-500">
-            UC functions (TOOL) and vector indexes (RETRIEVER) an agent's traces touch, per experiment.
+            UC functions (TOOL) and vector indexes (RETRIEVER) touched by agent traces.
+            Grain is <strong>experiment</strong>, not per-agent — traces live under MLflow experiments.
+            RETRIEVER assets are the span name (usually the index; some frameworks name the component instead).
           </p>
         </CardHeader>
         <CardContent>
@@ -321,6 +324,7 @@ function ToolUsagePanel() {
                   <SortableHeader label="Experiment" sortKey="experiment_name" current={sort.sort} onToggle={sort.toggle} />
                   <SortableHeader label="Calls" sortKey="call_count" current={sort.sort} onToggle={sort.toggle} align="right" />
                   <SortableHeader label="Traces" sortKey="trace_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+                  <SortableHeader label="Last Seen" sortKey="last_seen" current={sort.sort} onToggle={sort.toggle} align="right" />
                 </tr>
               </thead>
               <tbody>
@@ -335,6 +339,7 @@ function ToolUsagePanel() {
                     <td className="py-1.5 text-gray-600 dark:text-gray-400 truncate max-w-[220px]" title={r.experiment_name || r.experiment_id}>{r.experiment_name || r.experiment_id || '—'}</td>
                     <td className="py-1.5 text-right tabular-nums">{r.call_count.toLocaleString()}</td>
                     <td className="py-1.5 text-right tabular-nums">{r.trace_count.toLocaleString()}</td>
+                    <td className="py-1.5 text-right text-xs text-gray-500 dark:text-gray-400 tabular-nums">{r.last_seen ? r.last_seen.slice(0, 10) : '—'}</td>
                   </tr>
                 ))}
               </tbody>

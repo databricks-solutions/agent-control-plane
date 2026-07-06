@@ -531,16 +531,25 @@ for cat, sch, tbl in trace_log_tables:
     full = f"`{cat}`.`{sch}`.`{tbl}`"
     label = f"{cat}.{sch}.{tbl}"
     try:
+        # Cap the source to the same recent-N window as the detail loop (bounds the
+        # explode so a large table can't OOM/timeout, and keeps trace counts
+        # consistent with the Traces tab).
         agg = spark.sql(f"""
+            WITH src AS (
+                SELECT trace_id, request_time, trace_location, spans
+                FROM {full}
+                WHERE request_time >= TIMESTAMP '{RETENTION_CUTOFF_TS.strftime('%Y-%m-%d %H:%M:%S')}'
+                ORDER BY request_time DESC
+                LIMIT {MAX_TRACES_PER_TABLE}
+            )
             SELECT trace_location.mlflow_experiment.experiment_id           AS experiment_id,
                    s.name                                                   AS tool_name,
                    trim(BOTH '"' FROM s.attributes['mlflow.spanType'])       AS span_type,
                    COUNT(*)                                                 AS call_count,
                    COUNT(DISTINCT trace_id)                                 AS trace_count,
                    CAST(MAX(request_time) AS STRING)                        AS last_seen
-            FROM {full} LATERAL VIEW explode(spans) t AS s
-            WHERE request_time >= TIMESTAMP '{RETENTION_CUTOFF_TS.strftime('%Y-%m-%d %H:%M:%S')}'
-              AND trim(BOTH '"' FROM s.attributes['mlflow.spanType']) IN ('TOOL', 'RETRIEVER')
+            FROM src LATERAL VIEW explode(spans) t AS s
+            WHERE trim(BOTH '"' FROM s.attributes['mlflow.spanType']) IN ('TOOL', 'RETRIEVER')
               AND s.name IS NOT NULL
             GROUP BY 1, 2, 3
         """).collect()
