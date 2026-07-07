@@ -2176,11 +2176,18 @@ try:
     print(f"  ✅ {bucd_count} user-cost rows synced")
     _stamp_cache_meta(billing_conn, "user_cost_daily", bucd_count)
 except Exception as exc:
+    # Rollback so a failed INSERT here (e.g. billing_user_cost_daily is app-owned
+    # and may be missing last_synced) does not leave the shared connection in an
+    # aborted-transaction state that poisons the next sync block below.
+    billing_conn.rollback()
     print(f"  ⚠️  billing_user_cost_daily sync failed: {exc}")
 
 # Sync billing_cost_by_tag (MODEL_SERVING $ attributed by custom_tag — window aggregate)
 print(f"▸ Syncing {BTAG_TABLE} → billing_cost_by_tag ...")
 try:
+    # Defense-in-depth: clear any aborted transaction inherited from a prior
+    # block so this block's TRUNCATE isn't rejected with "transaction is aborted".
+    billing_conn.rollback()
     with billing_conn.cursor() as cur:
         cur.execute("TRUNCATE TABLE billing_cost_by_tag")
         billing_conn.commit()
