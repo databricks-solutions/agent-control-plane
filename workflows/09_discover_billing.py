@@ -372,7 +372,13 @@ try:
             CAST(u.usage_date AS STRING)                       AS usage_date,
             u.workspace_id,
             u.usage_metadata.ai_gateway.endpoint_id            AS endpoint_id,
-            u.usage_metadata.endpoint_name                     AS endpoint_name,
+            -- endpoint_name is NOT part of the downstream PK
+            -- (usage_date, workspace_id, endpoint_id, run_by); a single
+            -- endpoint_id can carry more than one name in the window (renames,
+            -- null vs populated), so aggregate it rather than grouping by it —
+            -- otherwise the query emits duplicate-PK rows and the Lakebase
+            -- ON CONFLICT upsert fails with "cannot affect row a second time".
+            MAX(u.usage_metadata.endpoint_name)                AS endpoint_name,
             COALESCE(u.identity_metadata.run_by, 'unknown')    AS run_by,
             ROUND(SUM(u.usage_quantity), 4)                    AS total_dbus,
             ROUND(SUM(u.usage_quantity *
@@ -390,7 +396,6 @@ try:
           AND u.workspace_id IS NOT NULL
         GROUP BY u.usage_date, u.workspace_id,
                  u.usage_metadata.ai_gateway.endpoint_id,
-                 u.usage_metadata.endpoint_name,
                  u.identity_metadata.run_by
     """)
     print(f"  ✅ {len(user_cost_rows)} actual per-user cost rows")
