@@ -78,9 +78,11 @@ if not CATALOG or not SCHEMA:
 
 TRACES_TABLE = f"{CATALOG}.{SCHEMA}.observability_traces_uc_otel"
 DETAILS_TABLE = f"{CATALOG}.{SCHEMA}.observability_trace_details_uc_otel"
+TOOL_USAGE_TABLE = f"{CATALOG}.{SCHEMA}.agent_tool_usage"
 
 print(f"Trace summary target: {TRACES_TABLE}")
 print(f"Trace detail target:  {DETAILS_TABLE}")
+print(f"Tool usage target:    {TOOL_USAGE_TABLE}")
 print(f"Retention: {RETENTION_DAYS} days")
 
 # COMMAND ----------
@@ -118,6 +120,20 @@ DETAILS_SCHEMA = StructType([
     StructField("size_bytes",    LongType(),   True),
     StructField("source_type",   StringType(), True),
     StructField("cached_at",     TimestampType(), False),
+])
+
+# Agent tool/asset usage: TOOL + RETRIEVER spans rolled up per experiment. Answers
+# "what UC functions / vector indexes does this agent's traces touch". One row per
+# (experiment_id, tool_name, span_type). Grain is EXPERIMENT (agent traces live under
+# an experiment); the app has no experiment→discovered-agent mapping yet.
+TOOL_USAGE_SCHEMA = StructType([
+    StructField("experiment_id", StringType(), True),
+    StructField("tool_name",     StringType(), False),
+    StructField("span_type",     StringType(), False),   # TOOL | RETRIEVER
+    StructField("call_count",    LongType(),   True),
+    StructField("trace_count",   LongType(),   True),
+    StructField("last_seen",     StringType(), True),
+    StructField("discovered_at", TimestampType(), False),
 ])
 
 # COMMAND ----------
@@ -498,10 +514,70 @@ else:
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## Agent tool/asset usage (TOOL + RETRIEVER spans → per-experiment rollup)
+# MAGIC
+# MAGIC Explodes the `spans` array from the `trace_logs_*` tables and keeps TOOL/RETRIEVER
+# MAGIC spans: TOOL span name is the UC function identity, RETRIEVER span name is the
+# MAGIC vector index touched. Rolled up per (experiment, tool, type). Fail-open per table.
+# MAGIC
+# MAGIC NOTE: covers the `trace_logs_*` shape (validated). The `*_otel_spans` (OTel
+# MAGIC row-per-span) shape is a follow-up — no such tables exist here to validate against.
+
+# COMMAND ----------
+
+tool_usage_rows = []
+for cat, sch, tbl in trace_log_tables:
+    full = f"`{cat}`.`{sch}`.`{tbl}`"
+    label = f"{cat}.{sch}.{tbl}"
+    try:
+        # Cap the source to the same recent-N window as the detail loop (bounds the
+        # explode so a large table can't OOM/timeout, and keeps trace counts
+        # consistent with the Traces tab).
+        agg = spark.sql(f"""
+            WITH src AS (
+                SELECT trace_id, request_time, trace_location, spans
+                FROM {full}
+                WHERE request_time >= TIMESTAMP '{RETENTION_CUTOFF_TS.strftime('%Y-%m-%d %H:%M:%S')}'
+                ORDER BY request_time DESC
+                LIMIT {MAX_TRACES_PER_TABLE}
+            )
+            SELECT trace_location.mlflow_experiment.experiment_id           AS experiment_id,
+                   s.name                                                   AS tool_name,
+                   trim(BOTH '"' FROM s.attributes['mlflow.spanType'])       AS span_type,
+                   COUNT(*)                                                 AS call_count,
+                   COUNT(DISTINCT trace_id)                                 AS trace_count,
+                   CAST(MAX(request_time) AS STRING)                        AS last_seen
+            FROM src LATERAL VIEW explode(spans) t AS s
+            WHERE trim(BOTH '"' FROM s.attributes['mlflow.spanType']) IN ('TOOL', 'RETRIEVER')
+              AND s.name IS NOT NULL
+            GROUP BY 1, 2, 3
+        """).collect()
+        for r in agg:
+            tool_usage_rows.append((r["experiment_id"], r["tool_name"], r["span_type"],
+                                    int(r["call_count"] or 0), int(r["trace_count"] or 0),
+                                    r["last_seen"], NOW))
+        print(f"  ✅ tool-usage {label}: {len(agg)} (tool,type) rows")
+    except Exception as exc:
+        if _classify_perm_error(str(exc)):
+            per_table_stats.append({"table": label, "shape": "tool_usage", "skipped": "no UC grants"})
+        else:
+            per_table_stats.append({"table": label, "shape": "tool_usage", "error": str(exc)[:200]})
+
+if tool_usage_rows:
+    spark.createDataFrame(tool_usage_rows, TOOL_USAGE_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(TOOL_USAGE_TABLE)
+    print(f"✅ Wrote {len(tool_usage_rows)} tool-usage rows to {TOOL_USAGE_TABLE}")
+else:
+    spark.createDataFrame([], TOOL_USAGE_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(TOOL_USAGE_TABLE)
+    print(f"ℹ️  No tool-usage rows — empty {TOOL_USAGE_TABLE}")
+
+# COMMAND ----------
+
 result = {
     "status": "success",
     "otel_tables_found": len(otel_tables),
     "trace_log_tables_found": len(trace_log_tables),
+    "tool_usage_rows": len(tool_usage_rows),
     "traces": len(all_trace_rows),
     "details": len(all_detail_rows),
     "retention_days": RETENTION_DAYS,

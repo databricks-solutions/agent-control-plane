@@ -258,6 +258,30 @@ export function useMlflowTraces(workspaceId?: string | null, windowDays?: number
   })
 }
 
+export interface AgentToolUsage {
+  totals: Partial<{ experiments: number; tools: number; retrievers: number; calls: number }>
+  rows: Array<{
+    experiment_id: string
+    experiment_name: string
+    asset: string
+    span_type: string
+    call_count: number
+    trace_count: number
+    last_seen: string
+  }>
+}
+
+/** TOOL/RETRIEVER span usage per experiment — what UC functions / vector indexes agents touch. */
+export function useAgentToolUsage() {
+  return useQuery({
+    queryKey: ['mlflow', 'agent-tool-usage'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/mlflow/agent-tool-usage')
+      return data as AgentToolUsage
+    },
+  })
+}
+
 export function useMlflowTraceDetail(requestId: string | null, workspaceId?: string | null) {
   return useQuery({
     queryKey: ['mlflow', 'trace-detail', requestId, workspaceId],

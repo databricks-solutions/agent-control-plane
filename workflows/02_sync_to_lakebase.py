@@ -676,6 +676,12 @@ with obs_conn.cursor() as cur:
             PRIMARY KEY (workspace_id, request_id))""",
         "CREATE INDEX IF NOT EXISTS idx_otd_ws     ON observability_trace_details (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_otd_cached ON observability_trace_details (cached_at DESC)",
+        """CREATE TABLE IF NOT EXISTS agent_tool_usage (
+            experiment_id TEXT, tool_name TEXT NOT NULL, span_type TEXT NOT NULL,
+            call_count BIGINT DEFAULT 0, trace_count BIGINT DEFAULT 0,
+            last_seen TEXT,
+            last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW())""",
+        "CREATE INDEX IF NOT EXISTS idx_atu_exp ON agent_tool_usage (experiment_id)",
     ]:
         # Each statement in its own savepoint — protects against the case
         # where the workflow runs as a non-owner of pre-existing tables (the
@@ -1137,6 +1143,33 @@ if gw_log_rows:
             obs_conn.commit()
             gw_log_count = len(values)
 print(f"✅ Upserted {gw_log_count} gateway inference-log rows (from Delta, payload-enriched)")
+
+# COMMAND ----------
+
+# Sync agent_tool_usage (TOOL/RETRIEVER span rollup from 07_discover_uc_otel_traces).
+TOOL_USAGE_DELTA = f"{CATALOG}.{SCHEMA}.agent_tool_usage"
+atu_count = 0
+print(f"▸ Syncing {TOOL_USAGE_DELTA} → agent_tool_usage ...")
+try:
+    # Read first, then truncate+insert in ONE transaction (single commit): a failed
+    # insert rolls back the truncate rather than leaving the table empty.
+    atu_rows = spark.read.table(TOOL_USAGE_DELTA).collect()
+    values = [(r.experiment_id, r.tool_name, r.span_type, int(r.call_count or 0),
+               int(r.trace_count or 0), r.last_seen, now) for r in atu_rows]
+    with obs_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE agent_tool_usage")
+        if values:
+            execute_values(cur,
+                """INSERT INTO agent_tool_usage
+                   (experiment_id, tool_name, span_type, call_count, trace_count, last_seen, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+    obs_conn.commit()
+    atu_count = len(values)
+    print(f"  ✅ {atu_count} agent tool-usage rows synced")
+except Exception as exc:
+    obs_conn.rollback()
+    print(f"  ⚠️  agent_tool_usage sync failed: {exc}")
 
 # COMMAND ----------
 
