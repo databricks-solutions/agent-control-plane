@@ -1833,6 +1833,41 @@ try:
 except Exception as exc:
     print(f"  ⚠️  uag_usage_timeseries_daily sync failed: {exc}")
 
+# Sync uag_coding_agent_usage (coding-agent activity classified by user_agent).
+UAG_CODING_AGENT_TABLE = f"{CATALOG}.{SCHEMA}.uag_coding_agent_usage"
+uag_ca_count = 0
+with uag_conn.cursor() as cur:
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS uag_coding_agent_usage (
+            coding_agent   TEXT NOT NULL,
+            request_count  BIGINT DEFAULT 0,
+            unique_users   BIGINT DEFAULT 0,
+            active_days    BIGINT DEFAULT 0,
+            total_tokens   BIGINT DEFAULT 0,
+            max_event_time TEXT,
+            last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (coding_agent))""")
+    uag_conn.commit()
+print(f"▸ Syncing {UAG_CODING_AGENT_TABLE} → uag_coding_agent_usage ...")
+try:
+    ca_rows = spark.read.table(UAG_CODING_AGENT_TABLE).collect()
+    values = [(r.coding_agent, int(r.request_count or 0), int(r.unique_users or 0),
+               int(r.active_days or 0), int(r.total_tokens or 0), r.max_event_time, now) for r in ca_rows]
+    with uag_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE uag_coding_agent_usage")
+        if values:
+            execute_values(cur,
+                """INSERT INTO uag_coding_agent_usage
+                   (coding_agent, request_count, unique_users, active_days, total_tokens, max_event_time, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+    uag_conn.commit()
+    uag_ca_count = len(values)
+    print(f"  ✅ {uag_ca_count} coding-agent rows synced")
+except Exception as exc:
+    uag_conn.rollback()
+    print(f"  ⚠️  uag_coding_agent_usage sync failed: {exc}")
+
 uag_conn.close()
 
 # COMMAND ----------

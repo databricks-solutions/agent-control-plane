@@ -719,6 +719,29 @@ export function useGuardrailCoverage() {
   })
 }
 
+export interface UagCodingAgents {
+  as_of: string | null
+  agents: Array<{
+    coding_agent: string
+    request_count: number
+    unique_users: number
+    active_days: number
+    total_tokens: number
+  }>
+}
+
+/** Coding-agent activity (Claude Code / Codex / Cursor / Gemini CLI) from UAG usage. */
+export function useUagCodingAgents() {
+  return useQuery({
+    queryKey: ['gateway', 'uag-coding-agents'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/uag-coding-agents')
+      return data as UagCodingAgents
+    },
+    staleTime: GW_STALE,
+  })
+}
+
 /** Daily UAG v2 usage series (requests + tokens) for trend charts. */
 export function useUagV2Timeseries() {
   return useQuery({
