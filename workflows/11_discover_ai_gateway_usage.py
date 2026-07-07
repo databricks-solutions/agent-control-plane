@@ -349,7 +349,7 @@ try:
     ca_rows_raw = _execute_sql(f"""
         SELECT CASE
                  WHEN lower(user_agent) LIKE 'claude-cli%' OR lower(user_agent) LIKE '%claude-code%' THEN 'Claude Code'
-                 WHEN lower(user_agent) LIKE '%codex%'                                                THEN 'Codex'
+                 WHEN lower(user_agent) LIKE '%codex/%'                                               THEN 'Codex'
                  WHEN lower(user_agent) LIKE 'cursor%'  OR lower(api_type) LIKE 'cursor%'             THEN 'Cursor'
                  WHEN lower(user_agent) LIKE '%gemini-cli%'                                           THEN 'Gemini CLI'
                  ELSE NULL END                                        AS coding_agent,

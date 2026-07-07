@@ -386,7 +386,11 @@ function UagV2TrendCard() {
  * not in the usage table). Hidden when no coding-agent traffic. */
 function CodingAgentsCard() {
   const { data, isLoading } = useUagCodingAgents()
+  const sort = useSort('request_count', 'desc')
   const agents = data?.agents || []
+  const sorted = useMemo(() => sortRows(agents, sort.sort, (a: any, k) =>
+    k === 'coding_agent' ? (a.coding_agent || '').toLowerCase() : Number(a[k] || 0)
+  ), [agents, sort.sort])
   if (isLoading || agents.length === 0) return null
   return (
     <Card>
@@ -402,15 +406,15 @@ function CodingAgentsCard() {
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
-              <th className="py-2 font-medium">Coding Agent</th>
-              <th className="py-2 font-medium text-right">Requests</th>
-              <th className="py-2 font-medium text-right">Users</th>
-              <th className="py-2 font-medium text-right">Active Days</th>
-              <th className="py-2 font-medium text-right">Tokens</th>
+              <SortableHeader label="Coding Agent" sortKey="coding_agent" current={sort.sort} onToggle={sort.toggle} />
+              <SortableHeader label="Requests" sortKey="request_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+              <SortableHeader label="Users" sortKey="unique_users" current={sort.sort} onToggle={sort.toggle} align="right" />
+              <SortableHeader label="Active Days" sortKey="active_days" current={sort.sort} onToggle={sort.toggle} align="right" />
+              <SortableHeader label="Tokens" sortKey="total_tokens" current={sort.sort} onToggle={sort.toggle} align="right" />
             </tr>
           </thead>
           <tbody>
-            {agents.map((a) => (
+            {sorted.map((a: any) => (
               <tr key={a.coding_agent} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
                 <td className="py-1.5 font-medium">{a.coding_agent}</td>
                 <td className="py-1.5 text-right tabular-nums">{a.request_count.toLocaleString()}</td>

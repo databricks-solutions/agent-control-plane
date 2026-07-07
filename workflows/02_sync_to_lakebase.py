@@ -1760,6 +1760,7 @@ try:
             uag_conn.commit()
     print(f"  ✅ {uag_mcp_count} UAG MCP tool rows synced")
 except Exception as exc:
+    uag_conn.rollback()  # clear aborted txn so the next block's DDL doesn't crash
     print(f"  ⚠️  uag_mcp_tool_daily sync failed: {exc}")
 
 # Sync uag_guardrail_daily (guardrail coverage per guarded endpoint).
@@ -1796,6 +1797,7 @@ try:
             uag_conn.commit()
     print(f"  ✅ {uag_gr_count} UAG guardrail rows synced")
 except Exception as exc:
+    uag_conn.rollback()  # clear aborted txn so the next block's DDL doesn't crash
     print(f"  ⚠️  uag_guardrail_daily sync failed: {exc}")
 
 # Sync uag_usage_timeseries_daily (daily requests/tokens for v2 trend charts).
@@ -1831,6 +1833,7 @@ try:
             uag_conn.commit()
     print(f"  ✅ {uag_ts_count} UAG time-series rows synced")
 except Exception as exc:
+    uag_conn.rollback()  # clear aborted txn so the next block's DDL doesn't crash
     print(f"  ⚠️  uag_usage_timeseries_daily sync failed: {exc}")
 
 # Sync uag_coding_agent_usage (coding-agent activity classified by user_agent).
