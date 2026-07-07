@@ -657,25 +657,9 @@ def get_all_product_costs(days: int = 30, workspace_id: Optional[str] = None) ->
     )
 
 
-def get_cost_by_tag(tag_key: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Return MODEL_SERVING cost attributed by custom_tag.
-
-    Window aggregate (retention window owned by workflow 09); workspace-agnostic
-    because custom tags span workspaces. Optionally filter to a single tag_key.
-    """
-    if tag_key:
-        return execute_query(
-            """SELECT tag_key, tag_value, total_cost_usd::NUMERIC(18,2) AS total_cost_usd
-               FROM billing_cost_by_tag
-               WHERE tag_key = %s
-               ORDER BY total_cost_usd DESC""",
-            (tag_key,),
-        )
-    return execute_query(
-        """SELECT tag_key, tag_value, total_cost_usd::NUMERIC(18,2) AS total_cost_usd
-           FROM billing_cost_by_tag
-           ORDER BY tag_key, total_cost_usd DESC""",
-    )
+# Cost-by-tag is served exclusively through get_all_page_data (step 11); the
+# Governance page loads the full set once and filters/sorts it client-side, so
+# there is no standalone read function or /cost-by-tag route.
 
 
 # ── cache status ─────────────────────────────────────────────────
