@@ -265,6 +265,12 @@ def ensure_billing_tables():
         "CREATE INDEX IF NOT EXISTS idx_btag_key ON billing_cost_by_tag (tag_key)",
         # Add value_text column (idempotent) for storing non-numeric metadata
         "ALTER TABLE billing_cache_meta ADD COLUMN IF NOT EXISTS value_text TEXT",
+        # Reconcile last_synced on billing_cost_by_tag. This table is created and
+        # owned by the app SP, so the sync workflow (a different Postgres role)
+        # cannot ALTER it — only the owner can. The workflow writes last_synced
+        # on INSERT, so the column must exist before the first sync or the INSERT
+        # fails on a missing column and the Cost by Tag tab stays empty.
+        "ALTER TABLE billing_cost_by_tag ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
     ]
 
     for stmt in ddl_statements:

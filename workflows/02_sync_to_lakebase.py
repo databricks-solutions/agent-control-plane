@@ -1979,10 +1979,10 @@ with billing_conn.cursor() as cur:
         "ALTER TABLE billing_token_daily          ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
         "ALTER TABLE billing_product_daily        ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
         "ALTER TABLE billing_user_endpoint_daily  ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
-        # billing_cost_by_tag is also created by the app's ensure_billing_tables
-        # WITHOUT last_synced; the CREATE above is then a no-op, so reconcile the
-        # column here (matches the pattern for the four sibling tables) or the
-        # sync INSERT below fails on a missing column and the tab stays empty.
+        # Reconcile last_synced on billing_cost_by_tag when the workflow owns the
+        # table. When the app SP owns it instead, this ALTER is permission-denied
+        # (only the owner can ALTER) and rolled back harmlessly — the app's own
+        # ensure_billing_tables runs the matching reconcile as the owner.
         "ALTER TABLE billing_cost_by_tag          ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
         "CREATE INDEX IF NOT EXISTS idx_bsd_ws  ON billing_serving_daily  (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_btd_ws  ON billing_token_daily    (workspace_id)",
