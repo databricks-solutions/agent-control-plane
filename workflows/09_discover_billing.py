@@ -65,6 +65,7 @@ TOKEN_TABLE    = f"{CATALOG}.{SCHEMA}.billing_token_daily"
 PRODUCT_TABLE  = f"{CATALOG}.{SCHEMA}.billing_product_daily"
 USER_EP_TABLE  = f"{CATALOG}.{SCHEMA}.billing_user_endpoint_daily"
 USER_COST_TABLE = f"{CATALOG}.{SCHEMA}.billing_user_cost_daily"
+TAG_COST_TABLE  = f"{CATALOG}.{SCHEMA}.billing_cost_by_tag"
 
 print(f"Target tables:")
 print(f"  {SERVING_TABLE}")
@@ -80,6 +81,13 @@ print(f"Retention: {RETENTION_DAYS} days")
 # MAGIC ## Schemas
 
 # COMMAND ----------
+
+TAG_COST_SCHEMA = StructType([
+    StructField("tag_key", StringType(), False),
+    StructField("tag_value", StringType(), False),
+    StructField("total_cost_usd", DecimalType(18, 4), True),
+    StructField("discovered_at", TimestampType(), False),
+])
 
 SERVING_SCHEMA = StructType([
     StructField("usage_date", StringType(), False),
@@ -465,6 +473,50 @@ print(f"✅ Wrote {len(user_cost_rows)} rows to {USER_COST_TABLE}")
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## Query 6: billing_cost_by_tag (MODEL_SERVING $ attributed by custom_tag)
+# MAGIC Explodes custom_tags for an allowlist of business/cost-attribution keys and
+# MAGIC joins list_prices for USD. System tags (EndpointId, ServingType, …) are
+# MAGIC excluded so the view is meaningful cost attribution, not tag noise.
+
+# COMMAND ----------
+
+print(f"▸ Querying system.billing.usage for cost-by-tag ({RETENTION_DAYS} days) …")
+tag_cost_rows = _execute_sql(f"""
+    WITH priced AS (
+        SELECT u.custom_tags,
+               u.usage_quantity * COALESCE(lp.pricing.effective_list.default, lp.pricing.default, 0) AS usd
+        FROM system.billing.usage u
+        LEFT JOIN system.billing.list_prices lp
+            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
+            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
+        WHERE u.billing_origin_product = 'MODEL_SERVING'
+          AND u.usage_date >= current_date() - INTERVAL {RETENTION_DAYS} DAYS
+          AND u.custom_tags IS NOT NULL
+    )
+    SELECT lower(k)              AS tag_key,
+           custom_tags[k]        AS tag_value,
+           ROUND(SUM(usd), 4)    AS total_cost_usd
+    FROM priced LATERAL VIEW explode(map_keys(custom_tags)) t AS k
+    WHERE lower(k) IN ('project','team','environment','app','agent','owner',
+                       'cost_center','business_unit','use_case','source')
+      AND custom_tags[k] IS NOT NULL AND custom_tags[k] != ''
+    GROUP BY lower(k), custom_tags[k]
+    HAVING SUM(usd) > 0
+    ORDER BY total_cost_usd DESC
+""")
+print(f"  ✅ {len(tag_cost_rows)} cost-by-tag rows")
+
+if tag_cost_rows:
+    rows = [(r.get("tag_key", ""), r.get("tag_value", ""), _dec(r.get("total_cost_usd"), 4), now)
+            for r in tag_cost_rows]
+    spark.createDataFrame(rows, TAG_COST_SCHEMA).write.mode("overwrite").saveAsTable(TAG_COST_TABLE)
+else:
+    spark.createDataFrame([], TAG_COST_SCHEMA).write.mode("overwrite").saveAsTable(TAG_COST_TABLE)
+print(f"✅ Wrote {len(tag_cost_rows)} rows to {TAG_COST_TABLE}")
+
+# COMMAND ----------
+
 result = {
     "status": "success",
     "serving_rows": len(serving_rows),
@@ -472,6 +524,7 @@ result = {
     "product_rows": len(product_rows),
     "user_endpoint_rows": len(user_ep_rows),
     "user_cost_rows": len(user_cost_rows),
+    "tag_cost_rows": len(tag_cost_rows),
     "retention_days": RETENTION_DAYS,
     "discovered_at": now.isoformat(),
 }

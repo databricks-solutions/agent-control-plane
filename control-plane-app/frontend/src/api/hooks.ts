@@ -1027,6 +1027,15 @@ export interface BillingPageData {
   /** "actual" = Unity AI Gateway v2 per-user attribution; "estimate" = token-share split */
   cost_by_user_source: 'actual' | 'estimate'
   tokens_by_user: any[]
+  /** MODEL_SERVING $ attributed by custom_tag (window aggregate, workspace-agnostic) */
+  cost_by_tag: CostByTagRow[]
+}
+
+/** One row of billing_cost_by_tag: a (tag_key, tag_value) pair and its total cost. */
+export interface CostByTagRow {
+  tag_key: string
+  tag_value: string
+  total_cost_usd: number
 }
 
 /**
@@ -1055,6 +1064,7 @@ export function useBillingPageData(days = 30, workspaceId?: string | null) {
         cost_by_user: [],
         cost_by_user_source: 'estimate',
         tokens_by_user: [],
+        cost_by_tag: [],
         ...data,
       } as BillingPageData
     },

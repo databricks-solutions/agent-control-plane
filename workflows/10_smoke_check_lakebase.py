@@ -76,6 +76,7 @@ EXPECTED = [
     # Populated by discovery but legitimately empty in some workspaces.
     # We assert existence; row count of 0 produces a WARN, not a failure.
     "billing_serving_daily",         # may be empty if no model serving in last 90d
+    "billing_cost_by_tag",           # MODEL_SERVING $ by custom_tag; empty if no tagged serving usage
     "observability_traces",
     "observability_trace_details",
     "observability_experiments",

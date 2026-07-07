@@ -1893,6 +1893,7 @@ BTD_TABLE  = f"{CATALOG}.{SCHEMA}.billing_token_daily"
 BPD_TABLE  = f"{CATALOG}.{SCHEMA}.billing_product_daily"
 BUED_TABLE = f"{CATALOG}.{SCHEMA}.billing_user_endpoint_daily"
 BUCD_TABLE = f"{CATALOG}.{SCHEMA}.billing_user_cost_daily"
+BTAG_TABLE = f"{CATALOG}.{SCHEMA}.billing_cost_by_tag"
 
 billing_conn = get_lakebase_connection()
 bsd_count = 0
@@ -1900,6 +1901,7 @@ btd_count = 0
 bpd_count = 0
 bued_count = 0
 bucd_count = 0
+btag_count = 0
 
 # Ensure billing tables (idempotent — also created by app's ensure_billing_tables on startup)
 with billing_conn.cursor() as cur:
@@ -1957,6 +1959,13 @@ with billing_conn.cursor() as cur:
             last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             PRIMARY KEY (usage_date, workspace_id, endpoint_id, run_by)
         )""",
+        """CREATE TABLE IF NOT EXISTS billing_cost_by_tag (
+            tag_key        TEXT          NOT NULL,
+            tag_value      TEXT          NOT NULL,
+            total_cost_usd NUMERIC(18,4) NOT NULL DEFAULT 0,
+            last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (tag_key, tag_value)
+        )""",
         """CREATE TABLE IF NOT EXISTS billing_cache_meta (
             cache_key      TEXT PRIMARY KEY,
             last_refreshed TIMESTAMP WITH TIME ZONE,
@@ -1970,17 +1979,29 @@ with billing_conn.cursor() as cur:
         "ALTER TABLE billing_token_daily          ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
         "ALTER TABLE billing_product_daily        ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
         "ALTER TABLE billing_user_endpoint_daily  ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
+        # Reconcile last_synced on billing_cost_by_tag when the workflow owns the
+        # table. When the app SP owns it instead, this ALTER is permission-denied
+        # (only the owner can ALTER) and rolled back harmlessly — the app's own
+        # ensure_billing_tables runs the matching reconcile as the owner.
+        "ALTER TABLE billing_cost_by_tag          ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
         "CREATE INDEX IF NOT EXISTS idx_bsd_ws  ON billing_serving_daily  (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_btd_ws  ON billing_token_daily    (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_bpd_ws  ON billing_product_daily  (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_bued_ws ON billing_user_endpoint_daily (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_bucd_ws ON billing_user_cost_daily (workspace_id)",
+        "CREATE INDEX IF NOT EXISTS idx_btag_key ON billing_cost_by_tag (tag_key)",
     ]:
+        # Commit each statement independently: these are all idempotent
+        # CREATE/ALTER/INDEX ... IF NOT EXISTS, so one failure must not poison
+        # the shared transaction and silently roll back every later statement
+        # (that is exactly how the billing_cost_by_tag `last_synced` ALTER got
+        # dropped, leaving the sync INSERT to fail on a missing column).
         try:
             cur.execute(ddl)
+            billing_conn.commit()
         except Exception as e:
+            billing_conn.rollback()
             print(f"  DDL warning: {e}")
-    billing_conn.commit()
 
 
 def _stamp_cache_meta(conn, cache_key: str, rows_loaded: int) -> None:
@@ -2155,7 +2176,44 @@ try:
     print(f"  ✅ {bucd_count} user-cost rows synced")
     _stamp_cache_meta(billing_conn, "user_cost_daily", bucd_count)
 except Exception as exc:
+    # Rollback so a failed INSERT here (e.g. billing_user_cost_daily is app-owned
+    # and may be missing last_synced) does not leave the shared connection in an
+    # aborted-transaction state that poisons the next sync block below.
+    billing_conn.rollback()
     print(f"  ⚠️  billing_user_cost_daily sync failed: {exc}")
+
+# Sync billing_cost_by_tag (MODEL_SERVING $ attributed by custom_tag — window aggregate)
+print(f"▸ Syncing {BTAG_TABLE} → billing_cost_by_tag ...")
+try:
+    # Defense-in-depth: clear any aborted transaction inherited from a prior
+    # block so this block's TRUNCATE isn't rejected with "transaction is aborted".
+    billing_conn.rollback()
+    with billing_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE billing_cost_by_tag")
+        billing_conn.commit()
+    btag_rows = spark.read.table(BTAG_TABLE).collect()
+    if btag_rows:
+        values = [(r.tag_key or "", r.tag_value or "", float(r.total_cost_usd or 0))
+                  for r in btag_rows]
+        btag_count = len(values)
+        with billing_conn.cursor() as cur:
+            execute_values(cur,
+                """INSERT INTO billing_cost_by_tag
+                   (tag_key, tag_value, total_cost_usd, last_synced)
+                   VALUES %s
+                   ON CONFLICT (tag_key, tag_value) DO UPDATE SET
+                       total_cost_usd = EXCLUDED.total_cost_usd,
+                       last_synced = NOW()""",
+                [(v[0], v[1], v[2], now) for v in values],
+                page_size=500)
+            billing_conn.commit()
+    print(f"  ✅ {btag_count} cost-by-tag rows synced")
+    _stamp_cache_meta(billing_conn, "cost_by_tag", btag_count)
+except Exception as exc:
+    # Clear any aborted transaction so a future sync block appended after this
+    # one doesn't inherit a poisoned connection (see the uag_conn rollback guards).
+    billing_conn.rollback()
+    print(f"  ⚠️  billing_cost_by_tag sync failed: {exc}")
 
 billing_conn.close()
 
@@ -2265,6 +2323,7 @@ result = {
     "billing_product_daily_rows": bpd_count,
     "billing_user_endpoint_daily_rows": bued_count,
     "billing_user_cost_daily_rows": bucd_count,
+    "billing_cost_by_tag_rows": btag_count,
     "synced_at": datetime.now(timezone.utc).isoformat(),
 }
 print(json.dumps(result, indent=2))
