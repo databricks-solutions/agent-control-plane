@@ -245,12 +245,23 @@ def ensure_billing_tables():
             PRIMARY KEY (usage_date, workspace_id, endpoint_id, run_by)
         )
         """,
+        # Cost attributed by custom_tag (window aggregate, no date grain).
+        # Populated by workflow 09; workspace-agnostic (tags span workspaces).
+        """
+        CREATE TABLE IF NOT EXISTS billing_cost_by_tag (
+            tag_key        TEXT          NOT NULL,
+            tag_value      TEXT          NOT NULL,
+            total_cost_usd NUMERIC(18,4) NOT NULL DEFAULT 0,
+            PRIMARY KEY (tag_key, tag_value)
+        )
+        """,
         # Indexes for fast workspace-filtered reads
         "CREATE INDEX IF NOT EXISTS idx_bsd_ws  ON billing_serving_daily  (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_btd_ws  ON billing_token_daily    (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_bpd_ws  ON billing_product_daily  (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_bued_ws ON billing_user_endpoint_daily (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_bucd_ws ON billing_user_cost_daily (workspace_id)",
+        "CREATE INDEX IF NOT EXISTS idx_btag_key ON billing_cost_by_tag (tag_key)",
         # Add value_text column (idempotent) for storing non-numeric metadata
         "ALTER TABLE billing_cache_meta ADD COLUMN IF NOT EXISTS value_text TEXT",
     ]
@@ -646,6 +657,27 @@ def get_all_product_costs(days: int = 30, workspace_id: Optional[str] = None) ->
     )
 
 
+def get_cost_by_tag(tag_key: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return MODEL_SERVING cost attributed by custom_tag.
+
+    Window aggregate (retention window owned by workflow 09); workspace-agnostic
+    because custom tags span workspaces. Optionally filter to a single tag_key.
+    """
+    if tag_key:
+        return execute_query(
+            """SELECT tag_key, tag_value, total_cost_usd::NUMERIC(18,2) AS total_cost_usd
+               FROM billing_cost_by_tag
+               WHERE tag_key = %s
+               ORDER BY total_cost_usd DESC""",
+            (tag_key,),
+        )
+    return execute_query(
+        """SELECT tag_key, tag_value, total_cost_usd::NUMERIC(18,2) AS total_cost_usd
+           FROM billing_cost_by_tag
+           ORDER BY tag_key, total_cost_usd DESC""",
+    )
+
+
 # ── cache status ─────────────────────────────────────────────────
 
 def get_cache_status() -> Dict[str, Any]:
@@ -862,6 +894,15 @@ def get_all_page_data(days: int = 30, workspace_id: Optional[str] = None) -> Dic
         )
         tokens_by_user = [dict(r) for r in cur.fetchall()]
 
+        # 11. cost by custom_tag (workspace-agnostic, no date grain — the
+        # retention window is owned by workflow 09).
+        cur.execute(
+            """SELECT tag_key, tag_value, total_cost_usd::NUMERIC(18,2) AS total_cost_usd
+               FROM billing_cost_by_tag
+               ORDER BY tag_key, total_cost_usd DESC"""
+        )
+        cost_by_tag = [dict(r) for r in cur.fetchall()]
+
         # Read cache_meta LAST so timestamps reflect the same state as the data
         cur.execute("SELECT * FROM billing_cache_meta ORDER BY cache_key")
         cache_rows = [dict(r) for r in cur.fetchall()]
@@ -903,4 +944,5 @@ def get_all_page_data(days: int = 30, workspace_id: Optional[str] = None) -> Dic
         "cost_by_user": cost_by_user,
         "cost_by_user_source": cost_by_user_source,
         "tokens_by_user": tokens_by_user,
+        "cost_by_tag": cost_by_tag,
     }

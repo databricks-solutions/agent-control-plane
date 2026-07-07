@@ -6,6 +6,7 @@ import {
   useBillingRefresh,
   useBillingCacheStatus,
   type BillingPageData,
+  type CostByTagRow,
 } from '@/api/hooks'
 import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -17,7 +18,7 @@ import { LineChart } from '@/components/charts/LineChart'
 import { BarChart } from '@/components/charts/BarChart'
 import { PieChart } from '@/components/charts/PieChart'
 import { DB_CHART } from '@/lib/brand'
-import { LayoutDashboard, Zap, Server, ChevronDown, ChevronRight, BarChart3, Layers, Globe, RefreshCw, Users, Info } from 'lucide-react'
+import { LayoutDashboard, Zap, Server, ChevronDown, ChevronRight, BarChart3, Layers, Globe, RefreshCw, Users, Info, Tag } from 'lucide-react'
 
 /* ── helpers ──────────────────────────────────────────────────── */
 
@@ -55,6 +56,7 @@ const TABS = [
   { key: 'endpoints', label: 'Endpoint Costs', icon: Server },
   { key: 'tokens', label: 'Token Usage', icon: Zap },
   { key: 'products', label: 'All Products', icon: Layers },
+  { key: 'tags', label: 'Cost by Tag', icon: Tag },
   { key: 'guardrails', label: 'Guardrails', icon: BarChart3 },
 ] as const
 
@@ -231,6 +233,7 @@ export default function GovernancePage() {
       {tab === 'endpoints' && <EndpointCostsTab data={pageData} />}
       {tab === 'tokens' && <TokenUsageTab data={pageData} />}
       {tab === 'products' && <AllProductsTab data={pageData} />}
+      {tab === 'tags' && <CostByTagTab data={pageData} />}
       {tab === 'guardrails' && <GuardrailsTab />}
     </div>
   )
@@ -452,6 +455,165 @@ function CostByUserSection({ costByUser, source = 'estimate' }: { costByUser: an
           <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
         </CardContent>
       </Card>
+    </div>
+  )
+}
+
+/* ── Cost by Tag Tab ──────────────────────────────────────────── */
+
+// Human labels for the allowlisted tag keys emitted by workflow 09.
+const TAG_KEY_LABELS: Record<string, string> = {
+  project: 'Project',
+  team: 'Team',
+  environment: 'Environment',
+  app: 'App',
+  agent: 'Agent',
+  owner: 'Owner',
+  cost_center: 'Cost Center',
+  business_unit: 'Business Unit',
+  use_case: 'Use Case',
+  source: 'Source',
+}
+
+function prettyTagKey(k: string): string {
+  return TAG_KEY_LABELS[k] || k.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+function CostByTagTab({ data }: { data?: BillingPageData }) {
+  const rows = useMemo<CostByTagRow[]>(() => data?.cost_by_tag || [], [data])
+
+  // Distinct tag keys present, ordered by total cost so the busiest is first.
+  const tagKeys = useMemo(() => {
+    const totals: Record<string, number> = {}
+    for (const r of rows) totals[r.tag_key] = (totals[r.tag_key] || 0) + Number(r.total_cost_usd || 0)
+    return Object.keys(totals).sort((a, b) => totals[b] - totals[a])
+  }, [rows])
+
+  const [selectedKey, setSelectedKey] = useState<string>('')
+  // Default to the top tag key once data arrives; keep a valid selection if the
+  // key set changes across refreshes.
+  useEffect(() => {
+    if (tagKeys.length && !tagKeys.includes(selectedKey)) setSelectedKey(tagKeys[0])
+  }, [tagKeys, selectedKey])
+
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
+  const { sort, toggle } = useSort<string>('total_cost_usd')
+
+  // Reset to the first page whenever the tag key changes.
+  useEffect(() => setPage(0), [selectedKey])
+
+  const keyRows = useMemo(() => rows.filter((r) => r.tag_key === selectedKey), [rows, selectedKey])
+
+  const sorted = useMemo(() => sortRows(keyRows, sort, (r: CostByTagRow, k) => {
+    if (k === 'tag_value') return (r.tag_value || '').toLowerCase()
+    // "% of Key" is monotonic with cost within a single key, so sort by cost.
+    if (k === 'pct') return Number(r.total_cost_usd || 0)
+    return Number((r as any)[k] || 0)
+  }), [keyRows, sort])
+
+  const paged = sorted.slice(page * pageSize, (page + 1) * pageSize)
+
+  const keyTotal = useMemo(() => keyRows.reduce((s, r) => s + Number(r.total_cost_usd || 0), 0), [keyRows])
+
+  const barData = useMemo(() =>
+    [...keyRows]
+      .sort((a, b) => Number(b.total_cost_usd || 0) - Number(a.total_cost_usd || 0))
+      .slice(0, 10)
+      .map((r) => ({
+        name: (r.tag_value || '—').length > 25 ? (r.tag_value || '—').slice(0, 25) + '…' : (r.tag_value || '—'),
+        value: Math.round(Number(r.total_cost_usd || 0) * 100) / 100,
+      })),
+    [keyRows])
+
+  if (rows.length === 0) {
+    return (
+      <Card>
+        <CardContent className="py-16 text-center text-gray-400 dark:text-gray-500">
+          <Tag className="w-8 h-8 mx-auto mb-3 opacity-40" />
+          <p className="text-sm">No tagged model-serving usage found.</p>
+          <p className="text-xs mt-1">
+            Add cost-attribution tags (e.g. <code>project</code>, <code>team</code>, <code>owner</code>) to
+            serving endpoints to break costs down here.
+          </p>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Key selector + explainer */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Tag className="w-4 h-4 text-gray-400 dark:text-gray-500" />
+          <select
+            value={selectedKey}
+            onChange={(e) => setSelectedKey(e.target.value)}
+            className="border rounded-lg px-3 py-2 text-sm min-w-[200px] dark:bg-gray-700 dark:border-gray-600 dark:text-gray-200"
+          >
+            {tagKeys.map((k) => (
+              <option key={k} value={k}>{prettyTagKey(k)}</option>
+            ))}
+          </select>
+        </div>
+        <span className="text-xs text-gray-400 dark:text-gray-500">
+          Model-serving cost attributed by custom tag. Windowed total owned by the discovery workflow.
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Tag className="w-4 h-4 text-blue-600" /> Top {prettyTagKey(selectedKey)} values by cost
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {barData.length ? (
+              <BarChart data={barData} dataKey="value" nameKey="name" multiColor height={300} />
+            ) : (
+              <div className="text-gray-400 dark:text-gray-500 text-center py-12">No data</div>
+            )}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Tag className="w-4 h-4 text-blue-600" /> {prettyTagKey(selectedKey)} Detail
+              <span className="ml-1 text-xs font-normal text-gray-400">· {fmtCost(keyTotal)} total</span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b text-gray-500 dark:text-gray-400 dark:border-gray-700">
+                    <SortableHeader label={prettyTagKey(selectedKey)} sortKey="tag_value" current={sort} onToggle={toggle} />
+                    <SortableHeader label="Cost ($)" sortKey="total_cost_usd" current={sort} onToggle={toggle} align="right" />
+                    <SortableHeader label="% of Key" sortKey="pct" current={sort} onToggle={toggle} align="right" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {paged.map((r) => (
+                    <tr key={r.tag_value} className="border-b border-gray-100 dark:border-gray-700/50">
+                      <td className="py-2 text-xs font-mono truncate max-w-[240px]">{r.tag_value || '—'}</td>
+                      <td className="py-2 text-right font-medium">{fmtCost(Number(r.total_cost_usd || 0))}</td>
+                      <td className="py-2 text-right text-gray-500">
+                        {keyTotal > 0 ? ((Number(r.total_cost_usd || 0) / keyTotal) * 100).toFixed(1) : '0.0'}%
+                      </td>
+                    </tr>
+                  ))}
+                  {keyRows.length === 0 && (
+                    <tr><td colSpan={3} className="py-8 text-center text-gray-400">No data for this tag</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+          </CardContent>
+        </Card>
+      </div>
     </div>
   )
 }
