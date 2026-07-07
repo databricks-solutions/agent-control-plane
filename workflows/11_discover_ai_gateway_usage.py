@@ -56,6 +56,7 @@ UAG_BREAKDOWN_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_breakdown"
 UAG_MCP_TOOL_TABLE = f"{CATALOG}.{SCHEMA}.uag_mcp_tool_daily"
 UAG_GUARDRAIL_TABLE = f"{CATALOG}.{SCHEMA}.uag_guardrail_daily"
 UAG_TIMESERIES_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_timeseries_daily"
+UAG_CODING_AGENT_TABLE = f"{CATALOG}.{SCHEMA}.uag_coding_agent_usage"
 print(f"Target tables: {UAG_TABLE}, {UAG_BREAKDOWN_TABLE}, {UAG_MCP_TOOL_TABLE}, {UAG_GUARDRAIL_TABLE}, {UAG_TIMESERIES_TABLE} | retention {RETENTION_DAYS}d")
 
 # COMMAND ----------
@@ -99,6 +100,20 @@ UAG_MCP_TOOL_SCHEMA = StructType([
     StructField("request_count", LongType(), True),
     StructField("error_count", LongType(), True),
     StructField("unique_users", LongType(), True),
+    StructField("max_event_time", StringType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+# Coding-agent activity: classify traffic by user_agent (claude-cli → Claude Code,
+# codex, cursor, gemini-cli). One row per coding agent. NOTE: activity only
+# (requests/tokens/users/active-days) — sessions/commits/lines-of-code are NOT in
+# system.ai_gateway.usage and would need coding-agent-specific telemetry.
+UAG_CODING_AGENT_SCHEMA = StructType([
+    StructField("coding_agent",  StringType(), False),
+    StructField("request_count", LongType(), True),
+    StructField("unique_users",  LongType(), True),
+    StructField("active_days",   LongType(), True),
+    StructField("total_tokens",  LongType(), True),
     StructField("max_event_time", StringType(), True),
     StructField("discovered_at", TimestampType(), False),
 ])
@@ -327,6 +342,44 @@ print(f"✅ Wrote {len(ts_rows_raw)} rows to {UAG_TIMESERIES_TABLE}")
 
 # COMMAND ----------
 
+# Coding-agent activity — classify by user_agent (Claude Code / Codex / Cursor /
+# Gemini CLI). Activity only; no sessions/commits/LOC (not in this table).
+print("▸ Querying ai_gateway.usage coding-agent activity …")
+try:
+    ca_rows_raw = _execute_sql(f"""
+        SELECT CASE
+                 WHEN lower(user_agent) LIKE 'claude-cli%' OR lower(user_agent) LIKE '%claude-code%' THEN 'Claude Code'
+                 WHEN lower(user_agent) LIKE '%codex/%'                                               THEN 'Codex'
+                 WHEN lower(user_agent) LIKE 'cursor%'  OR lower(api_type) LIKE 'cursor%'             THEN 'Cursor'
+                 WHEN lower(user_agent) LIKE '%gemini-cli%'                                           THEN 'Gemini CLI'
+                 ELSE NULL END                                        AS coding_agent,
+               COUNT(*)                                               AS request_count,
+               COUNT(DISTINCT requester)                              AS unique_users,
+               COUNT(DISTINCT CAST(event_time AS DATE))               AS active_days,
+               COALESCE(SUM(total_tokens), 0)                         AS total_tokens,
+               CAST(MAX(event_time) AS STRING)                        AS max_event_time
+        FROM system.ai_gateway.usage
+        WHERE event_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
+        GROUP BY 1
+        HAVING coding_agent IS NOT NULL
+        ORDER BY request_count DESC
+    """)
+    print(f"  ✅ {len(ca_rows_raw)} coding-agent rows")
+except Exception as exc:
+    ca_rows_raw = []
+    print(f"  ⚠️  coding-agent query unavailable: {exc}")
+
+if ca_rows_raw:
+    rows = [(r.get("coding_agent", ""), to_int(r.get("request_count")), to_int(r.get("unique_users")),
+             to_int(r.get("active_days")), to_int(r.get("total_tokens")), r.get("max_event_time"), now)
+            for r in ca_rows_raw]
+    spark.createDataFrame(rows, UAG_CODING_AGENT_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_CODING_AGENT_TABLE)
+else:
+    spark.createDataFrame([], UAG_CODING_AGENT_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_CODING_AGENT_TABLE)
+print(f"✅ Wrote {len(ca_rows_raw)} rows to {UAG_CODING_AGENT_TABLE}")
+
+# COMMAND ----------
+
 # Per-tool MCP activity — service_type = MCP_SERVICE rows carry service_name (UC FQN)
 # and mcp_metadata.{tool_name, server_type}. tool_name can be null (server-level call).
 print("▸ Querying ai_gateway.usage MCP tool activity (service_type = MCP_SERVICE) …")
@@ -414,7 +467,7 @@ print(f"✅ Wrote {len(gr_rows_raw)} rows to {UAG_GUARDRAIL_TABLE}")
 
 result = {"status": "success", "uag_endpoint_rows": len(rows_raw), "uag_breakdown_rows": len(bd_rows),
           "uag_mcp_tool_rows": len(mcp_rows_raw), "uag_guardrail_rows": len(gr_rows_raw),
-          "uag_timeseries_rows": len(ts_rows_raw),
+          "uag_timeseries_rows": len(ts_rows_raw), "uag_coding_agent_rows": len(ca_rows_raw),
           "retention_days": RETENTION_DAYS, "discovered_at": now.isoformat()}
 print(json.dumps(result, indent=2))
 dbutils.notebook.exit(json.dumps(result))

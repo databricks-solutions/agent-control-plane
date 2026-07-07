@@ -194,6 +194,13 @@ def uag_v2_timeseries():
     return gateway_service.get_uag_v2_timeseries()
 
 
+@router.get("/uag-coding-agents")
+def uag_coding_agents():
+    """Coding-agent activity (Claude Code / Codex / Cursor / Gemini CLI) from
+    Unity AI Gateway usage — requests, users, active days, tokens."""
+    return gateway_service.get_uag_coding_agents()
+
+
 @router.get("/guardrail-coverage")
 def guardrail_coverage():
     """Guardrail coverage/activity per endpoint from Unity AI Gateway v2

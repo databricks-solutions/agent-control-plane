@@ -817,6 +817,42 @@ def get_uag_v2_timeseries() -> Dict[str, Any]:
     }
 
 
+def get_uag_coding_agents() -> Dict[str, Any]:
+    """Coding-agent activity from `uag_coding_agent_usage` (classified from
+    user_agent in system.ai_gateway.usage): Claude Code / Codex / Cursor / Gemini
+    CLI, with requests, users, active days, tokens.
+
+    Activity only — sessions / commits / lines-of-code are not in
+    system.ai_gateway.usage. Degrades to empty when unsynced / no coding-agent traffic.
+    """
+    from backend.database import execute_query
+    empty: Dict[str, Any] = {"as_of": None, "agents": []}
+    try:
+        rows = execute_query(
+            """SELECT coding_agent, request_count, unique_users, active_days,
+                      total_tokens, max_event_time
+               FROM uag_coding_agent_usage ORDER BY request_count DESC"""
+        )
+    except Exception as exc:
+        logger.warning("uag_coding_agent_usage not available: %s", exc)
+        return empty
+    if not rows:
+        return empty
+    return {
+        "as_of": _max_as_of(rows),
+        "agents": [
+            {
+                "coding_agent": r.get("coding_agent", ""),
+                "request_count": _row_int(r, "request_count"),
+                "unique_users": _row_int(r, "unique_users"),
+                "active_days": _row_int(r, "active_days"),
+                "total_tokens": _row_int(r, "total_tokens"),
+            }
+            for r in rows
+        ],
+    }
+
+
 def get_usage_summary(days: int = 7) -> List[Dict[str, Any]]:
     """Per-endpoint usage summary from Lakebase cache."""
     from backend.database import execute_query

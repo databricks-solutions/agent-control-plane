@@ -13,6 +13,7 @@ import {
   useGatewayUsageByUser,
   useUagV2Usage,
   useUagV2Timeseries,
+  useUagCodingAgents,
   useUagMcpTools,
   useGuardrailCoverage,
   type UagBreakdownRow,
@@ -349,6 +350,7 @@ function UagV2Section() {
       )}
 
       <UagV2TrendCard />
+      <CodingAgentsCard />
       <UagMcpToolsCard />
       <GuardrailCoverageCard />
     </div>
@@ -376,6 +378,55 @@ function UagV2TrendCard() {
         <CardContent><LineChart data={tokenData} name="Total Tokens" color={DB_CHART.success} /></CardContent>
       </Card>
     </div>
+  )
+}
+
+/* Coding-agent activity (uag_coding_agent_usage) — Claude Code / Codex / Cursor /
+ * Gemini CLI classified from user_agent. Activity only (no sessions/commits/LOC —
+ * not in the usage table). Hidden when no coding-agent traffic. */
+function CodingAgentsCard() {
+  const { data, isLoading } = useUagCodingAgents()
+  const sort = useSort('request_count', 'desc')
+  const agents = data?.agents || []
+  const sorted = useMemo(() => sortRows(agents, sort.sort, (a: any, k) =>
+    k === 'coding_agent' ? (a.coding_agent || '').toLowerCase() : Number(a[k] || 0)
+  ), [agents, sort.sort])
+  if (isLoading || agents.length === 0) return null
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Coding Agents</CardTitle>
+        <p className="text-[11px] text-gray-400 dark:text-gray-500">
+          Activity by coding agent (classified from client user-agent). Requests / users / active days / tokens —
+          sessions &amp; commits aren't in the gateway usage table.
+          {data?.as_of && <> · as of {formatAsOf(data.as_of)}</>}
+        </p>
+      </CardHeader>
+      <CardContent>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
+              <SortableHeader label="Coding Agent" sortKey="coding_agent" current={sort.sort} onToggle={sort.toggle} />
+              <SortableHeader label="Requests" sortKey="request_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+              <SortableHeader label="Users" sortKey="unique_users" current={sort.sort} onToggle={sort.toggle} align="right" />
+              <SortableHeader label="Active Days" sortKey="active_days" current={sort.sort} onToggle={sort.toggle} align="right" />
+              <SortableHeader label="Tokens" sortKey="total_tokens" current={sort.sort} onToggle={sort.toggle} align="right" />
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((a: any) => (
+              <tr key={a.coding_agent} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
+                <td className="py-1.5 font-medium">{a.coding_agent}</td>
+                <td className="py-1.5 text-right tabular-nums">{a.request_count.toLocaleString()}</td>
+                <td className="py-1.5 text-right tabular-nums">{a.unique_users.toLocaleString()}</td>
+                <td className="py-1.5 text-right tabular-nums">{a.active_days.toLocaleString()}</td>
+                <td className="py-1.5 text-right tabular-nums">{a.total_tokens.toLocaleString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
   )
 }
 
