@@ -242,6 +242,7 @@ def ensure_billing_tables():
             run_by         TEXT          NOT NULL DEFAULT '',
             total_dbus     NUMERIC(18,4) NOT NULL DEFAULT 0,
             total_cost_usd NUMERIC(18,4) NOT NULL DEFAULT 0,
+            last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             PRIMARY KEY (usage_date, workspace_id, endpoint_id, run_by)
         )
         """,
@@ -271,6 +272,11 @@ def ensure_billing_tables():
         # on INSERT, so the column must exist before the first sync or the INSERT
         # fails on a missing column and the Cost by Tag tab stays empty.
         "ALTER TABLE billing_cost_by_tag ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
+        # billing_user_cost_daily is likewise app-SP-owned; the sync workflow (a
+        # different Postgres role) writes last_synced on INSERT but cannot ALTER
+        # a table it does not own. Reconcile the column here, as the owner, so the
+        # INSERT stops failing and the "Actual" per-user cost stops going stale.
+        "ALTER TABLE billing_user_cost_daily ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
     ]
 
     for stmt in ddl_statements:
