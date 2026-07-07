@@ -252,6 +252,7 @@ def ensure_billing_tables():
             tag_key        TEXT          NOT NULL,
             tag_value      TEXT          NOT NULL,
             total_cost_usd NUMERIC(18,4) NOT NULL DEFAULT 0,
+            last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             PRIMARY KEY (tag_key, tag_value)
         )
         """,

@@ -1991,11 +1991,17 @@ with billing_conn.cursor() as cur:
         "CREATE INDEX IF NOT EXISTS idx_bucd_ws ON billing_user_cost_daily (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_btag_key ON billing_cost_by_tag (tag_key)",
     ]:
+        # Commit each statement independently: these are all idempotent
+        # CREATE/ALTER/INDEX ... IF NOT EXISTS, so one failure must not poison
+        # the shared transaction and silently roll back every later statement
+        # (that is exactly how the billing_cost_by_tag `last_synced` ALTER got
+        # dropped, leaving the sync INSERT to fail on a missing column).
         try:
             cur.execute(ddl)
+            billing_conn.commit()
         except Exception as e:
+            billing_conn.rollback()
             print(f"  DDL warning: {e}")
-    billing_conn.commit()
 
 
 def _stamp_cache_meta(conn, cache_key: str, rows_loaded: int) -> None:
