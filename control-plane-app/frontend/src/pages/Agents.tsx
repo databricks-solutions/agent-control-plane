@@ -203,7 +203,7 @@ function OverviewTab() {
       custom_app: 'Custom Agent (App)',
       custom_llm: 'Custom LLM',
       external_agent: 'External Agent',
-      genie_space: 'Genie Space',
+      genie_space: 'Genie Agent',
       information_extraction: 'Information Extraction',
       knowledge_assistant: 'Knowledge Assistant',
       multi_agent_supervisor: 'Multi-Agent Supervisor',

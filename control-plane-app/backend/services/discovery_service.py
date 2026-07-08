@@ -795,7 +795,7 @@ def _discover_genie_from_audit_logs() -> List[Dict[str, Any]]:
         if last_active:
             last_active_str = last_active.isoformat() if hasattr(last_active, "isoformat") else str(last_active)
 
-        name = display_name or f"Genie Space {space_id[:8]}…"
+        name = display_name or f"Genie Agent {space_id[:8]}…"
 
         config_dict: Dict[str, Any] = {
             "space_id": space_id,

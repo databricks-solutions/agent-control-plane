@@ -54,7 +54,7 @@ const typeLabels: Record<string, string> = {
   custom_agent: 'Custom Agent',
   custom_app: 'Databricks App',
   external_agent: 'External Model',
-  genie_space: 'Genie Space',
+  genie_space: 'Genie Agent',
 }
 
 /* ── state badge variant ──────────────────────────────────────── */
