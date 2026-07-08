@@ -361,12 +361,15 @@ function ToolUsagePanel() {
    agent_eval_scores: how each agent's traces score on safety, relevance,
    groundedness, etc. Same experiment grain as tool usage. */
 function pctLabel(v: number | null | undefined): string {
-  return v == null ? '—' : `${(v * 100).toFixed(0)}%`
+  return v == null ? '—' : `${Math.round(v * 100)}%`
 }
 function passRateClass(v: number | null | undefined): string {
   if (v == null) return 'text-gray-400 dark:text-gray-500'
-  if (v >= 0.9) return 'text-green-600 dark:text-green-400'
-  if (v >= 0.7) return 'text-amber-600 dark:text-amber-400'
+  // Threshold on the same rounded percentage the label shows, so colour and
+  // number never disagree (e.g. 0.896 → "90%" reads green, not amber).
+  const pct = Math.round(v * 100)
+  if (pct >= 90) return 'text-green-600 dark:text-green-400'
+  if (pct >= 70) return 'text-amber-600 dark:text-amber-400'
   return 'text-red-600 dark:text-red-400'
 }
 
@@ -378,7 +381,9 @@ function EvalScoresPanel() {
   const rows = data?.rows || []
   const sorted = useMemo(() => sortRows(rows, sort.sort, (r: any, k) => {
     if (k === 'assessment_count' || k === 'pass_count' || k === 'fail_count') return Number(r[k] || 0)
-    if (k === 'pass_rate') return r[k] == null ? -1 : Number(r[k])
+    // Return null (not a sentinel) so sortRows pushes ungraded scorers to the
+    // bottom in both directions, instead of ranking them below a genuine 0%.
+    if (k === 'pass_rate') return r[k] == null ? null : Number(r[k])
     return (r[k] || '').toString().toLowerCase()
   }), [rows, sort.sort])
   const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize))

@@ -222,6 +222,27 @@ def _execute_system_sql(sql: str) -> List[Dict[str, Any]]:
 
 # ── System table queries (cross-workspace) ─────────────────────
 
+def _experiment_names(exp_ids) -> Dict[str, str]:
+    """Resolve experiment_id → name from observability_experiments. Best-effort;
+    returns {} on any error or empty input. Shared by the per-experiment rollup
+    endpoints (tool usage, eval scores)."""
+    names: Dict[str, str] = {}
+    ids = {e for e in exp_ids if e}
+    if not ids:
+        return names
+    try:
+        placeholders = ",".join("%s" for _ in ids)
+        for e in execute_query(
+            f"SELECT experiment_id, name FROM observability_experiments "
+            f"WHERE name IS NOT NULL AND experiment_id IN ({placeholders})",
+            tuple(ids),
+        ):
+            names.setdefault(e.get("experiment_id"), e.get("name"))
+    except Exception:
+        pass
+    return names
+
+
 def get_agent_tool_usage() -> Dict[str, Any]:
     """TOOL/RETRIEVER span usage rolled up per experiment (from `agent_tool_usage`,
     produced by 07_discover_uc_otel_traces). Answers what UC functions and vector
@@ -243,19 +264,7 @@ def get_agent_tool_usage() -> Dict[str, Any]:
     if not rows:
         return empty
 
-    exp_ids = {r.get("experiment_id") for r in rows if r.get("experiment_id")}
-    names: Dict[str, str] = {}
-    if exp_ids:
-        try:
-            placeholders = ",".join("%s" for _ in exp_ids)
-            for e in execute_query(
-                f"SELECT experiment_id, name FROM observability_experiments "
-                f"WHERE name IS NOT NULL AND experiment_id IN ({placeholders})",
-                tuple(exp_ids),
-            ):
-                names.setdefault(e.get("experiment_id"), e.get("name"))
-        except Exception:
-            pass
+    names = _experiment_names(r.get("experiment_id") for r in rows)
 
     def _i(r, k):
         return int(r.get(k) or 0)
@@ -316,19 +325,7 @@ def get_agent_eval_scores() -> Dict[str, Any]:
     if not rows:
         return empty
 
-    exp_ids = {r.get("experiment_id") for r in rows if r.get("experiment_id")}
-    names: Dict[str, str] = {}
-    if exp_ids:
-        try:
-            placeholders = ",".join("%s" for _ in exp_ids)
-            for e in execute_query(
-                f"SELECT experiment_id, name FROM observability_experiments "
-                f"WHERE name IS NOT NULL AND experiment_id IN ({placeholders})",
-                tuple(exp_ids),
-            ):
-                names.setdefault(e.get("experiment_id"), e.get("name"))
-        except Exception:
-            pass
+    names = _experiment_names(r.get("experiment_id") for r in rows)
 
     def _i(r, k):
         return int(r.get(k) or 0)
@@ -349,19 +346,31 @@ def get_agent_eval_scores() -> Dict[str, Any]:
             "last_seen": r.get("last_seen") or "",
         })
 
-    graded = [r for r in out if r["pass_rate"] is not None]
-    overall_pass = sum(r["pass_count"] for r in graded)
-    overall_total = sum(r["pass_count"] + r["fail_count"] for r in graded)
-    return {
-        "totals": {
-            "experiments": len({r["experiment_id"] for r in out if r["experiment_id"]}),
-            "scorers": len({r["scorer_name"] for r in out if r["scorer_name"]}),
-            "assessments": sum(r["assessment_count"] for r in out),
-            # blended pass-rate across all yes/no verdicts; null if nothing gradable
-            "pass_rate": (overall_pass / overall_total) if overall_total > 0 else None,
-        },
-        "rows": out,
-    }
+    # Totals come from an UNBOUNDED aggregate, not the LIMIT 1000 row window above,
+    # so KPI cards stay accurate (and the blended pass-rate stays a true global rate)
+    # even when there are more than 1000 (experiment, scorer, source_type) combos.
+    totals: Dict[str, Any] = {"experiments": 0, "scorers": 0, "assessments": 0, "pass_rate": None}
+    try:
+        agg = execute_query(
+            """SELECT COUNT(DISTINCT experiment_id)            AS experiments,
+                      COUNT(DISTINCT scorer_name)              AS scorers,
+                      COALESCE(SUM(assessment_count), 0)       AS assessments,
+                      COALESCE(SUM(pass_count), 0)             AS pass_sum,
+                      COALESCE(SUM(pass_count + fail_count), 0) AS verdict_sum
+               FROM agent_eval_scores"""
+        )
+        a = agg[0] if agg else {}
+        verdicts = int(a.get("verdict_sum") or 0)
+        totals = {
+            "experiments": int(a.get("experiments") or 0),
+            "scorers": int(a.get("scorers") or 0),
+            "assessments": int(a.get("assessments") or 0),
+            "pass_rate": (int(a.get("pass_sum") or 0) / verdicts) if verdicts > 0 else None,
+        }
+    except Exception:
+        pass
+
+    return {"totals": totals, "rows": out}
 
 
 def search_experiments_system_tables(max_results: int = 5000) -> List[Dict[str, Any]]:
