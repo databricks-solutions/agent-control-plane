@@ -56,7 +56,6 @@ const TABS = [
   { key: 'endpoints', label: 'Endpoint Costs', icon: Server },
   { key: 'tokens', label: 'Token Usage', icon: Zap },
   { key: 'products', label: 'All Products', icon: Layers },
-  { key: 'tags', label: 'Cost by Tag', icon: Tag },
   { key: 'guardrails', label: 'Guardrails', icon: BarChart3 },
 ] as const
 
@@ -233,7 +232,6 @@ export default function GovernancePage() {
       {tab === 'endpoints' && <EndpointCostsTab data={pageData} />}
       {tab === 'tokens' && <TokenUsageTab data={pageData} />}
       {tab === 'products' && <AllProductsTab data={pageData} />}
-      {tab === 'tags' && <CostByTagTab data={pageData} />}
       {tab === 'guardrails' && <GuardrailsTab />}
     </div>
   )
@@ -459,7 +457,7 @@ function CostByUserSection({ costByUser, source = 'estimate' }: { costByUser: an
   )
 }
 
-/* ── Cost by Tag Tab ──────────────────────────────────────────── */
+/* ── Cost by Tag (section of the Endpoint Costs tab) ──────────── */
 
 // Human labels for the allowlisted tag keys emitted by workflow 09.
 const TAG_KEY_LABELS: Record<string, string> = {
@@ -479,7 +477,7 @@ function prettyTagKey(k: string): string {
   return TAG_KEY_LABELS[k] || k.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
-function CostByTagTab({ data }: { data?: BillingPageData }) {
+function CostByTagSection({ data }: { data?: BillingPageData }) {
   const rows = useMemo<CostByTagRow[]>(() => data?.cost_by_tag || [], [data])
 
   // Distinct tag keys present, ordered by total cost so the busiest is first.
@@ -526,23 +524,17 @@ function CostByTagTab({ data }: { data?: BillingPageData }) {
       })),
     [keyRows])
 
-  if (rows.length === 0) {
-    return (
-      <Card>
-        <CardContent className="py-16 text-center text-gray-400 dark:text-gray-500">
-          <Tag className="w-8 h-8 mx-auto mb-3 opacity-40" />
-          <p className="text-sm">No tagged model-serving usage found.</p>
-          <p className="text-xs mt-1">
-            Add cost-attribution tags (e.g. <code>project</code>, <code>team</code>, <code>owner</code>) to
-            serving endpoints to break costs down here.
-          </p>
-        </CardContent>
-      </Card>
-    )
-  }
+  // Secondary section of the Endpoint Costs tab — render nothing when there is
+  // no tagged usage rather than a large empty-state card.
+  if (rows.length === 0) return null
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 pt-2">
+      <div className="border-t border-gray-100 dark:border-gray-700/50 pt-6">
+        <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
+          <Tag className="w-4 h-4 text-blue-600" /> Cost Attribution by Tag
+        </h3>
+      </div>
       {/* Key selector + explainer */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
@@ -812,6 +804,9 @@ function EndpointCostsTab({ data }: { data?: BillingPageData }) {
           </CardContent>
         </Card>
       </div>
+
+      {/* Cost attribution by custom tag (moved here from its own tab) */}
+      <CostByTagSection data={data} />
     </div>
   )
 }
