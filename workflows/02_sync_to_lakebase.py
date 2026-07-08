@@ -682,6 +682,13 @@ with obs_conn.cursor() as cur:
             last_seen TEXT,
             last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW())""",
         "CREATE INDEX IF NOT EXISTS idx_atu_exp ON agent_tool_usage (experiment_id)",
+        """CREATE TABLE IF NOT EXISTS agent_eval_scores (
+            experiment_id TEXT, scorer_name TEXT NOT NULL, source_type TEXT,
+            assessment_count BIGINT DEFAULT 0, pass_count BIGINT DEFAULT 0,
+            fail_count BIGINT DEFAULT 0, pass_rate DOUBLE PRECISION,
+            last_seen TEXT,
+            last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW())""",
+        "CREATE INDEX IF NOT EXISTS idx_aes_exp ON agent_eval_scores (experiment_id)",
     ]:
         # Each statement in its own savepoint — protects against the case
         # where the workflow runs as a non-owner of pre-existing tables (the
@@ -1170,6 +1177,36 @@ try:
 except Exception as exc:
     obs_conn.rollback()
     print(f"  ⚠️  agent_tool_usage sync failed: {exc}")
+
+# COMMAND ----------
+
+# Sync agent_eval_scores (F7 — MLflow-3 assessment rollup from 07_discover_uc_otel_traces).
+EVAL_SCORES_DELTA = f"{CATALOG}.{SCHEMA}.agent_eval_scores"
+aes_count = 0
+print(f"▸ Syncing {EVAL_SCORES_DELTA} → agent_eval_scores ...")
+try:
+    # Read first, then truncate+insert in ONE transaction (single commit): a failed
+    # insert rolls back the truncate rather than leaving the table empty.
+    aes_rows = spark.read.table(EVAL_SCORES_DELTA).collect()
+    values = [(r.experiment_id, r.scorer_name, r.source_type,
+               int(r.assessment_count or 0), int(r.pass_count or 0), int(r.fail_count or 0),
+               float(r.pass_rate) if r.pass_rate is not None else None,
+               r.last_seen, now) for r in aes_rows]
+    with obs_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE agent_eval_scores")
+        if values:
+            execute_values(cur,
+                """INSERT INTO agent_eval_scores
+                   (experiment_id, scorer_name, source_type, assessment_count,
+                    pass_count, fail_count, pass_rate, last_seen, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+    obs_conn.commit()
+    aes_count = len(values)
+    print(f"  ✅ {aes_count} agent eval-score rows synced")
+except Exception as exc:
+    obs_conn.rollback()
+    print(f"  ⚠️  agent_eval_scores sync failed: {exc}")
 
 # COMMAND ----------
 

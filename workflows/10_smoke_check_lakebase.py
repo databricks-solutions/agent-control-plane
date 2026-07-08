@@ -90,6 +90,7 @@ EXPECTED = [
     "uag_guardrail_daily",           # only populated when endpoints have UAG v2 guardrails active
     "uag_usage_timeseries_daily",    # daily UAG v2 usage series; empty when no v2 traffic
     "agent_tool_usage",              # TOOL/RETRIEVER span rollup; empty when no traced agents
+    "agent_eval_scores",             # MLflow-3 assessment rollup; empty when no eval'd traces
     "uag_coding_agent_usage",        # coding-agent activity; empty when no coding-agent traffic
     "billing_cache_meta",
     # App-managed tables created in Phase 7 of 02_sync_to_lakebase. These were

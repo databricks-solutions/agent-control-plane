@@ -15,6 +15,7 @@ import {
   useGatewayLogDetail,
   useGatewayLogTimeseries,
   useAgentToolUsage,
+  useAgentEvalScores,
 } from '@/api/hooks'
 import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
 import { RefreshButton } from '@/components/RefreshButton'
@@ -64,6 +65,7 @@ import {
   Calendar,
   Info,
   Wrench,
+  ShieldCheck,
 } from 'lucide-react'
 import { DB_RED_SHADES } from '@/lib/brand'
 
@@ -164,6 +166,7 @@ const tabs = [
   { id: 'experiments', label: 'Experiments', icon: FlaskConical },
   { id: 'runs', label: 'Evaluation Runs', icon: Activity },
   { id: 'tool-usage', label: 'Tool & Asset Usage', icon: Wrench },
+  { id: 'eval-scores', label: 'Quality & Evals', icon: ShieldCheck },
   { id: 'models', label: 'Model Registry', icon: Database },
 ] as const
 
@@ -264,6 +267,7 @@ export default function ObservabilityPage() {
       {activeTab === 'experiments' && <ExperimentsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
       {activeTab === 'runs' && <RunsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
       {activeTab === 'tool-usage' && <ToolUsagePanel />}
+      {activeTab === 'eval-scores' && <EvalScoresPanel />}
       {activeTab === 'models' && <ModelsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
     </div>
   )
@@ -339,6 +343,109 @@ function ToolUsagePanel() {
                     <td className="py-1.5 text-gray-600 dark:text-gray-400 truncate max-w-[220px]" title={r.experiment_name || r.experiment_id}>{r.experiment_name || r.experiment_id || '—'}</td>
                     <td className="py-1.5 text-right tabular-nums">{r.call_count.toLocaleString()}</td>
                     <td className="py-1.5 text-right tabular-nums">{r.trace_count.toLocaleString()}</td>
+                    <td className="py-1.5 text-right text-xs text-gray-500 dark:text-gray-400 tabular-nums">{r.last_seen ? r.last_seen.slice(0, 10) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <TablePagination page={safePage} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+/* ── Quality & Evals Panel (F7) ──────────────────────────────────
+   MLflow-3 assessments (LLM-judge + human) rolled up per experiment from
+   agent_eval_scores: how each agent's traces score on safety, relevance,
+   groundedness, etc. Same experiment grain as tool usage. */
+function pctLabel(v: number | null | undefined): string {
+  return v == null ? '—' : `${Math.round(v * 100)}%`
+}
+function passRateClass(v: number | null | undefined): string {
+  if (v == null) return 'text-gray-400 dark:text-gray-500'
+  // Threshold on the same rounded percentage the label shows, so colour and
+  // number never disagree (e.g. 0.896 → "90%" reads green, not amber).
+  const pct = Math.round(v * 100)
+  if (pct >= 90) return 'text-green-600 dark:text-green-400'
+  if (pct >= 70) return 'text-amber-600 dark:text-amber-400'
+  return 'text-red-600 dark:text-red-400'
+}
+
+function EvalScoresPanel() {
+  const { data, isLoading } = useAgentEvalScores()
+  const sort = useSort('assessment_count', 'desc')
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(15)
+  const rows = data?.rows || []
+  const sorted = useMemo(() => sortRows(rows, sort.sort, (r: any, k) => {
+    if (k === 'assessment_count' || k === 'pass_count' || k === 'fail_count') return Number(r[k] || 0)
+    // Return null (not a sentinel) so sortRows pushes ungraded scorers to the
+    // bottom in both directions, instead of ranking them below a genuine 0%.
+    if (k === 'pass_rate') return r[k] == null ? null : Number(r[k])
+    return (r[k] || '').toString().toLowerCase()
+  }), [rows, sort.sort])
+  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize))
+  const safePage = Math.min(page, totalPages - 1)
+  const paged = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize)
+
+  if (isLoading) return <div className="flex items-center justify-center h-32 text-gray-400 dark:text-gray-500">Loading…</div>
+  if (rows.length === 0) {
+    return (
+      <Card><CardContent className="py-12 text-center text-gray-400 dark:text-gray-500">
+        No eval scores yet — agents need MLflow-3 assessments (LLM-judge or human labels) attached to their traces,
+        and the discovery workflow must have synced them. Sourced from the <code>assessments</code> on Databricks-native
+        <code> trace_logs</code> tables.
+      </CardContent></Card>
+    )
+  }
+  const t = data!.totals
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <KpiCard title="Experiments" value={t.experiments ?? 0} format="number" />
+        <KpiCard title="Scorers" value={t.scorers ?? 0} format="number" />
+        <KpiCard title="Assessments" value={t.assessments ?? 0} format="number" />
+        <KpiCard title="Overall Pass Rate" value={pctLabel(t.pass_rate)} />
+      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Quality & Eval Scores</CardTitle>
+          <p className="text-[11px] text-gray-400 dark:text-gray-500">
+            MLflow-3 assessments (LLM-judge & human) per scorer, rolled up by <strong>experiment</strong> — the app has no
+            experiment→agent mapping yet. Pass rate covers yes/no verdicts only; scorers with non-binary feedback show “—”.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
+                  <SortableHeader label="Scorer" sortKey="scorer_name" current={sort.sort} onToggle={sort.toggle} />
+                  <SortableHeader label="Source" sortKey="source_type" current={sort.sort} onToggle={sort.toggle} />
+                  <SortableHeader label="Experiment" sortKey="experiment_name" current={sort.sort} onToggle={sort.toggle} />
+                  <SortableHeader label="Assessments" sortKey="assessment_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+                  <SortableHeader label="Pass" sortKey="pass_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+                  <SortableHeader label="Fail" sortKey="fail_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+                  <SortableHeader label="Pass Rate" sortKey="pass_rate" current={sort.sort} onToggle={sort.toggle} align="right" />
+                  <SortableHeader label="Last Seen" sortKey="last_seen" current={sort.sort} onToggle={sort.toggle} align="right" />
+                </tr>
+              </thead>
+              <tbody>
+                {paged.map((r: any, i: number) => (
+                  <tr key={`${r.experiment_id}-${r.scorer_name}-${r.source_type}-${i}`} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
+                    <td className="py-1.5 font-medium truncate max-w-[220px]" title={r.scorer_name}>{r.scorer_name}</td>
+                    <td className="py-1.5">
+                      <Badge variant={r.source_type === 'HUMAN' ? 'info' : 'default'} className="text-xs">
+                        {r.source_type === 'HUMAN' ? 'Human' : r.source_type === 'LLM_JUDGE' ? 'LLM judge' : (r.source_type || '—')}
+                      </Badge>
+                    </td>
+                    <td className="py-1.5 text-gray-600 dark:text-gray-400 truncate max-w-[200px]" title={r.experiment_name || r.experiment_id}>{r.experiment_name || r.experiment_id || '—'}</td>
+                    <td className="py-1.5 text-right tabular-nums">{r.assessment_count.toLocaleString()}</td>
+                    <td className="py-1.5 text-right tabular-nums text-green-600 dark:text-green-400">{r.pass_count.toLocaleString()}</td>
+                    <td className="py-1.5 text-right tabular-nums text-red-600 dark:text-red-400">{r.fail_count.toLocaleString()}</td>
+                    <td className={`py-1.5 text-right tabular-nums font-medium ${passRateClass(r.pass_rate)}`}>{pctLabel(r.pass_rate)}</td>
                     <td className="py-1.5 text-right text-xs text-gray-500 dark:text-gray-400 tabular-nums">{r.last_seen ? r.last_seen.slice(0, 10) : '—'}</td>
                   </tr>
                 ))}

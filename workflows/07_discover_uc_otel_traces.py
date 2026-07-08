@@ -43,7 +43,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
-    StructType, StructField, StringType, LongType, TimestampType,
+    StructType, StructField, StringType, LongType, TimestampType, DoubleType,
 )
 
 spark = SparkSession.builder.getOrCreate()
@@ -79,10 +79,12 @@ if not CATALOG or not SCHEMA:
 TRACES_TABLE = f"{CATALOG}.{SCHEMA}.observability_traces_uc_otel"
 DETAILS_TABLE = f"{CATALOG}.{SCHEMA}.observability_trace_details_uc_otel"
 TOOL_USAGE_TABLE = f"{CATALOG}.{SCHEMA}.agent_tool_usage"
+EVAL_SCORES_TABLE = f"{CATALOG}.{SCHEMA}.agent_eval_scores"
 
 print(f"Trace summary target: {TRACES_TABLE}")
 print(f"Trace detail target:  {DETAILS_TABLE}")
 print(f"Tool usage target:    {TOOL_USAGE_TABLE}")
+print(f"Eval scores target:   {EVAL_SCORES_TABLE}")
 print(f"Retention: {RETENTION_DAYS} days")
 
 # COMMAND ----------
@@ -134,6 +136,23 @@ TOOL_USAGE_SCHEMA = StructType([
     StructField("trace_count",   LongType(),   True),
     StructField("last_seen",     StringType(), True),
     StructField("discovered_at", TimestampType(), False),
+])
+
+# Agent eval scores (F7): MLflow-3 online-eval / labeled assessments rolled up per
+# experiment. Each trace's `assessments` array holds one entry per scorer
+# (LLM judge or human). One row per (experiment_id, scorer_name, source_type)
+# with pass/fail counts + pass_rate for yes/no verdicts. Same EXPERIMENT grain
+# as tool usage (no experiment→discovered-agent mapping yet).
+EVAL_SCORES_SCHEMA = StructType([
+    StructField("experiment_id",    StringType(), True),
+    StructField("scorer_name",      StringType(), False),   # e.g. safety, relevance_to_query
+    StructField("source_type",      StringType(), True),    # LLM_JUDGE | HUMAN | CODE
+    StructField("assessment_count", LongType(),   True),
+    StructField("pass_count",       LongType(),   True),
+    StructField("fail_count",       LongType(),   True),
+    StructField("pass_rate",        DoubleType(), True),     # pass/(pass+fail); null if no yes/no verdicts
+    StructField("last_seen",        StringType(), True),
+    StructField("discovered_at",    TimestampType(), False),
 ])
 
 # COMMAND ----------
@@ -573,11 +592,78 @@ else:
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## Agent eval scores (F7 — MLflow-3 assessments → per-experiment rollup)
+# MAGIC
+# MAGIC Explodes the `assessments` array from `trace_logs_*` and keeps entries that
+# MAGIC carry a `feedback.value` (a judge/human verdict; pure `expectation` labels are
+# MAGIC excluded). Rolls up per (experiment, scorer, source_type) with pass/fail counts
+# MAGIC (yes/true/pass vs no/false/fail) and pass_rate. Fail-open per table. Same
+# MAGIC caveat as tool usage: EXPERIMENT grain (no experiment→agent mapping yet).
+
+# COMMAND ----------
+
+eval_scores_rows = []
+for cat, sch, tbl in trace_log_tables:
+    full = f"`{cat}`.`{sch}`.`{tbl}`"
+    label = f"{cat}.{sch}.{tbl}"
+    try:
+        # Cap to the same recent-N window as the other trace_logs loops so the
+        # explode stays bounded and counts line up with the Traces tab.
+        agg = spark.sql(f"""
+            WITH src AS (
+                SELECT trace_id, request_time, trace_location, assessments
+                FROM {full}
+                WHERE request_time >= TIMESTAMP '{RETENTION_CUTOFF_TS.strftime('%Y-%m-%d %H:%M:%S')}'
+                  AND assessments IS NOT NULL
+                ORDER BY request_time DESC
+                LIMIT {MAX_TRACES_PER_TABLE}
+            )
+            SELECT trace_location.mlflow_experiment.experiment_id            AS experiment_id,
+                   a.name                                                    AS scorer_name,
+                   a.source.source_type                                      AS source_type,
+                   COUNT(*)                                                  AS assessment_count,
+                   SUM(CASE WHEN lower(trim(BOTH '"' FROM a.feedback.value))
+                            IN ('yes','true','pass') THEN 1 ELSE 0 END)      AS pass_count,
+                   SUM(CASE WHEN lower(trim(BOTH '"' FROM a.feedback.value))
+                            IN ('no','false','fail') THEN 1 ELSE 0 END)      AS fail_count,
+                   CAST(MAX(a.create_time) AS STRING)                        AS last_seen
+            FROM src LATERAL VIEW explode(assessments) t AS a
+            WHERE a.feedback.value IS NOT NULL
+              AND a.name IS NOT NULL
+            GROUP BY 1, 2, 3
+        """).collect()
+        for r in agg:
+            pc = int(r["pass_count"] or 0)
+            fc = int(r["fail_count"] or 0)
+            # pass_rate only meaningful for yes/no verdicts; null when a scorer
+            # emits neither (e.g. numeric-only feedback) so the UI can hide it.
+            pass_rate = (pc / (pc + fc)) if (pc + fc) > 0 else None
+            eval_scores_rows.append((r["experiment_id"], r["scorer_name"], r["source_type"],
+                                     int(r["assessment_count"] or 0), pc, fc, pass_rate,
+                                     r["last_seen"], NOW))
+        print(f"  ✅ eval-scores {label}: {len(agg)} (scorer,source) rows")
+    except Exception as exc:
+        if _classify_perm_error(str(exc)):
+            per_table_stats.append({"table": label, "shape": "eval_scores", "skipped": "no UC grants"})
+        else:
+            per_table_stats.append({"table": label, "shape": "eval_scores", "error": str(exc)[:200]})
+
+if eval_scores_rows:
+    spark.createDataFrame(eval_scores_rows, EVAL_SCORES_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(EVAL_SCORES_TABLE)
+    print(f"✅ Wrote {len(eval_scores_rows)} eval-score rows to {EVAL_SCORES_TABLE}")
+else:
+    spark.createDataFrame([], EVAL_SCORES_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(EVAL_SCORES_TABLE)
+    print(f"ℹ️  No eval-score rows — empty {EVAL_SCORES_TABLE}")
+
+# COMMAND ----------
+
 result = {
     "status": "success",
     "otel_tables_found": len(otel_tables),
     "trace_log_tables_found": len(trace_log_tables),
     "tool_usage_rows": len(tool_usage_rows),
+    "eval_scores_rows": len(eval_scores_rows),
     "traces": len(all_trace_rows),
     "details": len(all_detail_rows),
     "retention_days": RETENTION_DAYS,
