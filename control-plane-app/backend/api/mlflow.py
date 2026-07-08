@@ -36,6 +36,13 @@ async def agent_tool_usage():
     return mlflow_service.get_agent_tool_usage()
 
 
+@router.get("/agent-eval-scores")
+async def agent_eval_scores():
+    """MLflow-3 eval / assessment scores per experiment — how each agent's traces
+    score on LLM-judge and human assessments (safety, relevance, groundedness, …)."""
+    return mlflow_service.get_agent_eval_scores()
+
+
 @router.get("/experiments")
 async def list_experiments(
     request: Request,

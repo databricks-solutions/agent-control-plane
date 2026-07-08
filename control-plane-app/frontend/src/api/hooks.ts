@@ -282,6 +282,32 @@ export function useAgentToolUsage() {
   })
 }
 
+export interface AgentEvalScores {
+  totals: Partial<{ experiments: number; scorers: number; assessments: number; pass_rate: number | null }>
+  rows: Array<{
+    experiment_id: string
+    experiment_name: string
+    scorer_name: string
+    source_type: string
+    assessment_count: number
+    pass_count: number
+    fail_count: number
+    pass_rate: number | null
+    last_seen: string
+  }>
+}
+
+/** MLflow-3 eval / assessment scores per experiment — LLM-judge & human quality signals. */
+export function useAgentEvalScores() {
+  return useQuery({
+    queryKey: ['mlflow', 'agent-eval-scores'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/mlflow/agent-eval-scores')
+      return data as AgentEvalScores
+    },
+  })
+}
+
 export function useMlflowTraceDetail(requestId: string | null, workspaceId?: string | null) {
   return useQuery({
     queryKey: ['mlflow', 'trace-detail', requestId, workspaceId],

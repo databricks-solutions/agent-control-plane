@@ -294,6 +294,76 @@ def get_agent_tool_usage() -> Dict[str, Any]:
     }
 
 
+def get_agent_eval_scores() -> Dict[str, Any]:
+    """MLflow-3 online-eval / labeled assessments rolled up per experiment (from
+    `agent_eval_scores`, produced by 07_discover_uc_otel_traces). Answers how each
+    agent's traces score on judges/human labels (safety, relevance, groundedness, …).
+
+    Grain is EXPERIMENT — same caveat as get_agent_tool_usage (no experiment→agent
+    mapping yet). Degrades to empty when the table is unsynced or no eval'd traces
+    exist.
+    """
+    empty: Dict[str, Any] = {"totals": {}, "rows": []}
+    try:
+        rows = execute_query(
+            """SELECT experiment_id, scorer_name, source_type, assessment_count,
+                      pass_count, fail_count, pass_rate, last_seen
+               FROM agent_eval_scores ORDER BY assessment_count DESC LIMIT 1000"""
+        )
+    except Exception as exc:
+        logger.warning("agent_eval_scores not available: %s", exc)
+        return empty
+    if not rows:
+        return empty
+
+    exp_ids = {r.get("experiment_id") for r in rows if r.get("experiment_id")}
+    names: Dict[str, str] = {}
+    if exp_ids:
+        try:
+            placeholders = ",".join("%s" for _ in exp_ids)
+            for e in execute_query(
+                f"SELECT experiment_id, name FROM observability_experiments "
+                f"WHERE name IS NOT NULL AND experiment_id IN ({placeholders})",
+                tuple(exp_ids),
+            ):
+                names.setdefault(e.get("experiment_id"), e.get("name"))
+        except Exception:
+            pass
+
+    def _i(r, k):
+        return int(r.get(k) or 0)
+
+    out = []
+    for r in rows:
+        pr = r.get("pass_rate")
+        out.append({
+            "experiment_id": r.get("experiment_id") or "",
+            "experiment_name": names.get(r.get("experiment_id")) or "",
+            "scorer_name": r.get("scorer_name") or "",
+            "source_type": r.get("source_type") or "",
+            "assessment_count": _i(r, "assessment_count"),
+            "pass_count": _i(r, "pass_count"),
+            "fail_count": _i(r, "fail_count"),
+            # pass_rate is null for scorers with no yes/no verdicts (e.g. numeric feedback)
+            "pass_rate": float(pr) if pr is not None else None,
+            "last_seen": r.get("last_seen") or "",
+        })
+
+    graded = [r for r in out if r["pass_rate"] is not None]
+    overall_pass = sum(r["pass_count"] for r in graded)
+    overall_total = sum(r["pass_count"] + r["fail_count"] for r in graded)
+    return {
+        "totals": {
+            "experiments": len({r["experiment_id"] for r in out if r["experiment_id"]}),
+            "scorers": len({r["scorer_name"] for r in out if r["scorer_name"]}),
+            "assessments": sum(r["assessment_count"] for r in out),
+            # blended pass-rate across all yes/no verdicts; null if nothing gradable
+            "pass_rate": (overall_pass / overall_total) if overall_total > 0 else None,
+        },
+        "rows": out,
+    }
+
+
 def search_experiments_system_tables(max_results: int = 5000) -> List[Dict[str, Any]]:
     """Query system.mlflow.experiments_latest for cross-workspace experiments.
 
