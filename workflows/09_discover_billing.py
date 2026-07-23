@@ -549,16 +549,27 @@ print(f"✅ Wrote {len(tag_cost_rows)} rows to {TAG_COST_TABLE}")
 print(f"▸ Querying system.ai_gateway.external_model_spend ({RETENTION_DAYS} days) …")
 try:
     ext_spend_rows = _execute_sql(f"""
-        SELECT usage_metadata.provider              AS provider,
-               usage_metadata.model                 AS model,
-               usage_metadata.endpoint_name         AS endpoint_name,
-               COUNT(*)                             AS call_count,
-               ROUND(SUM(usage_quantity), 6)        AS total_cost_usd,
-               CAST(MAX(usage_end_time) AS STRING)  AS last_seen
+        SELECT COALESCE(usage_metadata.provider, '')      AS provider,
+               COALESCE(usage_metadata.model, '')         AS model,
+               COALESCE(usage_metadata.endpoint_name, '') AS endpoint_name,
+               COUNT(*)                                   AS call_count,
+               ROUND(SUM(usage_quantity), 6)              AS total_cost_usd,
+               CAST(MAX(usage_end_time) AS STRING)        AS last_seen
         FROM system.ai_gateway.external_model_spend
         WHERE usage_date >= current_date() - INTERVAL {RETENTION_DAYS} DAYS
-        GROUP BY 1, 2, 3
-        HAVING SUM(usage_quantity) > 0
+        -- COALESCE the grouping keys so NULL and '' collapse into ONE group here.
+        -- The Lakebase sync coerces NULL→'' to satisfy the NOT NULL PK; if we
+        -- didn't collapse here too, a NULL group and a '' group would both map to
+        -- the same PK inside one INSERT → "ON CONFLICT cannot affect row a second
+        -- time" → the whole external-spend table is left empty (TRUNCATE already
+        -- committed). Group on the coerced value to keep 09's grain == the PK.
+        GROUP BY COALESCE(usage_metadata.provider, ''),
+                 COALESCE(usage_metadata.model, ''),
+                 COALESCE(usage_metadata.endpoint_name, '')
+        -- Gate on the ROUNDED value so what we keep matches what we store: a
+        -- sub-micro-dollar sum that rounds to 0.000000 shouldn't survive as a
+        -- "$0.0000 with N calls" row.
+        HAVING ROUND(SUM(usage_quantity), 6) > 0
         ORDER BY total_cost_usd DESC
     """)
 except Exception as exc:

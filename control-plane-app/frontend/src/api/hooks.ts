@@ -1078,8 +1078,8 @@ export interface ExternalModelSpendRow {
 
 /**
  * Fetch ALL billing data the Governance page needs in a SINGLE request.
- * Runs 8 queries on 1 DB connection (~0.8 s) instead of 7+ parallel
- * requests that each open a new connection (~14 s from local dev).
+ * Runs ~12 small queries on 1 DB connection (~1 s) instead of that many
+ * parallel requests each opening a new connection (~14 s from local dev).
  */
 export function useBillingPageData(days = 30, workspaceId?: string | null) {
   return useQuery({
