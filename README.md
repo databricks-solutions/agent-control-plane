@@ -2,7 +2,7 @@
 
 A management and observability platform for AI agents deployed on Databricks — purpose-built for teams operating production-grade agent infrastructure at scale.
 
-📺 **[View the interactive demo →](https://databricks-solutions.github.io/agent-control-plane/hackathon-demo.html)** (walkthrough of the app; no install required)
+📺 **[View the interactive demo →](https://databricks-solutions.github.io/agent-control-plane/product-demo.html)** (walkthrough of the app; no install required)
 
 <!-- Screenshots: Replace these placeholders with actual screenshots of your deployment -->
 <!-- ![Dashboard](docs/screenshots/governance.png) -->
