@@ -2005,6 +2005,11 @@ with billing_conn.cursor() as cur:
             last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             PRIMARY KEY (tag_key, tag_value)
         )""",
+        # billing_external_model_spend is workflow-OWNED (created here, not by the
+        # app's ensure_billing_tables — like agent_tool_usage / agent_eval_scores).
+        # The workflow therefore owns it and can TRUNCATE/INSERT freely with no
+        # owner-side ALTER and no app-restart-before-discovery ordering dependency.
+        # last_synced is in the CREATE, so no reconcile ALTER is needed below.
         """CREATE TABLE IF NOT EXISTS billing_external_model_spend (
             provider       TEXT          NOT NULL DEFAULT '',
             model          TEXT          NOT NULL DEFAULT '',
@@ -2033,7 +2038,7 @@ with billing_conn.cursor() as cur:
         # (only the owner can ALTER) and rolled back harmlessly — the app's own
         # ensure_billing_tables runs the matching reconcile as the owner.
         "ALTER TABLE billing_cost_by_tag          ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
-        "ALTER TABLE billing_external_model_spend ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
+        # (no billing_external_model_spend ALTER — workflow-owned, CREATE already has last_synced)
         "CREATE INDEX IF NOT EXISTS idx_bsd_ws  ON billing_serving_daily  (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_btd_ws  ON billing_token_daily    (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_bpd_ws  ON billing_product_daily  (workspace_id)",
