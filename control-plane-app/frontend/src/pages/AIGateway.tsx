@@ -507,12 +507,21 @@ function ThrottlingCard() {
   const endpoints = data?.endpoints || []
   const sorted = useMemo(() => sortRows(endpoints, sort.sort, (e: any, k) => {
     if (k === 'endpoint_name') return (e.endpoint_name || '').toLowerCase()
-    if (k === 'throttle_rate') return Number(e.throttle_rate ?? -1)
+    // per-endpoint throttle_rate is always a number here (every row has ≥1
+    // request); pass null through so sortRows' null convention applies if that
+    // ever changes, rather than a sentinel that would misorder.
+    if (k === 'throttle_rate') return e.throttle_rate == null ? null : Number(e.throttle_rate)
     return Number(e[k] || 0)
   }), [endpoints, sort.sort])
   if (isLoading || endpoints.length === 0) return null
   const t = data!.totals
-  const blendedRate = t.throttle_rate != null ? `${(t.throttle_rate * 100).toFixed(1)}%` : '—'
+  // NOTE: no blended fleet-wide throttle-rate badge — the underlying table is
+  // pre-filtered to endpoints that saw ≥1 429/5xx, so a SUM-based blended rate
+  // would divide by erroring-endpoint traffic only and overstate fleet health
+  // (a 50/100 low-traffic endpoint would read "50% throttled"). We badge the
+  // COUNT of affected endpoints instead, and keep the accurate PER-endpoint rate
+  // in the table.
+  const affected = t.endpoints ?? endpoints.length
   const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize))
   const safePage = Math.min(page, totalPages - 1)
   const paged = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize)
@@ -523,12 +532,12 @@ function ThrottlingCard() {
         <CardTitle className="text-base flex items-center gap-2">
           Throttling &amp; Reliability
           <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">
-            {blendedRate} throttled
+            {affected} endpoint{affected === 1 ? '' : 's'} affected
           </span>
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
           Endpoints returning HTTP 429 (rate-limited) or 5xx (server error) through Unity AI Gateway.
-          Only endpoints with at least one 429/5xx are shown.
+          Only endpoints with at least one 429/5xx are shown; rates are per-endpoint (share of that endpoint's own requests).
           {data?.as_of && <> · as of {formatAsOf(data.as_of)}</>}
         </p>
       </CardHeader>

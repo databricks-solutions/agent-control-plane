@@ -821,17 +821,18 @@ def get_throttling() -> Dict[str, Any]:
            FROM uag_throttling_daily
            ORDER BY throttled_count DESC LIMIT 200"""
     )
-    tr = _row_int(agg, "total_requests")
-    thr = _row_int(agg, "throttled_count")
     return {
         "as_of": agg.get("as_of"),
         "totals": {
+            # NOTE: no blended fleet-wide throttle_rate — uag_throttling_daily is
+            # pre-filtered to endpoints with ≥1 429/5xx, so SUM(throttled)/SUM(total)
+            # would divide by erroring-endpoint traffic only and overstate fleet
+            # throttling. The meaningful rate is per-endpoint (below); the headline
+            # is the COUNT of affected endpoints.
             "endpoints": _row_int(agg, "endpoints"),
-            "total_requests": tr,
-            "throttled_count": thr,
+            "total_requests": _row_int(agg, "total_requests"),
+            "throttled_count": _row_int(agg, "throttled_count"),
             "server_error_count": _row_int(agg, "server_error_count"),
-            # blended throttle rate across all endpoints that saw any 429/5xx
-            "throttle_rate": (thr / tr) if tr > 0 else None,
         },
         "endpoints": [
             {

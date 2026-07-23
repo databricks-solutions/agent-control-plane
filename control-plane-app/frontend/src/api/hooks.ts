@@ -747,7 +747,7 @@ export function useGuardrailCoverage() {
 
 export interface Throttling {
   as_of: string | null
-  totals: Partial<{ endpoints: number; total_requests: number; throttled_count: number; server_error_count: number; throttle_rate: number | null }>
+  totals: Partial<{ endpoints: number; total_requests: number; throttled_count: number; server_error_count: number }>
   endpoints: Array<{
     endpoint_name: string
     total_requests: number
