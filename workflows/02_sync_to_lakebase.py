@@ -1908,6 +1908,41 @@ except Exception as exc:
     uag_conn.rollback()
     print(f"  ⚠️  uag_coding_agent_usage sync failed: {exc}")
 
+# Sync uag_throttling_daily (429/5xx per endpoint — reliability signal).
+UAG_THROTTLING_TABLE = f"{CATALOG}.{SCHEMA}.uag_throttling_daily"
+uag_th_count = 0
+with uag_conn.cursor() as cur:
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS uag_throttling_daily (
+            endpoint_name      TEXT NOT NULL,
+            total_requests     BIGINT DEFAULT 0,
+            throttled_count    BIGINT DEFAULT 0,
+            server_error_count BIGINT DEFAULT 0,
+            max_event_time     TEXT,
+            last_synced        TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (endpoint_name))""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_uth_ep ON uag_throttling_daily (endpoint_name)")
+    uag_conn.commit()
+print(f"▸ Syncing {UAG_THROTTLING_TABLE} → uag_throttling_daily ...")
+try:
+    th_rows = spark.read.table(UAG_THROTTLING_TABLE).collect()
+    values = [(r.endpoint_name, int(r.total_requests or 0), int(r.throttled_count or 0),
+               int(r.server_error_count or 0), r.max_event_time, now) for r in th_rows]
+    with uag_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE uag_throttling_daily")
+        if values:
+            execute_values(cur,
+                """INSERT INTO uag_throttling_daily
+                   (endpoint_name, total_requests, throttled_count, server_error_count, max_event_time, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+    uag_conn.commit()
+    uag_th_count = len(values)
+    print(f"  ✅ {uag_th_count} throttling rows synced")
+except Exception as exc:
+    uag_conn.rollback()
+    print(f"  ⚠️  uag_throttling_daily sync failed: {exc}")
+
 uag_conn.close()
 
 # COMMAND ----------

@@ -16,6 +16,7 @@ import {
   useUagCodingAgents,
   useUagMcpTools,
   useGuardrailCoverage,
+  useThrottling,
   type UagBreakdownRow,
   useGatewayInferenceLogs,
   useGatewayMetrics,
@@ -353,6 +354,7 @@ function UagV2Section() {
       <CodingAgentsCard />
       <UagMcpToolsCard />
       <GuardrailCoverageCard />
+      <ThrottlingCard />
     </div>
   )
 }
@@ -485,6 +487,80 @@ function GuardrailCoverageCard() {
                   <td className="py-1.5 text-gray-600 dark:text-gray-400">{e.judge_models || '—'}</td>
                   <td className="py-1.5 text-right tabular-nums">{e.checked_requests.toLocaleString()}</td>
                   <td className="py-1.5 text-right tabular-nums">{e.unique_users.toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <TablePagination page={safePage} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+      </CardContent>
+    </Card>
+  )
+}
+
+/* Throttling / reliability — HTTP 429 + 5xx per endpoint from system.ai_gateway.usage. */
+function ThrottlingCard() {
+  const { data, isLoading } = useThrottling()
+  const sort = useSort('throttled_count', 'desc')
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
+  const endpoints = data?.endpoints || []
+  const sorted = useMemo(() => sortRows(endpoints, sort.sort, (e: any, k) => {
+    if (k === 'endpoint_name') return (e.endpoint_name || '').toLowerCase()
+    // per-endpoint throttle_rate is always a number here (every row has ≥1
+    // request); pass null through so sortRows' null convention applies if that
+    // ever changes, rather than a sentinel that would misorder.
+    if (k === 'throttle_rate') return e.throttle_rate == null ? null : Number(e.throttle_rate)
+    return Number(e[k] || 0)
+  }), [endpoints, sort.sort])
+  if (isLoading || endpoints.length === 0) return null
+  const t = data!.totals
+  // NOTE: no blended fleet-wide throttle-rate badge — the underlying table is
+  // pre-filtered to endpoints that saw ≥1 429/5xx, so a SUM-based blended rate
+  // would divide by erroring-endpoint traffic only and overstate fleet health
+  // (a 50/100 low-traffic endpoint would read "50% throttled"). We badge the
+  // COUNT of affected endpoints instead, and keep the accurate PER-endpoint rate
+  // in the table.
+  const affected = t.endpoints ?? endpoints.length
+  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize))
+  const safePage = Math.min(page, totalPages - 1)
+  const paged = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize)
+  const pct = (v: number | null) => (v == null ? '—' : `${(v * 100).toFixed(1)}%`)
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          Throttling &amp; Reliability
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">
+            {affected} endpoint{affected === 1 ? '' : 's'} affected
+          </span>
+        </CardTitle>
+        <p className="text-[11px] text-gray-400 dark:text-gray-500">
+          Endpoints returning HTTP 429 (rate-limited) or 5xx (server error) through Unity AI Gateway.
+          Only endpoints with at least one 429/5xx are shown; rates are per-endpoint (share of that endpoint's own requests).
+          {data?.as_of && <> · as of {formatAsOf(data.as_of)}</>}
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
+                <SortableHeader label="Endpoint" sortKey="endpoint_name" current={sort.sort} onToggle={sort.toggle} />
+                <SortableHeader label="Requests" sortKey="total_requests" current={sort.sort} onToggle={sort.toggle} align="right" />
+                <SortableHeader label="429" sortKey="throttled_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+                <SortableHeader label="5xx" sortKey="server_error_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+                <SortableHeader label="Throttle Rate" sortKey="throttle_rate" current={sort.sort} onToggle={sort.toggle} align="right" />
+              </tr>
+            </thead>
+            <tbody>
+              {paged.map((e: any, i: number) => (
+                <tr key={`${e.endpoint_name}-${i}`} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
+                  <td className="py-1.5 font-mono text-xs truncate max-w-[260px]" title={e.endpoint_name}>{e.endpoint_name}</td>
+                  <td className="py-1.5 text-right tabular-nums">{e.total_requests.toLocaleString()}</td>
+                  <td className="py-1.5 text-right tabular-nums text-red-600 dark:text-red-400">{e.throttled_count.toLocaleString()}</td>
+                  <td className="py-1.5 text-right tabular-nums text-amber-600 dark:text-amber-400">{e.server_error_count.toLocaleString()}</td>
+                  <td className="py-1.5 text-right tabular-nums font-medium">{pct(e.throttle_rate)}</td>
                 </tr>
               ))}
             </tbody>
