@@ -7,6 +7,7 @@ import {
   useBillingCacheStatus,
   type BillingPageData,
   type CostByTagRow,
+  type ExternalModelSpendRow,
 } from '@/api/hooks'
 import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -18,7 +19,7 @@ import { LineChart } from '@/components/charts/LineChart'
 import { BarChart } from '@/components/charts/BarChart'
 import { PieChart } from '@/components/charts/PieChart'
 import { DB_CHART } from '@/lib/brand'
-import { LayoutDashboard, Zap, Server, ChevronDown, ChevronRight, BarChart3, Layers, Globe, RefreshCw, Users, Info, Tag } from 'lucide-react'
+import { LayoutDashboard, Zap, Server, ChevronDown, ChevronRight, BarChart3, Layers, Globe, RefreshCw, Users, Info, Tag, Boxes } from 'lucide-react'
 
 /* ── helpers ──────────────────────────────────────────────────── */
 
@@ -1084,6 +1085,104 @@ function AllProductsTab({ data }: { data?: BillingPageData }) {
                       </td>
                     </tr>
                   )}
+                </tbody>
+              </table>
+            </div>
+            <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* External-model spend (actual $ for external LLMs via the AI Gateway) */}
+      <ExternalModelSpendSection data={data} />
+    </div>
+  )
+}
+
+/* ── External-model spend (section of the All Products tab) ───── */
+
+function ExternalModelSpendSection({ data }: { data?: BillingPageData }) {
+  const rows = useMemo<ExternalModelSpendRow[]>(() => data?.external_model_spend || [], [data])
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
+  const { sort, toggle } = useSort<string>('total_cost_usd')
+
+  const sorted = useMemo(() => sortRows(rows, sort, (r: ExternalModelSpendRow, k) => {
+    if (k === 'call_count' || k === 'total_cost_usd') return Number((r as any)[k] || 0)
+    return ((r as any)[k] || '').toString().toLowerCase()
+  }), [rows, sort])
+
+  const total = useMemo(() => rows.reduce((s, r) => s + Number(r.total_cost_usd || 0), 0), [rows])
+
+  // By-provider rollup for the bar chart.
+  const byProvider = useMemo(() => {
+    const m: Record<string, number> = {}
+    for (const r of rows) m[r.provider || '—'] = (m[r.provider || '—'] || 0) + Number(r.total_cost_usd || 0)
+    return Object.entries(m)
+      .map(([name, value]) => ({ name, value: Math.round(value * 1e6) / 1e6 }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 10)
+  }, [rows])
+
+  const paged = sorted.slice(page * pageSize, (page + 1) * pageSize)
+
+  // Secondary section — render nothing when there's no external-model routing.
+  if (rows.length === 0) return null
+
+  return (
+    <div className="space-y-4 pt-2">
+      <div className="border-t border-gray-100 dark:border-gray-700/50 pt-6">
+        <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
+          <Boxes className="w-4 h-4 text-blue-600" /> External Model Spend
+          <span className="ml-1 text-xs font-normal text-gray-400">· {fmtCost(total)} total</span>
+        </h3>
+        <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+          Actual billed cost for external models (OpenAI, Microsoft Foundry, …) routed through the Unity AI Gateway.
+          Real dollars from <code>system.ai_gateway.external_model_spend</code> — not estimated.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Boxes className="w-4 h-4 text-blue-600" /> Spend by Provider
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {byProvider.length ? (
+              <BarChart data={byProvider} dataKey="value" nameKey="name" multiColor height={280} />
+            ) : (
+              <div className="text-gray-400 dark:text-gray-500 text-center py-12">No data</div>
+            )}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Boxes className="w-4 h-4 text-blue-600" /> External Model Detail
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b text-gray-500 dark:text-gray-400 dark:border-gray-700">
+                    <SortableHeader label="Provider" sortKey="provider" current={sort} onToggle={toggle} />
+                    <SortableHeader label="Model" sortKey="model" current={sort} onToggle={toggle} />
+                    <SortableHeader label="Calls" sortKey="call_count" current={sort} onToggle={toggle} align="right" />
+                    <SortableHeader label="Cost ($)" sortKey="total_cost_usd" current={sort} onToggle={toggle} align="right" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {paged.map((r, i) => (
+                    <tr key={`${r.provider}-${r.model}-${r.endpoint_name}-${i}`} className="border-b border-gray-100 dark:border-gray-700/50">
+                      <td className="py-2 text-xs"><Badge variant="default" className="text-xs">{r.provider || '—'}</Badge></td>
+                      <td className="py-2 text-xs font-mono truncate max-w-[200px]" title={`${r.model} · ${r.endpoint_name}`}>{r.model || '—'}</td>
+                      <td className="py-2 text-right tabular-nums">{Number(r.call_count || 0).toLocaleString()}</td>
+                      <td className="py-2 text-right font-medium">{fmtCost(Number(r.total_cost_usd || 0))}</td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>

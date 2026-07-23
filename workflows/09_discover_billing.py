@@ -66,6 +66,7 @@ PRODUCT_TABLE  = f"{CATALOG}.{SCHEMA}.billing_product_daily"
 USER_EP_TABLE  = f"{CATALOG}.{SCHEMA}.billing_user_endpoint_daily"
 USER_COST_TABLE = f"{CATALOG}.{SCHEMA}.billing_user_cost_daily"
 TAG_COST_TABLE  = f"{CATALOG}.{SCHEMA}.billing_cost_by_tag"
+EXT_SPEND_TABLE = f"{CATALOG}.{SCHEMA}.billing_external_model_spend"
 
 print(f"Target tables:")
 print(f"  {SERVING_TABLE}")
@@ -73,6 +74,7 @@ print(f"  {TOKEN_TABLE}")
 print(f"  {PRODUCT_TABLE}")
 print(f"  {USER_EP_TABLE}")
 print(f"  {USER_COST_TABLE}")
+print(f"  {EXT_SPEND_TABLE}")
 print(f"Retention: {RETENTION_DAYS} days")
 
 # COMMAND ----------
@@ -86,6 +88,20 @@ TAG_COST_SCHEMA = StructType([
     StructField("tag_key", StringType(), False),
     StructField("tag_value", StringType(), False),
     StructField("total_cost_usd", DecimalType(18, 4), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+# External-model spend: per provider·model·endpoint $ for external LLMs routed
+# through the AI Gateway (OpenAI, Microsoft Foundry, …), from the native
+# system.ai_gateway.external_model_spend table — actual billed cost, not an
+# estimate. Window aggregate (retention window owned here); no date grain.
+EXT_SPEND_SCHEMA = StructType([
+    StructField("provider", StringType(), True),
+    StructField("model", StringType(), True),
+    StructField("endpoint_name", StringType(), True),
+    StructField("call_count", LongType(), True),
+    StructField("total_cost_usd", DecimalType(18, 6), True),
+    StructField("last_seen", StringType(), True),
     StructField("discovered_at", TimestampType(), False),
 ])
 
@@ -522,6 +538,49 @@ print(f"✅ Wrote {len(tag_cost_rows)} rows to {TAG_COST_TABLE}")
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## Query 7: billing_external_model_spend (external LLM $ via AI Gateway)
+# MAGIC Actual billed cost for external models (OpenAI, Microsoft Foundry, …) routed
+# MAGIC through the AI Gateway, from the native `system.ai_gateway.external_model_spend`
+# MAGIC table. Not an estimate — real dollars. Rolled up per provider·model·endpoint.
+
+# COMMAND ----------
+
+print(f"▸ Querying system.ai_gateway.external_model_spend ({RETENTION_DAYS} days) …")
+try:
+    ext_spend_rows = _execute_sql(f"""
+        SELECT usage_metadata.provider              AS provider,
+               usage_metadata.model                 AS model,
+               usage_metadata.endpoint_name         AS endpoint_name,
+               COUNT(*)                             AS call_count,
+               ROUND(SUM(usage_quantity), 6)        AS total_cost_usd,
+               CAST(MAX(usage_end_time) AS STRING)  AS last_seen
+        FROM system.ai_gateway.external_model_spend
+        WHERE usage_date >= current_date() - INTERVAL {RETENTION_DAYS} DAYS
+        GROUP BY 1, 2, 3
+        HAVING SUM(usage_quantity) > 0
+        ORDER BY total_cost_usd DESC
+    """)
+except Exception as exc:
+    # Fail-open: the table is newish (AI Gateway external-model routing) and may
+    # not exist / be readable on every account. Degrade to empty rather than fail
+    # the whole billing discovery run.
+    print(f"  ⚠️  external_model_spend query unavailable: {exc}")
+    ext_spend_rows = []
+print(f"  ✅ {len(ext_spend_rows)} external-model-spend rows")
+
+if ext_spend_rows:
+    rows = [(r.get("provider"), r.get("model"), r.get("endpoint_name"),
+             int(r.get("call_count") or 0), _dec(r.get("total_cost_usd"), 6),
+             r.get("last_seen"), now)
+            for r in ext_spend_rows]
+    spark.createDataFrame(rows, EXT_SPEND_SCHEMA).write.mode("overwrite").saveAsTable(EXT_SPEND_TABLE)
+else:
+    spark.createDataFrame([], EXT_SPEND_SCHEMA).write.mode("overwrite").saveAsTable(EXT_SPEND_TABLE)
+print(f"✅ Wrote {len(ext_spend_rows)} rows to {EXT_SPEND_TABLE}")
+
+# COMMAND ----------
+
 result = {
     "status": "success",
     "serving_rows": len(serving_rows),
@@ -530,6 +589,7 @@ result = {
     "user_endpoint_rows": len(user_ep_rows),
     "user_cost_rows": len(user_cost_rows),
     "tag_cost_rows": len(tag_cost_rows),
+    "ext_spend_rows": len(ext_spend_rows),
     "retention_days": RETENTION_DAYS,
     "discovered_at": now.isoformat(),
 }

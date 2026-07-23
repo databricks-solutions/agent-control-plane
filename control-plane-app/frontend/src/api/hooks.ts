@@ -1055,6 +1055,8 @@ export interface BillingPageData {
   tokens_by_user: any[]
   /** MODEL_SERVING $ attributed by custom_tag (window aggregate, workspace-agnostic) */
   cost_by_tag: CostByTagRow[]
+  /** Actual $ for external LLMs (OpenAI, Foundry, …) routed through the AI Gateway */
+  external_model_spend: ExternalModelSpendRow[]
 }
 
 /** One row of billing_cost_by_tag: a (tag_key, tag_value) pair and its total cost. */
@@ -1062,6 +1064,16 @@ export interface CostByTagRow {
   tag_key: string
   tag_value: string
   total_cost_usd: number
+}
+
+/** One row of billing_external_model_spend: external LLM cost per provider·model·endpoint. */
+export interface ExternalModelSpendRow {
+  provider: string
+  model: string
+  endpoint_name: string
+  call_count: number
+  total_cost_usd: number
+  last_seen: string
 }
 
 /**
@@ -1091,6 +1103,7 @@ export function useBillingPageData(days = 30, workspaceId?: string | null) {
         cost_by_user_source: 'estimate',
         tokens_by_user: [],
         cost_by_tag: [],
+        external_model_spend: [],
         ...data,
       } as BillingPageData
     },

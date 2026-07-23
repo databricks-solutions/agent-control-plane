@@ -257,6 +257,21 @@ def ensure_billing_tables():
             PRIMARY KEY (tag_key, tag_value)
         )
         """,
+        # External-model spend: actual $ for external LLMs (OpenAI, Foundry, …)
+        # routed through the AI Gateway. Populated by workflow 09 from the native
+        # system.ai_gateway.external_model_spend table. Workspace-agnostic.
+        """
+        CREATE TABLE IF NOT EXISTS billing_external_model_spend (
+            provider       TEXT          NOT NULL DEFAULT '',
+            model          TEXT          NOT NULL DEFAULT '',
+            endpoint_name  TEXT          NOT NULL DEFAULT '',
+            call_count     BIGINT        NOT NULL DEFAULT 0,
+            total_cost_usd NUMERIC(18,6) NOT NULL DEFAULT 0,
+            last_seen      TEXT,
+            last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (provider, model, endpoint_name)
+        )
+        """,
         # Indexes for fast workspace-filtered reads
         "CREATE INDEX IF NOT EXISTS idx_bsd_ws  ON billing_serving_daily  (workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_btd_ws  ON billing_token_daily    (workspace_id)",
@@ -277,6 +292,8 @@ def ensure_billing_tables():
         # a table it does not own. Reconcile the column here, as the owner, so the
         # INSERT stops failing and the "Actual" per-user cost stops going stale.
         "ALTER TABLE billing_user_cost_daily ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
+        # billing_external_model_spend: same owner-side reconcile as above.
+        "ALTER TABLE billing_external_model_spend ADD COLUMN IF NOT EXISTS last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
     ]
 
     for stmt in ddl_statements:
@@ -900,6 +917,16 @@ def get_all_page_data(days: int = 30, workspace_id: Optional[str] = None) -> Dic
         )
         cost_by_tag = [dict(r) for r in cur.fetchall()]
 
+        # 12. external-model spend (workspace-agnostic; actual $ for external LLMs
+        # routed through the AI Gateway — real billed cost, not estimated).
+        cur.execute(
+            """SELECT provider, model, endpoint_name, call_count,
+                      total_cost_usd::NUMERIC(18,6) AS total_cost_usd, last_seen
+               FROM billing_external_model_spend
+               ORDER BY total_cost_usd DESC"""
+        )
+        external_model_spend = [dict(r) for r in cur.fetchall()]
+
         # Read cache_meta LAST so timestamps reflect the same state as the data
         cur.execute("SELECT * FROM billing_cache_meta ORDER BY cache_key")
         cache_rows = [dict(r) for r in cur.fetchall()]
@@ -942,4 +969,5 @@ def get_all_page_data(days: int = 30, workspace_id: Optional[str] = None) -> Dic
         "cost_by_user_source": cost_by_user_source,
         "tokens_by_user": tokens_by_user,
         "cost_by_tag": cost_by_tag,
+        "external_model_spend": external_model_spend,
     }
