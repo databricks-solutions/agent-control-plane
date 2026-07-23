@@ -792,6 +792,63 @@ def get_guardrail_coverage() -> Dict[str, Any]:
     }
 
 
+def get_throttling() -> Dict[str, Any]:
+    """Throttling / reliability per endpoint from `uag_throttling_daily`: HTTP 429
+    (rate-limited) and 5xx (server-error) counts vs total requests, over the
+    discovery window. Answers "which endpoints are getting rate-limited/erroring".
+    Degrades to empty when the table is unsynced or no endpoint saw 429/5xx.
+    """
+    from backend.database import execute_query, execute_one
+    empty: Dict[str, Any] = {"as_of": None, "totals": {}, "endpoints": []}
+    try:
+        agg = execute_one(
+            """SELECT COUNT(*) AS endpoints,
+                      COALESCE(SUM(total_requests), 0)     AS total_requests,
+                      COALESCE(SUM(throttled_count), 0)    AS throttled_count,
+                      COALESCE(SUM(server_error_count), 0) AS server_error_count,
+                      MAX(max_event_time) AS as_of
+               FROM uag_throttling_daily"""
+        )
+    except Exception as exc:
+        logger.warning("uag_throttling_daily not available: %s", exc)
+        return empty
+    agg = dict(agg) if agg else {}
+    if _row_int(agg, "endpoints") == 0:
+        return empty
+
+    rows = execute_query(
+        """SELECT endpoint_name, total_requests, throttled_count, server_error_count
+           FROM uag_throttling_daily
+           ORDER BY throttled_count DESC LIMIT 200"""
+    )
+    tr = _row_int(agg, "total_requests")
+    thr = _row_int(agg, "throttled_count")
+    return {
+        "as_of": agg.get("as_of"),
+        "totals": {
+            "endpoints": _row_int(agg, "endpoints"),
+            "total_requests": tr,
+            "throttled_count": thr,
+            "server_error_count": _row_int(agg, "server_error_count"),
+            # blended throttle rate across all endpoints that saw any 429/5xx
+            "throttle_rate": (thr / tr) if tr > 0 else None,
+        },
+        "endpoints": [
+            {
+                "endpoint_name": r.get("endpoint_name", ""),
+                "total_requests": _row_int(r, "total_requests"),
+                "throttled_count": _row_int(r, "throttled_count"),
+                "server_error_count": _row_int(r, "server_error_count"),
+                "throttle_rate": (
+                    _row_int(r, "throttled_count") / _row_int(r, "total_requests")
+                    if _row_int(r, "total_requests") > 0 else None
+                ),
+            }
+            for r in rows
+        ],
+    }
+
+
 def get_uag_v2_timeseries() -> Dict[str, Any]:
     """Daily UAG v2 usage series (requests + tokens) from `uag_usage_timeseries_daily`
     for trend charts on the v2 tab. Degrades to empty when unsynced / no v2 traffic."""

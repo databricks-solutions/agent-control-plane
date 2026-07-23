@@ -209,6 +209,13 @@ def guardrail_coverage():
     return gateway_service.get_guardrail_coverage()
 
 
+@router.get("/throttling")
+def throttling():
+    """Throttling / reliability per endpoint from Unity AI Gateway usage —
+    HTTP 429 (rate-limited) and 5xx (server-error) counts + throttle rate."""
+    return gateway_service.get_throttling()
+
+
 @router.get("/inference-logs")
 def inference_logs(
     limit: int = Query(default=50, le=500),

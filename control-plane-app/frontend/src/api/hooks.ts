@@ -745,6 +745,30 @@ export function useGuardrailCoverage() {
   })
 }
 
+export interface Throttling {
+  as_of: string | null
+  totals: Partial<{ endpoints: number; total_requests: number; throttled_count: number; server_error_count: number; throttle_rate: number | null }>
+  endpoints: Array<{
+    endpoint_name: string
+    total_requests: number
+    throttled_count: number
+    server_error_count: number
+    throttle_rate: number | null
+  }>
+}
+
+/** Per-endpoint throttling (HTTP 429) + server errors (5xx) from Unity AI Gateway usage. */
+export function useThrottling() {
+  return useQuery({
+    queryKey: ['gateway', 'throttling'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/throttling')
+      return data as Throttling
+    },
+    staleTime: GW_STALE,
+  })
+}
+
 export interface UagCodingAgents {
   as_of: string | null
   agents: Array<{

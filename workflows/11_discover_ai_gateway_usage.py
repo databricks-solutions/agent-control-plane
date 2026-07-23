@@ -57,7 +57,8 @@ UAG_MCP_TOOL_TABLE = f"{CATALOG}.{SCHEMA}.uag_mcp_tool_daily"
 UAG_GUARDRAIL_TABLE = f"{CATALOG}.{SCHEMA}.uag_guardrail_daily"
 UAG_TIMESERIES_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_timeseries_daily"
 UAG_CODING_AGENT_TABLE = f"{CATALOG}.{SCHEMA}.uag_coding_agent_usage"
-print(f"Target tables: {UAG_TABLE}, {UAG_BREAKDOWN_TABLE}, {UAG_MCP_TOOL_TABLE}, {UAG_GUARDRAIL_TABLE}, {UAG_TIMESERIES_TABLE} | retention {RETENTION_DAYS}d")
+UAG_THROTTLING_TABLE = f"{CATALOG}.{SCHEMA}.uag_throttling_daily"
+print(f"Target tables: {UAG_TABLE}, {UAG_BREAKDOWN_TABLE}, {UAG_MCP_TOOL_TABLE}, {UAG_GUARDRAIL_TABLE}, {UAG_TIMESERIES_TABLE}, {UAG_THROTTLING_TABLE} | retention {RETENTION_DAYS}d")
 
 # COMMAND ----------
 
@@ -137,6 +138,18 @@ UAG_GUARDRAIL_SCHEMA = StructType([
     StructField("checked_requests", LongType(), True),
     StructField("unique_users", LongType(), True),
     StructField("judge_models", StringType(), True),
+    StructField("max_event_time", StringType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+# Throttling / reliability, one row per endpoint over the window: rate-limited
+# (HTTP 429) and server-error (5xx) request counts vs total, so the UI can show
+# a throttle rate per endpoint. Sourced from status_code on system.ai_gateway.usage.
+UAG_THROTTLING_SCHEMA = StructType([
+    StructField("endpoint_name", StringType(), False),
+    StructField("total_requests", LongType(), True),
+    StructField("throttled_count", LongType(), True),   # HTTP 429
+    StructField("server_error_count", LongType(), True),  # HTTP 5xx
     StructField("max_event_time", StringType(), True),
     StructField("discovered_at", TimestampType(), False),
 ])
@@ -465,9 +478,46 @@ print(f"✅ Wrote {len(gr_rows_raw)} rows to {UAG_GUARDRAIL_TABLE}")
 
 # COMMAND ----------
 
+# Throttling / reliability per endpoint: 429 (rate-limited) and 5xx counts vs total.
+print("▸ Querying ai_gateway.usage throttling / errors by endpoint …")
+try:
+    th_rows_raw = _execute_sql(f"""
+        SELECT endpoint_name,
+               COUNT(*)                                                  AS total_requests,
+               SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END)        AS throttled_count,
+               SUM(CASE WHEN status_code >= 500 AND status_code < 600
+                        THEN 1 ELSE 0 END)                               AS server_error_count,
+               CAST(MAX(event_time) AS STRING)                          AS max_event_time
+        FROM system.ai_gateway.usage
+        WHERE event_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
+          AND endpoint_name IS NOT NULL
+        GROUP BY endpoint_name
+        -- keep only endpoints that actually saw throttling or server errors, so the
+        -- view is a reliability signal rather than a full endpoint dump
+        HAVING SUM(CASE WHEN status_code = 429 OR (status_code >= 500 AND status_code < 600)
+                        THEN 1 ELSE 0 END) > 0
+        ORDER BY throttled_count DESC
+    """)
+    print(f"  ✅ {len(th_rows_raw)} throttled/erroring endpoint rows")
+except Exception as exc:
+    th_rows_raw = []
+    print(f"  ⚠️  throttling query unavailable: {exc}")
+
+if th_rows_raw:
+    rows = [(r.get("endpoint_name", ""), to_int(r.get("total_requests")), to_int(r.get("throttled_count")),
+             to_int(r.get("server_error_count")), r.get("max_event_time"), now)
+            for r in th_rows_raw]
+    spark.createDataFrame(rows, UAG_THROTTLING_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_THROTTLING_TABLE)
+else:
+    spark.createDataFrame([], UAG_THROTTLING_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_THROTTLING_TABLE)
+print(f"✅ Wrote {len(th_rows_raw)} rows to {UAG_THROTTLING_TABLE}")
+
+# COMMAND ----------
+
 result = {"status": "success", "uag_endpoint_rows": len(rows_raw), "uag_breakdown_rows": len(bd_rows),
           "uag_mcp_tool_rows": len(mcp_rows_raw), "uag_guardrail_rows": len(gr_rows_raw),
           "uag_timeseries_rows": len(ts_rows_raw), "uag_coding_agent_rows": len(ca_rows_raw),
+          "uag_throttling_rows": len(th_rows_raw),
           "retention_days": RETENTION_DAYS, "discovered_at": now.isoformat()}
 print(json.dumps(result, indent=2))
 dbutils.notebook.exit(json.dumps(result))
