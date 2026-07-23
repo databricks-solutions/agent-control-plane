@@ -58,7 +58,8 @@ UAG_GUARDRAIL_TABLE = f"{CATALOG}.{SCHEMA}.uag_guardrail_daily"
 UAG_TIMESERIES_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_timeseries_daily"
 UAG_CODING_AGENT_TABLE = f"{CATALOG}.{SCHEMA}.uag_coding_agent_usage"
 UAG_THROTTLING_TABLE = f"{CATALOG}.{SCHEMA}.uag_throttling_daily"
-print(f"Target tables: {UAG_TABLE}, {UAG_BREAKDOWN_TABLE}, {UAG_MCP_TOOL_TABLE}, {UAG_GUARDRAIL_TABLE}, {UAG_TIMESERIES_TABLE}, {UAG_THROTTLING_TABLE} | retention {RETENTION_DAYS}d")
+UAG_FALLBACK_TABLE = f"{CATALOG}.{SCHEMA}.uag_fallback_routing_daily"
+print(f"Target tables: {UAG_TABLE}, {UAG_BREAKDOWN_TABLE}, {UAG_MCP_TOOL_TABLE}, {UAG_GUARDRAIL_TABLE}, {UAG_TIMESERIES_TABLE}, {UAG_THROTTLING_TABLE}, {UAG_FALLBACK_TABLE} | retention {RETENTION_DAYS}d")
 
 # COMMAND ----------
 
@@ -150,6 +151,21 @@ UAG_THROTTLING_SCHEMA = StructType([
     StructField("total_requests", LongType(), True),
     StructField("throttled_count", LongType(), True),   # HTTP 429
     StructField("server_error_count", LongType(), True),  # HTTP 5xx
+    StructField("max_event_time", StringType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+# Fallback routing, one row per endpoint: how often smart-routing had to fall
+# back to a backup model (routing_information.attempts has >1 entry, i.e. the
+# primary attempt failed and a FALLBACK attempt followed), how many of those
+# ultimately recovered (final attempt < 400), and which backup destinations were
+# used. Reliability signal for AI Gateway smart-routing.
+UAG_FALLBACK_SCHEMA = StructType([
+    StructField("endpoint_name", StringType(), False),
+    StructField("total_requests", LongType(), True),
+    StructField("fallback_requests", LongType(), True),
+    StructField("fallback_recovered", LongType(), True),
+    StructField("fallback_destinations", StringType(), True),
     StructField("max_event_time", StringType(), True),
     StructField("discovered_at", TimestampType(), False),
 ])
@@ -514,10 +530,53 @@ print(f"✅ Wrote {len(th_rows_raw)} rows to {UAG_THROTTLING_TABLE}")
 
 # COMMAND ----------
 
+# Fallback routing per endpoint: how often smart-routing fell back to a backup
+# model (routing_information.attempts has >1 entry), how many recovered (final
+# attempt < 400), and which backup destinations were used.
+print("▸ Querying ai_gateway.usage fallback routing by endpoint …")
+try:
+    fb_rows_raw = _execute_sql(f"""
+        SELECT endpoint_name,
+               COUNT(*)                                                       AS total_requests,
+               SUM(CASE WHEN size(routing_information.attempts) > 1
+                        THEN 1 ELSE 0 END)                                     AS fallback_requests,
+               SUM(CASE WHEN size(routing_information.attempts) > 1
+                         AND element_at(routing_information.attempts, -1).status_code < 400
+                        THEN 1 ELSE 0 END)                                     AS fallback_recovered,
+               concat_ws(', ', array_sort(array_distinct(flatten(collect_list(
+                   CASE WHEN size(routing_information.attempts) > 1
+                        THEN array(element_at(routing_information.attempts, -1).destination)
+                        END))))) AS fallback_destinations,
+               CAST(MAX(event_time) AS STRING)                                AS max_event_time
+        FROM system.ai_gateway.usage
+        WHERE event_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
+          AND routing_information IS NOT NULL
+          AND endpoint_name IS NOT NULL
+        GROUP BY endpoint_name
+        -- only endpoints that actually fell back (reliability signal, not a dump)
+        HAVING SUM(CASE WHEN size(routing_information.attempts) > 1 THEN 1 ELSE 0 END) > 0
+        ORDER BY fallback_requests DESC
+    """)
+    print(f"  ✅ {len(fb_rows_raw)} fallback-routing endpoint rows")
+except Exception as exc:
+    fb_rows_raw = []
+    print(f"  ⚠️  fallback routing query unavailable: {exc}")
+
+if fb_rows_raw:
+    rows = [(r.get("endpoint_name", ""), to_int(r.get("total_requests")), to_int(r.get("fallback_requests")),
+             to_int(r.get("fallback_recovered")), r.get("fallback_destinations"), r.get("max_event_time"), now)
+            for r in fb_rows_raw]
+    spark.createDataFrame(rows, UAG_FALLBACK_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_FALLBACK_TABLE)
+else:
+    spark.createDataFrame([], UAG_FALLBACK_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_FALLBACK_TABLE)
+print(f"✅ Wrote {len(fb_rows_raw)} rows to {UAG_FALLBACK_TABLE}")
+
+# COMMAND ----------
+
 result = {"status": "success", "uag_endpoint_rows": len(rows_raw), "uag_breakdown_rows": len(bd_rows),
           "uag_mcp_tool_rows": len(mcp_rows_raw), "uag_guardrail_rows": len(gr_rows_raw),
           "uag_timeseries_rows": len(ts_rows_raw), "uag_coding_agent_rows": len(ca_rows_raw),
-          "uag_throttling_rows": len(th_rows_raw),
+          "uag_throttling_rows": len(th_rows_raw), "uag_fallback_rows": len(fb_rows_raw),
           "retention_days": RETENTION_DAYS, "discovered_at": now.isoformat()}
 print(json.dumps(result, indent=2))
 dbutils.notebook.exit(json.dumps(result))

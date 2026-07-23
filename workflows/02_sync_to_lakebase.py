@@ -1943,6 +1943,43 @@ except Exception as exc:
     uag_conn.rollback()
     print(f"  ⚠️  uag_throttling_daily sync failed: {exc}")
 
+# Sync uag_fallback_routing_daily (smart-routing fallback per endpoint).
+UAG_FALLBACK_TABLE = f"{CATALOG}.{SCHEMA}.uag_fallback_routing_daily"
+uag_fb_count = 0
+with uag_conn.cursor() as cur:
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS uag_fallback_routing_daily (
+            endpoint_name         TEXT NOT NULL,
+            total_requests        BIGINT DEFAULT 0,
+            fallback_requests     BIGINT DEFAULT 0,
+            fallback_recovered    BIGINT DEFAULT 0,
+            fallback_destinations TEXT,
+            max_event_time        TEXT,
+            last_synced           TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (endpoint_name))""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ufb_ep ON uag_fallback_routing_daily (endpoint_name)")
+    uag_conn.commit()
+print(f"▸ Syncing {UAG_FALLBACK_TABLE} → uag_fallback_routing_daily ...")
+try:
+    fb_rows = spark.read.table(UAG_FALLBACK_TABLE).collect()
+    values = [(r.endpoint_name, int(r.total_requests or 0), int(r.fallback_requests or 0),
+               int(r.fallback_recovered or 0), r.fallback_destinations, r.max_event_time, now) for r in fb_rows]
+    with uag_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE uag_fallback_routing_daily")
+        if values:
+            execute_values(cur,
+                """INSERT INTO uag_fallback_routing_daily
+                   (endpoint_name, total_requests, fallback_requests, fallback_recovered,
+                    fallback_destinations, max_event_time, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+    uag_conn.commit()
+    uag_fb_count = len(values)
+    print(f"  ✅ {uag_fb_count} fallback-routing rows synced")
+except Exception as exc:
+    uag_conn.rollback()
+    print(f"  ⚠️  uag_fallback_routing_daily sync failed: {exc}")
+
 uag_conn.close()
 
 # COMMAND ----------

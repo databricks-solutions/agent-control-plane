@@ -769,6 +769,31 @@ export function useThrottling() {
   })
 }
 
+export interface FallbackRouting {
+  as_of: string | null
+  totals: Partial<{ endpoints: number; fallback_requests: number; fallback_recovered: number }>
+  endpoints: Array<{
+    endpoint_name: string
+    total_requests: number
+    fallback_requests: number
+    fallback_recovered: number
+    fallback_destinations: string
+    recovery_rate: number | null
+  }>
+}
+
+/** Per-endpoint smart-routing fallback (backup-model routing) from Unity AI Gateway usage. */
+export function useFallbackRouting() {
+  return useQuery({
+    queryKey: ['gateway', 'fallback-routing'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/fallback-routing')
+      return data as FallbackRouting
+    },
+    staleTime: GW_STALE,
+  })
+}
+
 export interface UagCodingAgents {
   as_of: string | null
   agents: Array<{
