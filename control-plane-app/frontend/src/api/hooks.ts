@@ -326,7 +326,6 @@ export interface AiAudit {
     actor: string | null
     status_code: number | null
     workspace_id: string | null
-    source_ip: string | null
   }>
 }
 

@@ -183,7 +183,6 @@ AI_AUDIT_RECENT_SCHEMA = StructType([
     StructField("actor",         StringType(), True),
     StructField("status_code",   LongType(),   True),
     StructField("workspace_id",  StringType(), True),
-    StructField("source_ip",     StringType(), True),
     StructField("discovered_at", TimestampType(), False),
 ])
 
@@ -696,6 +695,11 @@ else:
 # MAGIC Two tables from the account-level audit log, restricted to AI service_names:
 # MAGIC a per-(service, action) SUMMARY rollup and a capped RECENT-events feed.
 # MAGIC Fail-open: audit may not be readable at the discovery principal's scope.
+# MAGIC
+# MAGIC NOTE: this is a NON-TRACE source (system.access.audit is account-level audit,
+# MAGIC not UC OTEL traces). It lives in this workflow as pragmatic co-location with
+# MAGIC the other agent-observability rollups (agent_tool_usage, agent_eval_scores)
+# MAGIC since the app has no dedicated audit workflow.
 
 # COMMAND ----------
 
@@ -726,23 +730,25 @@ try:
     ]
     print(f"  ✅ audit summary: {len(audit_summary_rows)} (service,action) rows")
 
-    # RECENT: capped feed of the most recent AI audit events for a live activity view.
+    # RECENT: capped feed of the most recent AI audit events for a live activity
+    # view. LIMIT matches the backend read cap (no over-fetch). source_ip is
+    # deliberately NOT selected — it's account-wide PII with no UI consumer.
     _recent = spark.sql(f"""
         SELECT CAST(event_time AS STRING) AS event_time, service_name,
                COALESCE(action_name, '')  AS action_name,
                user_identity.email        AS actor,
                response.status_code       AS status_code,
-               workspace_id, source_ip_address AS source_ip
+               workspace_id
         FROM system.access.audit
         WHERE event_date >= current_date() - INTERVAL {RETENTION_DAYS} DAYS
           AND service_name IN ({_audit_svc_list})
         ORDER BY event_time DESC
-        LIMIT 2000
+        LIMIT 500
     """).collect()
     audit_recent_rows = [
         (r["event_time"], r["service_name"], r["action_name"], r["actor"],
          int(r["status_code"]) if r["status_code"] is not None else None,
-         r["workspace_id"], r["source_ip"], NOW)
+         r["workspace_id"], NOW)
         for r in _recent
     ]
     print(f"  ✅ audit recent: {len(audit_recent_rows)} events")

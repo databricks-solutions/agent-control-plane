@@ -394,10 +394,12 @@ def get_ai_audit() -> Dict[str, Any]:
         return empty
 
     try:
+        # LIMIT matches the frontend render cap (200) — no over-fetch. source_ip
+        # is intentionally not selected (account-wide PII with no UI consumer).
         recent = execute_query(
             """SELECT event_time, service_name, action_name, actor, status_code,
-                      workspace_id, source_ip
-               FROM ai_audit_recent ORDER BY event_time DESC LIMIT 500"""
+                      workspace_id
+               FROM ai_audit_recent ORDER BY event_time DESC LIMIT 200"""
         )
     except Exception:
         recent = []
@@ -417,13 +419,31 @@ def get_ai_audit() -> Dict[str, Any]:
         }
         for r in summary
     ]
+
+    # Totals from an UNBOUNDED aggregate (not summed over the LIMIT-500 window
+    # above), so KPI cards stay accurate past 500 (service, action) combos —
+    # matching the get_agent_eval_scores pattern.
+    totals: Dict[str, Any] = {"services": 0, "actions": 0, "events": 0, "errors": 0}
+    try:
+        agg = execute_query(
+            """SELECT COUNT(DISTINCT service_name)   AS services,
+                      COUNT(*)                        AS actions,
+                      COALESCE(SUM(event_count), 0)   AS events,
+                      COALESCE(SUM(error_count), 0)   AS errors
+               FROM ai_audit_summary"""
+        )
+        a = agg[0] if agg else {}
+        totals = {
+            "services": int(a.get("services") or 0),
+            "actions": int(a.get("actions") or 0),
+            "events": int(a.get("events") or 0),
+            "errors": int(a.get("errors") or 0),
+        }
+    except Exception:
+        pass
+
     return {
-        "totals": {
-            "services": len({r["service_name"] for r in summary_out if r["service_name"]}),
-            "actions": len(summary_out),
-            "events": sum(r["event_count"] for r in summary_out),
-            "errors": sum(r["error_count"] for r in summary_out),
-        },
+        "totals": totals,
         "summary": summary_out,
         "recent": [dict(r) for r in recent],
     }

@@ -699,7 +699,7 @@ with obs_conn.cursor() as cur:
         "CREATE INDEX IF NOT EXISTS idx_aas_svc ON ai_audit_summary (service_name)",
         """CREATE TABLE IF NOT EXISTS ai_audit_recent (
             event_time TEXT, service_name TEXT, action_name TEXT, actor TEXT,
-            status_code BIGINT, workspace_id TEXT, source_ip TEXT,
+            status_code BIGINT, workspace_id TEXT,
             last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW())""",
     ]:
         # Each statement in its own savepoint — protects against the case
@@ -1252,14 +1252,14 @@ try:
     aar_rows = spark.read.table(AI_AUDIT_RECENT_DELTA).collect()
     values = [(r.event_time, r.service_name, r.action_name, r.actor,
                int(r.status_code) if r.status_code is not None else None,
-               r.workspace_id, r.source_ip, now) for r in aar_rows]
+               r.workspace_id, now) for r in aar_rows]
     with obs_conn.cursor() as cur:
         cur.execute("TRUNCATE TABLE ai_audit_recent")
         if values:
             execute_values(cur,
                 """INSERT INTO ai_audit_recent
                    (event_time, service_name, action_name, actor, status_code,
-                    workspace_id, source_ip, last_synced)
+                    workspace_id, last_synced)
                    VALUES %s""",
                 values, page_size=500)
     obs_conn.commit()

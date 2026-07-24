@@ -543,7 +543,7 @@ function AiAuditPanel() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Recent AI Audit Events</CardTitle>
-            <p className="text-[11px] text-gray-400 dark:text-gray-500">Most recent {recent.length.toLocaleString()} governed AI events (who did what, from where).</p>
+            <p className="text-[11px] text-gray-400 dark:text-gray-500">Most recent {Math.min(recent.length, 200).toLocaleString()} governed AI events (who did what).</p>
           </CardHeader>
           <CardContent>
             <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
