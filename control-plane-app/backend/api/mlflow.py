@@ -175,12 +175,14 @@ async def list_models(
     workflow). Reads the cache instead of a live REST search on every load; the
     live search now only runs in the discovery workflow. Same row shape as before."""
     try:
-        rows = mlflow_service.get_cached_models(max_results)
-        if rows:
-            return rows
-        # Cold cache (workflow hasn't run yet): fall back to a one-off live search
-        # so the tab isn't empty before the first discovery run.
-        return mlflow_service.search_registered_models(max_results)
+        cached = mlflow_service.get_cached_models(max_results)
+        # None = cache table absent (never synced) → one-off live fallback so the
+        # tab isn't empty before the first discovery run. A real empty list (0
+        # models in the workspace) is returned as-is, so we don't hit the live API
+        # on every load.
+        if cached is None:
+            return mlflow_service.search_registered_models(max_results)
+        return cached
     except HTTPException:
         raise
     except Exception as e:

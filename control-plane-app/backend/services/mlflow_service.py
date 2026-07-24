@@ -1423,23 +1423,29 @@ def get_cached_traces(
     )
 
 
-def get_cached_models(limit: int = 1000) -> List[Dict[str, Any]]:
+def get_cached_models(limit: int = 1000) -> Optional[List[Dict[str, Any]]]:
     """Read UC registered models from the Lakebase cache (populated by
     04_discover_observability). Returns the same row shape the live
-    search_registered_models produced (name, user_id, last_updated_timestamp,
-    aliases, …) so the frontend is unchanged. aliases/latest_versions are stored
-    as JSONB → returned as parsed lists. Degrades to [] when unsynced.
+    search_registered_models produced (name, workspace_id, user_id,
+    last_updated_timestamp, description, aliases, …) so the frontend is unchanged.
+    aliases/latest_versions are stored as JSONB → returned as parsed lists.
+
+    Returns None when the cache table is ABSENT (never synced) so the caller can
+    fall back to a live search; returns [] when the table exists but is empty
+    (a workspace with no registered models) — the caller should NOT keep hitting
+    the live API in that case.
     """
     try:
         rows = execute_query(
-            """SELECT name, user_id, last_updated_timestamp, creation_timestamp,
-                      description, aliases, latest_versions
+            """SELECT name, workspace_id, user_id, last_updated_timestamp,
+                      creation_timestamp, description, aliases, latest_versions
                FROM model_registry ORDER BY last_updated_timestamp DESC NULLS LAST LIMIT %s""",
             (limit,),
         )
     except Exception as exc:
+        # Table missing / not yet created by the discovery sync → signal "unknown".
         logger.warning("model_registry cache not available: %s", exc)
-        return []
+        return None
     # psycopg2 returns JSONB as already-parsed Python objects; pass through.
     return rows
 
