@@ -43,6 +43,13 @@ async def agent_eval_scores():
     return mlflow_service.get_agent_eval_scores()
 
 
+@router.get("/ai-audit")
+async def ai_audit():
+    """Governed AI audit trail from system.access.audit (AI services only) —
+    per-(service, action) activity summary + a recent-event feed."""
+    return mlflow_service.get_ai_audit()
+
+
 @router.get("/experiments")
 async def list_experiments(
     request: Request,

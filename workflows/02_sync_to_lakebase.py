@@ -689,6 +689,18 @@ with obs_conn.cursor() as cur:
             last_seen TEXT,
             last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW())""",
         "CREATE INDEX IF NOT EXISTS idx_aes_exp ON agent_eval_scores (experiment_id)",
+        """CREATE TABLE IF NOT EXISTS ai_audit_summary (
+            service_name TEXT NOT NULL, action_name TEXT NOT NULL,
+            event_count BIGINT DEFAULT 0, actor_count BIGINT DEFAULT 0,
+            error_count BIGINT DEFAULT 0, workspace_count BIGINT DEFAULT 0,
+            last_seen TEXT,
+            last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (service_name, action_name))""",
+        "CREATE INDEX IF NOT EXISTS idx_aas_svc ON ai_audit_summary (service_name)",
+        """CREATE TABLE IF NOT EXISTS ai_audit_recent (
+            event_time TEXT, service_name TEXT, action_name TEXT, actor TEXT,
+            status_code BIGINT, workspace_id TEXT, source_ip TEXT,
+            last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW())""",
     ]:
         # Each statement in its own savepoint — protects against the case
         # where the workflow runs as a non-owner of pre-existing tables (the
@@ -1207,6 +1219,55 @@ try:
 except Exception as exc:
     obs_conn.rollback()
     print(f"  ⚠️  agent_eval_scores sync failed: {exc}")
+
+# Sync ai_audit_summary (#8 — per service·action rollup from system.access.audit).
+AI_AUDIT_SUMMARY_DELTA = f"{CATALOG}.{SCHEMA}.ai_audit_summary"
+aas_count = 0
+print(f"▸ Syncing {AI_AUDIT_SUMMARY_DELTA} → ai_audit_summary ...")
+try:
+    aas_rows = spark.read.table(AI_AUDIT_SUMMARY_DELTA).collect()
+    values = [(r.service_name, r.action_name, int(r.event_count or 0), int(r.actor_count or 0),
+               int(r.error_count or 0), int(r.workspace_count or 0), r.last_seen, now) for r in aas_rows]
+    with obs_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE ai_audit_summary")
+        if values:
+            execute_values(cur,
+                """INSERT INTO ai_audit_summary
+                   (service_name, action_name, event_count, actor_count, error_count,
+                    workspace_count, last_seen, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+    obs_conn.commit()
+    aas_count = len(values)
+    print(f"  ✅ {aas_count} AI audit-summary rows synced")
+except Exception as exc:
+    obs_conn.rollback()
+    print(f"  ⚠️  ai_audit_summary sync failed: {exc}")
+
+# Sync ai_audit_recent (#8 — capped recent-event feed).
+AI_AUDIT_RECENT_DELTA = f"{CATALOG}.{SCHEMA}.ai_audit_recent"
+aar_count = 0
+print(f"▸ Syncing {AI_AUDIT_RECENT_DELTA} → ai_audit_recent ...")
+try:
+    aar_rows = spark.read.table(AI_AUDIT_RECENT_DELTA).collect()
+    values = [(r.event_time, r.service_name, r.action_name, r.actor,
+               int(r.status_code) if r.status_code is not None else None,
+               r.workspace_id, r.source_ip, now) for r in aar_rows]
+    with obs_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE ai_audit_recent")
+        if values:
+            execute_values(cur,
+                """INSERT INTO ai_audit_recent
+                   (event_time, service_name, action_name, actor, status_code,
+                    workspace_id, source_ip, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+    obs_conn.commit()
+    aar_count = len(values)
+    print(f"  ✅ {aar_count} AI audit-recent rows synced")
+except Exception as exc:
+    obs_conn.rollback()
+    print(f"  ⚠️  ai_audit_recent sync failed: {exc}")
 
 # COMMAND ----------
 

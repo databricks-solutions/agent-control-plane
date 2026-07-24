@@ -16,6 +16,7 @@ import {
   useGatewayLogTimeseries,
   useAgentToolUsage,
   useAgentEvalScores,
+  useAiAudit,
 } from '@/api/hooks'
 import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
 import { RefreshButton } from '@/components/RefreshButton'
@@ -66,6 +67,7 @@ import {
   Info,
   Wrench,
   ShieldCheck,
+  ScrollText,
 } from 'lucide-react'
 import { DB_RED_SHADES } from '@/lib/brand'
 
@@ -167,6 +169,7 @@ const tabs = [
   { id: 'runs', label: 'Evaluation Runs', icon: Activity },
   { id: 'tool-usage', label: 'Tool & Asset Usage', icon: Wrench },
   { id: 'eval-scores', label: 'Quality & Evals', icon: ShieldCheck },
+  { id: 'ai-audit', label: 'AI Audit', icon: ScrollText },
   { id: 'models', label: 'Model Registry', icon: Database },
 ] as const
 
@@ -268,6 +271,7 @@ export default function ObservabilityPage() {
       {activeTab === 'runs' && <RunsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
       {activeTab === 'tool-usage' && <ToolUsagePanel />}
       {activeTab === 'eval-scores' && <EvalScoresPanel />}
+      {activeTab === 'ai-audit' && <AiAuditPanel />}
       {activeTab === 'models' && <ModelsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
     </div>
   )
@@ -455,6 +459,120 @@ function EvalScoresPanel() {
           <TablePagination page={safePage} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
         </CardContent>
       </Card>
+    </div>
+  )
+}
+
+/* ── AI Audit Panel (#8) ─────────────────────────────────────────
+   Governed AI activity from system.access.audit (AI services only): a
+   per-(service, action) summary rollup + a recent-event feed. Account-wide. */
+function AiAuditPanel() {
+  const { data, isLoading } = useAiAudit()
+  const sort = useSort('event_count', 'desc')
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(15)
+  const summary = data?.summary || []
+  const recent = data?.recent || []
+  const sorted = useMemo(() => sortRows(summary, sort.sort, (r: any, k) => {
+    if (k === 'service_name' || k === 'action_name') return (r[k] || '').toString().toLowerCase()
+    return Number(r[k] || 0)
+  }), [summary, sort.sort])
+  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize))
+  const safePage = Math.min(page, totalPages - 1)
+  const paged = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize)
+
+  if (isLoading) return <div className="flex items-center justify-center h-32 text-gray-400 dark:text-gray-500">Loading…</div>
+  if (summary.length === 0) {
+    return (
+      <Card><CardContent className="py-12 text-center text-gray-400 dark:text-gray-500">
+        No AI audit activity found — either no AI-service audit events in the retention window, or
+        the discovery principal can't read <code>system.access.audit</code> (needs account-level audit access).
+      </CardContent></Card>
+    )
+  }
+  const t = data!.totals
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <KpiCard title="AI Services" value={t.services ?? 0} format="number" />
+        <KpiCard title="Distinct Actions" value={t.actions ?? 0} format="number" />
+        <KpiCard title="Audited Events" value={t.events ?? 0} format="number" />
+        <KpiCard title="Errors" value={t.errors ?? 0} format="number" />
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">AI Activity by Service &amp; Action</CardTitle>
+          <p className="text-[11px] text-gray-400 dark:text-gray-500">
+            Governed audit events from <code>system.access.audit</code> for AI services (agents, agent framework,
+            supervisor agents, MLflow, Genie, MCP, model registry, vector search). Account-wide.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
+                  <SortableHeader label="Service" sortKey="service_name" current={sort.sort} onToggle={sort.toggle} />
+                  <SortableHeader label="Action" sortKey="action_name" current={sort.sort} onToggle={sort.toggle} />
+                  <SortableHeader label="Events" sortKey="event_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+                  <SortableHeader label="Actors" sortKey="actor_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+                  <SortableHeader label="Errors" sortKey="error_count" current={sort.sort} onToggle={sort.toggle} align="right" />
+                  <SortableHeader label="Last Seen" sortKey="last_seen" current={sort.sort} onToggle={sort.toggle} align="right" />
+                </tr>
+              </thead>
+              <tbody>
+                {paged.map((r: any, i: number) => (
+                  <tr key={`${r.service_name}-${r.action_name}-${i}`} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
+                    <td className="py-1.5"><Badge variant="default" className="text-xs">{r.service_name}</Badge></td>
+                    <td className="py-1.5 font-mono text-xs truncate max-w-[220px]" title={r.action_name}>{r.action_name || '—'}</td>
+                    <td className="py-1.5 text-right tabular-nums">{r.event_count.toLocaleString()}</td>
+                    <td className="py-1.5 text-right tabular-nums">{r.actor_count.toLocaleString()}</td>
+                    <td className="py-1.5 text-right tabular-nums text-red-600 dark:text-red-400">{r.error_count.toLocaleString()}</td>
+                    <td className="py-1.5 text-right text-xs text-gray-500 dark:text-gray-400 tabular-nums">{r.last_seen ? r.last_seen.slice(0, 10) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <TablePagination page={safePage} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+        </CardContent>
+      </Card>
+
+      {recent.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Recent AI Audit Events</CardTitle>
+            <p className="text-[11px] text-gray-400 dark:text-gray-500">Most recent {recent.length.toLocaleString()} governed AI events (who did what, from where).</p>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-white dark:bg-gray-900">
+                  <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
+                    <th className="py-1.5 font-medium">Time</th>
+                    <th className="py-1.5 font-medium">Service</th>
+                    <th className="py-1.5 font-medium">Action</th>
+                    <th className="py-1.5 font-medium">Actor</th>
+                    <th className="py-1.5 font-medium text-right">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recent.slice(0, 200).map((e, i) => (
+                    <tr key={`${e.event_time}-${i}`} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
+                      <td className="py-1.5 text-xs text-gray-500 dark:text-gray-400 tabular-nums whitespace-nowrap">{e.event_time ? e.event_time.slice(0, 19).replace('T', ' ') : '—'}</td>
+                      <td className="py-1.5 text-xs">{e.service_name}</td>
+                      <td className="py-1.5 font-mono text-xs truncate max-w-[200px]" title={e.action_name}>{e.action_name || '—'}</td>
+                      <td className="py-1.5 text-xs truncate max-w-[200px]" title={e.actor || ''}>{e.actor || '—'}</td>
+                      <td className={`py-1.5 text-right tabular-nums text-xs ${e.status_code != null && e.status_code >= 400 ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'}`}>{e.status_code ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   )
 }
