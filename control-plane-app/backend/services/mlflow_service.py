@@ -1439,12 +1439,12 @@ def get_cached_models(limit: int = 1000) -> Optional[List[Dict[str, Any]]]:
         rows = execute_query(
             """SELECT name, workspace_id, user_id, last_updated_timestamp,
                       creation_timestamp, description, aliases, latest_versions
-               FROM model_registry ORDER BY last_updated_timestamp DESC NULLS LAST LIMIT %s""",
+               FROM mlflow_registered_models ORDER BY last_updated_timestamp DESC NULLS LAST LIMIT %s""",
             (limit,),
         )
     except Exception as exc:
         # Table missing / not yet created by the discovery sync → signal "unknown".
-        logger.warning("model_registry cache not available: %s", exc)
+        logger.warning("mlflow_registered_models cache not available: %s", exc)
         return None
     # psycopg2 returns JSONB as already-parsed Python objects; pass through.
     return rows

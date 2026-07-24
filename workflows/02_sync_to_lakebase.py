@@ -682,7 +682,7 @@ with obs_conn.cursor() as cur:
             last_seen TEXT,
             last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW())""",
         "CREATE INDEX IF NOT EXISTS idx_atu_exp ON agent_tool_usage (experiment_id)",
-        """CREATE TABLE IF NOT EXISTS model_registry (
+        """CREATE TABLE IF NOT EXISTS mlflow_registered_models (
             name TEXT NOT NULL, workspace_id TEXT, user_id TEXT,
             last_updated_timestamp BIGINT, creation_timestamp BIGINT,
             description TEXT, aliases JSONB, latest_versions JSONB,
@@ -1275,10 +1275,10 @@ except Exception as exc:
     obs_conn.rollback()
     print(f"  ⚠️  ai_audit_recent sync failed: {exc}")
 
-# Sync model_registry (UC registered models from 04_discover_observability).
-MODEL_REGISTRY_DELTA = f"{CATALOG}.{SCHEMA}.model_registry"
+# Sync mlflow_registered_models (UC registered models from 04_discover_observability).
+MODEL_REGISTRY_DELTA = f"{CATALOG}.{SCHEMA}.mlflow_registered_models"
 mr_count = 0
-print(f"▸ Syncing {MODEL_REGISTRY_DELTA} → model_registry ...")
+print(f"▸ Syncing {MODEL_REGISTRY_DELTA} → mlflow_registered_models ...")
 try:
     mr_rows = spark.read.table(MODEL_REGISTRY_DELTA).collect()
     values = [(r.name, r.workspace_id, r.user_id,
@@ -1286,10 +1286,10 @@ try:
                int(r.creation_timestamp) if r.creation_timestamp is not None else None,
                r.description, r.aliases, r.latest_versions, now) for r in mr_rows]
     with obs_conn.cursor() as cur:
-        cur.execute("TRUNCATE TABLE model_registry")
+        cur.execute("TRUNCATE TABLE mlflow_registered_models")
         if values:
             execute_values(cur,
-                """INSERT INTO model_registry
+                """INSERT INTO mlflow_registered_models
                    (name, workspace_id, user_id, last_updated_timestamp, creation_timestamp,
                     description, aliases, latest_versions, last_synced)
                    VALUES %s""",
@@ -1299,7 +1299,7 @@ try:
     print(f"  ✅ {mr_count} registered-model rows synced")
 except Exception as exc:
     obs_conn.rollback()
-    print(f"  ⚠️  model_registry sync failed: {exc}")
+    print(f"  ⚠️  mlflow_registered_models sync failed: {exc}")
 
 # COMMAND ----------
 

@@ -73,7 +73,7 @@ if ACCOUNT_ID:
     os.environ["DATABRICKS_ACCOUNT_ID"] = ACCOUNT_ID
 TRACES_TABLE = f"{CATALOG}.{SCHEMA}.observability_traces"
 TRACE_DETAILS_TABLE = f"{CATALOG}.{SCHEMA}.observability_trace_details"
-MODEL_REGISTRY_TABLE = f"{CATALOG}.{SCHEMA}.model_registry"
+MODEL_REGISTRY_TABLE = f"{CATALOG}.{SCHEMA}.mlflow_registered_models"
 
 try:
     RETENTION_DAYS = max(1, int(dbutils.widgets.get("trace_retention_days") or "90"))
