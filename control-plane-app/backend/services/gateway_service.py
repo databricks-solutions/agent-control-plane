@@ -850,6 +850,61 @@ def get_throttling() -> Dict[str, Any]:
     }
 
 
+def get_fallback_routing() -> Dict[str, Any]:
+    """Smart-routing fallback per endpoint from `uag_fallback_routing_daily`: how
+    often the AI Gateway had to fall back to a backup model (>1 routing attempt),
+    how many recovered (final attempt < 400), and which backup destinations were
+    used. Reliability signal for AI Gateway smart-routing. Degrades to empty when
+    the table is unsynced or no endpoint fell back.
+    """
+    from backend.database import execute_query, execute_one
+    empty: Dict[str, Any] = {"as_of": None, "totals": {}, "endpoints": []}
+    try:
+        agg = execute_one(
+            """SELECT COUNT(*) AS endpoints,
+                      COALESCE(SUM(fallback_requests), 0)  AS fallback_requests,
+                      COALESCE(SUM(fallback_recovered), 0) AS fallback_recovered,
+                      MAX(max_event_time) AS as_of
+               FROM uag_fallback_routing_daily"""
+        )
+    except Exception as exc:
+        logger.warning("uag_fallback_routing_daily not available: %s", exc)
+        return empty
+    agg = dict(agg) if agg else {}
+    if _row_int(agg, "endpoints") == 0:
+        return empty
+
+    rows = execute_query(
+        """SELECT endpoint_name, total_requests, fallback_requests,
+                  fallback_recovered, fallback_destinations
+           FROM uag_fallback_routing_daily
+           ORDER BY fallback_requests DESC LIMIT 200"""
+    )
+    return {
+        "as_of": agg.get("as_of"),
+        "totals": {
+            "endpoints": _row_int(agg, "endpoints"),
+            "fallback_requests": _row_int(agg, "fallback_requests"),
+            "fallback_recovered": _row_int(agg, "fallback_recovered"),
+        },
+        "endpoints": [
+            {
+                "endpoint_name": r.get("endpoint_name", ""),
+                "total_requests": _row_int(r, "total_requests"),
+                "fallback_requests": _row_int(r, "fallback_requests"),
+                "fallback_recovered": _row_int(r, "fallback_recovered"),
+                "fallback_destinations": r.get("fallback_destinations") or "",
+                # share of THIS endpoint's fallbacks that recovered (null if none)
+                "recovery_rate": (
+                    _row_int(r, "fallback_recovered") / _row_int(r, "fallback_requests")
+                    if _row_int(r, "fallback_requests") > 0 else None
+                ),
+            }
+            for r in rows
+        ],
+    }
+
+
 def get_uag_v2_timeseries() -> Dict[str, Any]:
     """Daily UAG v2 usage series (requests + tokens) from `uag_usage_timeseries_daily`
     for trend charts on the v2 tab. Degrades to empty when unsynced / no v2 traffic."""

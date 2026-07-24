@@ -216,6 +216,13 @@ def throttling():
     return gateway_service.get_throttling()
 
 
+@router.get("/fallback-routing")
+def fallback_routing():
+    """Smart-routing fallback per endpoint from Unity AI Gateway usage — how often
+    routing fell back to a backup model, recovery rate, and backup destinations."""
+    return gateway_service.get_fallback_routing()
+
+
 @router.get("/inference-logs")
 def inference_logs(
     limit: int = Query(default=50, le=500),

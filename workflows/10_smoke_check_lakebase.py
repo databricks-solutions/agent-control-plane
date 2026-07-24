@@ -94,6 +94,7 @@ EXPECTED = [
     "agent_eval_scores",             # MLflow-3 assessment rollup; empty when no eval'd traces
     "uag_coding_agent_usage",        # coding-agent activity; empty when no coding-agent traffic
     "uag_throttling_daily",          # 429/5xx per endpoint; empty when no throttling/errors
+    "uag_fallback_routing_daily",    # smart-routing fallbacks per endpoint; empty when no fallbacks
     "billing_cache_meta",
     # App-managed tables created in Phase 7 of 02_sync_to_lakebase. These were
     # historically created lazily by the app's startup hook, but the app SP
