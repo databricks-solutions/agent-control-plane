@@ -80,11 +80,14 @@ TRACES_TABLE = f"{CATALOG}.{SCHEMA}.observability_traces_uc_otel"
 DETAILS_TABLE = f"{CATALOG}.{SCHEMA}.observability_trace_details_uc_otel"
 TOOL_USAGE_TABLE = f"{CATALOG}.{SCHEMA}.agent_tool_usage"
 EVAL_SCORES_TABLE = f"{CATALOG}.{SCHEMA}.agent_eval_scores"
+AI_AUDIT_SUMMARY_TABLE = f"{CATALOG}.{SCHEMA}.ai_audit_summary"
+AI_AUDIT_RECENT_TABLE = f"{CATALOG}.{SCHEMA}.ai_audit_recent"
 
 print(f"Trace summary target: {TRACES_TABLE}")
 print(f"Trace detail target:  {DETAILS_TABLE}")
 print(f"Tool usage target:    {TOOL_USAGE_TABLE}")
 print(f"Eval scores target:   {EVAL_SCORES_TABLE}")
+print(f"AI audit targets:     {AI_AUDIT_SUMMARY_TABLE}, {AI_AUDIT_RECENT_TABLE}")
 print(f"Retention: {RETENTION_DAYS} days")
 
 # COMMAND ----------
@@ -153,6 +156,34 @@ EVAL_SCORES_SCHEMA = StructType([
     StructField("pass_rate",        DoubleType(), True),     # pass/(pass+fail); null if no yes/no verdicts
     StructField("last_seen",        StringType(), True),
     StructField("discovered_at",    TimestampType(), False),
+])
+
+# AI audit trail (#8) — governed AI activity from system.access.audit, restricted
+# to AI-related service_names. Two tables: a per-(service, action) SUMMARY rollup
+# and a capped RECENT-events feed. Metastore/account-wide (audit is account-level).
+AI_AUDIT_SERVICES = [
+    "agents", "agentFramework", "agentEvaluation", "supervisorAgent", "supervisor_agent",
+    "mlflowExperiment", "mlflowTrace", "mlflowAcledArtifact", "modelRegistry",
+    "genie", "genieChat", "aibiGenie", "mcpService", "vectorSearch",
+]
+AI_AUDIT_SUMMARY_SCHEMA = StructType([
+    StructField("service_name",  StringType(), False),
+    StructField("action_name",   StringType(), False),
+    StructField("event_count",   LongType(),   True),
+    StructField("actor_count",   LongType(),   True),
+    StructField("error_count",   LongType(),   True),   # response.status_code >= 400
+    StructField("workspace_count", LongType(), True),
+    StructField("last_seen",     StringType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+AI_AUDIT_RECENT_SCHEMA = StructType([
+    StructField("event_time",    StringType(), True),
+    StructField("service_name",  StringType(), True),
+    StructField("action_name",   StringType(), True),
+    StructField("actor",         StringType(), True),
+    StructField("status_code",   LongType(),   True),
+    StructField("workspace_id",  StringType(), True),
+    StructField("discovered_at", TimestampType(), False),
 ])
 
 # COMMAND ----------
@@ -658,12 +689,91 @@ else:
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## AI audit trail (#8 — governed AI activity from system.access.audit)
+# MAGIC
+# MAGIC Two tables from the account-level audit log, restricted to AI service_names:
+# MAGIC a per-(service, action) SUMMARY rollup and a capped RECENT-events feed.
+# MAGIC Fail-open: audit may not be readable at the discovery principal's scope.
+# MAGIC
+# MAGIC NOTE: this is a NON-TRACE source (system.access.audit is account-level audit,
+# MAGIC not UC OTEL traces). It lives in this workflow as pragmatic co-location with
+# MAGIC the other agent-observability rollups (agent_tool_usage, agent_eval_scores)
+# MAGIC since the app has no dedicated audit workflow.
+
+# COMMAND ----------
+
+_audit_svc_list = ", ".join(f"'{s}'" for s in AI_AUDIT_SERVICES)
+audit_summary_rows = []
+audit_recent_rows = []
+try:
+    # SUMMARY: per (service, action) over the window. audit is date-partitioned on
+    # event_date, so filter on it (not event_time) for partition pruning.
+    _sum = spark.sql(f"""
+        SELECT service_name,
+               COALESCE(action_name, '')                                 AS action_name,
+               COUNT(*)                                                   AS event_count,
+               COUNT(DISTINCT user_identity.email)                        AS actor_count,
+               SUM(CASE WHEN response.status_code >= 400 THEN 1 ELSE 0 END) AS error_count,
+               COUNT(DISTINCT workspace_id)                               AS workspace_count,
+               CAST(MAX(event_time) AS STRING)                            AS last_seen
+        FROM system.access.audit
+        WHERE event_date >= current_date() - INTERVAL {RETENTION_DAYS} DAYS
+          AND service_name IN ({_audit_svc_list})
+        GROUP BY service_name, COALESCE(action_name, '')
+        ORDER BY event_count DESC
+    """).collect()
+    audit_summary_rows = [
+        (r["service_name"], r["action_name"], int(r["event_count"] or 0), int(r["actor_count"] or 0),
+         int(r["error_count"] or 0), int(r["workspace_count"] or 0), r["last_seen"], NOW)
+        for r in _sum
+    ]
+    print(f"  ✅ audit summary: {len(audit_summary_rows)} (service,action) rows")
+
+    # RECENT: capped feed of the most recent AI audit events for a live activity
+    # view. LIMIT matches the backend read cap (no over-fetch). source_ip is
+    # deliberately NOT selected — it's account-wide PII with no UI consumer.
+    _recent = spark.sql(f"""
+        SELECT CAST(event_time AS STRING) AS event_time, service_name,
+               COALESCE(action_name, '')  AS action_name,
+               user_identity.email        AS actor,
+               response.status_code       AS status_code,
+               workspace_id
+        FROM system.access.audit
+        WHERE event_date >= current_date() - INTERVAL {RETENTION_DAYS} DAYS
+          AND service_name IN ({_audit_svc_list})
+        ORDER BY event_time DESC
+        LIMIT 500
+    """).collect()
+    audit_recent_rows = [
+        (r["event_time"], r["service_name"], r["action_name"], r["actor"],
+         int(r["status_code"]) if r["status_code"] is not None else None,
+         r["workspace_id"], NOW)
+        for r in _recent
+    ]
+    print(f"  ✅ audit recent: {len(audit_recent_rows)} events")
+except Exception as exc:
+    if _classify_perm_error(str(exc)):
+        per_table_stats.append({"table": "system.access.audit", "shape": "ai_audit", "skipped": "no audit grants"})
+        print("  ℹ️  system.access.audit not readable at this scope — skipping AI audit trail")
+    else:
+        per_table_stats.append({"table": "system.access.audit", "shape": "ai_audit", "error": str(exc)[:200]})
+        print(f"  ⚠️  AI audit query failed: {exc}")
+
+spark.createDataFrame(audit_summary_rows, AI_AUDIT_SUMMARY_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(AI_AUDIT_SUMMARY_TABLE)
+spark.createDataFrame(audit_recent_rows, AI_AUDIT_RECENT_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(AI_AUDIT_RECENT_TABLE)
+print(f"✅ Wrote {len(audit_summary_rows)} summary + {len(audit_recent_rows)} recent rows to AI audit tables")
+
+# COMMAND ----------
+
 result = {
     "status": "success",
     "otel_tables_found": len(otel_tables),
     "trace_log_tables_found": len(trace_log_tables),
     "tool_usage_rows": len(tool_usage_rows),
     "eval_scores_rows": len(eval_scores_rows),
+    "ai_audit_summary_rows": len(audit_summary_rows),
+    "ai_audit_recent_rows": len(audit_recent_rows),
     "traces": len(all_trace_rows),
     "details": len(all_detail_rows),
     "retention_days": RETENTION_DAYS,

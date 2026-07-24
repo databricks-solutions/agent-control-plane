@@ -373,6 +373,82 @@ def get_agent_eval_scores() -> Dict[str, Any]:
     return {"totals": totals, "rows": out}
 
 
+def get_ai_audit() -> Dict[str, Any]:
+    """Governed AI audit trail from `ai_audit_summary` + `ai_audit_recent`
+    (produced by 07_discover_uc_otel_traces from system.access.audit, restricted
+    to AI service_names). Returns a per-(service, action) summary + a recent-event
+    feed. Account-wide (audit is account-level). Degrades to empty when the tables
+    are unsynced or audit wasn't readable at the discovery principal's scope.
+    """
+    empty: Dict[str, Any] = {"totals": {}, "summary": [], "recent": []}
+    try:
+        summary = execute_query(
+            """SELECT service_name, action_name, event_count, actor_count,
+                      error_count, workspace_count, last_seen
+               FROM ai_audit_summary ORDER BY event_count DESC LIMIT 500"""
+        )
+    except Exception as exc:
+        logger.warning("ai_audit_summary not available: %s", exc)
+        return empty
+    if not summary:
+        return empty
+
+    try:
+        # LIMIT matches the frontend render cap (200) — no over-fetch. source_ip
+        # is intentionally not selected (account-wide PII with no UI consumer).
+        recent = execute_query(
+            """SELECT event_time, service_name, action_name, actor, status_code,
+                      workspace_id
+               FROM ai_audit_recent ORDER BY event_time DESC LIMIT 200"""
+        )
+    except Exception:
+        recent = []
+
+    def _i(r, k):
+        return int(r.get(k) or 0)
+
+    summary_out = [
+        {
+            "service_name": r.get("service_name", ""),
+            "action_name": r.get("action_name", ""),
+            "event_count": _i(r, "event_count"),
+            "actor_count": _i(r, "actor_count"),
+            "error_count": _i(r, "error_count"),
+            "workspace_count": _i(r, "workspace_count"),
+            "last_seen": r.get("last_seen") or "",
+        }
+        for r in summary
+    ]
+
+    # Totals from an UNBOUNDED aggregate (not summed over the LIMIT-500 window
+    # above), so KPI cards stay accurate past 500 (service, action) combos —
+    # matching the get_agent_eval_scores pattern.
+    totals: Dict[str, Any] = {"services": 0, "actions": 0, "events": 0, "errors": 0}
+    try:
+        agg = execute_query(
+            """SELECT COUNT(DISTINCT service_name)   AS services,
+                      COUNT(*)                        AS actions,
+                      COALESCE(SUM(event_count), 0)   AS events,
+                      COALESCE(SUM(error_count), 0)   AS errors
+               FROM ai_audit_summary"""
+        )
+        a = agg[0] if agg else {}
+        totals = {
+            "services": int(a.get("services") or 0),
+            "actions": int(a.get("actions") or 0),
+            "events": int(a.get("events") or 0),
+            "errors": int(a.get("errors") or 0),
+        }
+    except Exception:
+        pass
+
+    return {
+        "totals": totals,
+        "summary": summary_out,
+        "recent": [dict(r) for r in recent],
+    }
+
+
 def search_experiments_system_tables(max_results: int = 5000) -> List[Dict[str, Any]]:
     """Query system.mlflow.experiments_latest for cross-workspace experiments.
 

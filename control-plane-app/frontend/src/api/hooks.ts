@@ -308,6 +308,38 @@ export function useAgentEvalScores() {
   })
 }
 
+export interface AiAudit {
+  totals: Partial<{ services: number; actions: number; events: number; errors: number }>
+  summary: Array<{
+    service_name: string
+    action_name: string
+    event_count: number
+    actor_count: number
+    error_count: number
+    workspace_count: number
+    last_seen: string
+  }>
+  recent: Array<{
+    event_time: string
+    service_name: string
+    action_name: string
+    actor: string | null
+    status_code: number | null
+    workspace_id: string | null
+  }>
+}
+
+/** Governed AI audit trail from system.access.audit (AI services only). */
+export function useAiAudit() {
+  return useQuery({
+    queryKey: ['mlflow', 'ai-audit'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/mlflow/ai-audit')
+      return data as AiAudit
+    },
+  })
+}
+
 export function useMlflowTraceDetail(requestId: string | null, workspaceId?: string | null) {
   return useQuery({
     queryKey: ['mlflow', 'trace-detail', requestId, workspaceId],
