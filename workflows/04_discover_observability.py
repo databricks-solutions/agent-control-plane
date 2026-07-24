@@ -73,6 +73,7 @@ if ACCOUNT_ID:
     os.environ["DATABRICKS_ACCOUNT_ID"] = ACCOUNT_ID
 TRACES_TABLE = f"{CATALOG}.{SCHEMA}.observability_traces"
 TRACE_DETAILS_TABLE = f"{CATALOG}.{SCHEMA}.observability_trace_details"
+MODEL_REGISTRY_TABLE = f"{CATALOG}.{SCHEMA}.model_registry"
 
 try:
     RETENTION_DAYS = max(1, int(dbutils.widgets.get("trace_retention_days") or "90"))
@@ -118,6 +119,21 @@ if CROSS_WS_FANOUT_ENABLED:
 # MAGIC ## Delta Table Schema
 
 # COMMAND ----------
+
+# UC registered models (Model Registry), enumerated via REST on the deploy
+# workspace. Cached so the Observability → MLflow Assets tab reads Lakebase
+# instead of a live REST search on every load. `name` is the 3-part UC FQN.
+MODEL_REGISTRY_SCHEMA = StructType([
+    StructField("name", StringType(), False),
+    StructField("workspace_id", StringType(), True),
+    StructField("user_id", StringType(), True),
+    StructField("last_updated_timestamp", LongType(), True),
+    StructField("creation_timestamp", LongType(), True),
+    StructField("description", StringType(), True),
+    StructField("aliases", StringType(), True),          # JSON string
+    StructField("latest_versions", StringType(), True),  # JSON string
+    StructField("discovered_at", TimestampType(), False),
+])
 
 TRACES_SCHEMA = StructType([
     StructField("request_id", StringType(), False),
@@ -655,6 +671,58 @@ else:
     empty_df = spark.createDataFrame([], TRACE_DETAILS_SCHEMA)
     empty_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(TRACE_DETAILS_TABLE)
     print("ℹ️  No trace details to write — empty Delta table written")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Registered models (UC Model Registry → Lakebase cache)
+# MAGIC
+# MAGIC Enumerate UC registered models via REST on the deploy workspace so the app's
+# MAGIC Model Registry view reads Lakebase instead of a live search on every load.
+# MAGIC Deploy-workspace scope (same as the app's previous live call). Fail-open.
+
+# COMMAND ----------
+
+model_rows = []
+try:
+    _mw = WorkspaceClient()
+    _mw_ws_id = spark.conf.get("spark.databricks.clusterUsageTags.orgId", "") or None
+    page_token = None
+    pages = 0
+    while pages < 50:  # safety bound; 100/page → up to 5k models
+        params = {"max_results": 100}
+        if page_token:
+            params["page_token"] = page_token
+        resp = _mw.api_client.do(
+            "GET", "/api/2.0/mlflow/unity-catalog/registered-models/search", query=params
+        )
+        for m in (resp.get("registered_models") or []):
+            model_rows.append((
+                m.get("name", ""),
+                _mw_ws_id,
+                m.get("user_id"),
+                int(m["last_updated_timestamp"]) if m.get("last_updated_timestamp") is not None else None,
+                int(m["creation_timestamp"]) if m.get("creation_timestamp") is not None else None,
+                # search endpoint returns `description`, not `comment`
+                m.get("description") or m.get("comment"),
+                json.dumps(m.get("aliases") or []),
+                json.dumps(m.get("latest_versions") or []),
+                now,
+            ))
+        page_token = resp.get("next_page_token")
+        pages += 1
+        if not page_token:
+            break
+    print(f"  ✅ enumerated {len(model_rows)} registered models")
+except Exception as exc:
+    print(f"  ⚠️  registered-models enumeration unavailable: {exc}")
+    model_rows = []
+
+if model_rows:
+    spark.createDataFrame(model_rows, MODEL_REGISTRY_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(MODEL_REGISTRY_TABLE)
+else:
+    spark.createDataFrame([], MODEL_REGISTRY_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(MODEL_REGISTRY_TABLE)
+print(f"✅ Wrote {len(model_rows)} rows to {MODEL_REGISTRY_TABLE}")
 
 # COMMAND ----------
 

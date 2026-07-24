@@ -1423,6 +1423,27 @@ def get_cached_traces(
     )
 
 
+def get_cached_models(limit: int = 1000) -> List[Dict[str, Any]]:
+    """Read UC registered models from the Lakebase cache (populated by
+    04_discover_observability). Returns the same row shape the live
+    search_registered_models produced (name, user_id, last_updated_timestamp,
+    aliases, …) so the frontend is unchanged. aliases/latest_versions are stored
+    as JSONB → returned as parsed lists. Degrades to [] when unsynced.
+    """
+    try:
+        rows = execute_query(
+            """SELECT name, user_id, last_updated_timestamp, creation_timestamp,
+                      description, aliases, latest_versions
+               FROM model_registry ORDER BY last_updated_timestamp DESC NULLS LAST LIMIT %s""",
+            (limit,),
+        )
+    except Exception as exc:
+        logger.warning("model_registry cache not available: %s", exc)
+        return []
+    # psycopg2 returns JSONB as already-parsed Python objects; pass through.
+    return rows
+
+
 def get_cached_experiments(workspace_id: Optional[str] = None, limit: int = 10000) -> List[Dict[str, Any]]:
     """Read experiments from the Lakebase cache, optionally filtered by workspace."""
     if workspace_id:

@@ -171,15 +171,16 @@ async def list_models(
     max_results: int = Query(500, le=10000),
     workspace_id: Optional[str] = Query(None, description="Workspace ID, 'all' for all workspaces"),
 ):
-    """Search Unity Catalog registered models, optionally cross-workspace."""
+    """UC registered models from the Lakebase cache (populated by the discovery
+    workflow). Reads the cache instead of a live REST search on every load; the
+    live search now only runs in the discovery workflow. Same row shape as before."""
     try:
-        token = _obo_token(request)
-        if workspace_id == "all" or workspace_id:
-            # Models are only available on the current workspace via REST
-            # Cross-workspace model registry not supported (no system table, OBO scope too narrow)
-            return mlflow_service.search_registered_models(max_results)
-        else:
-            return mlflow_service.search_registered_models(max_results)
+        rows = mlflow_service.get_cached_models(max_results)
+        if rows:
+            return rows
+        # Cold cache (workflow hasn't run yet): fall back to a one-off live search
+        # so the tab isn't empty before the first discovery run.
+        return mlflow_service.search_registered_models(max_results)
     except HTTPException:
         raise
     except Exception as e:
