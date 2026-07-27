@@ -679,9 +679,15 @@ with obs_conn.cursor() as cur:
         """CREATE TABLE IF NOT EXISTS agent_tool_usage (
             experiment_id TEXT, tool_name TEXT NOT NULL, span_type TEXT NOT NULL,
             call_count BIGINT DEFAULT 0, trace_count BIGINT DEFAULT 0,
+            error_count BIGINT DEFAULT 0, total_latency_ms DOUBLE PRECISION DEFAULT 0,
             last_seen TEXT,
             last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW())""",
         "CREATE INDEX IF NOT EXISTS idx_atu_exp ON agent_tool_usage (experiment_id)",
+        # Reconcile the error/latency columns onto pre-existing tables (CREATE IF
+        # NOT EXISTS is a no-op when the table already exists). Workflow-owned, so
+        # the workflow can ALTER it.
+        "ALTER TABLE agent_tool_usage ADD COLUMN IF NOT EXISTS error_count BIGINT DEFAULT 0",
+        "ALTER TABLE agent_tool_usage ADD COLUMN IF NOT EXISTS total_latency_ms DOUBLE PRECISION DEFAULT 0",
         """CREATE TABLE IF NOT EXISTS mlflow_registered_models (
             name TEXT NOT NULL, workspace_id TEXT, user_id TEXT,
             last_updated_timestamp BIGINT, creation_timestamp BIGINT,
@@ -1180,13 +1186,15 @@ try:
     # insert rolls back the truncate rather than leaving the table empty.
     atu_rows = spark.read.table(TOOL_USAGE_DELTA).collect()
     values = [(r.experiment_id, r.tool_name, r.span_type, int(r.call_count or 0),
-               int(r.trace_count or 0), r.last_seen, now) for r in atu_rows]
+               int(r.trace_count or 0), int(getattr(r, "error_count", 0) or 0),
+               float(getattr(r, "total_latency_ms", 0.0) or 0.0), r.last_seen, now) for r in atu_rows]
     with obs_conn.cursor() as cur:
         cur.execute("TRUNCATE TABLE agent_tool_usage")
         if values:
             execute_values(cur,
                 """INSERT INTO agent_tool_usage
-                   (experiment_id, tool_name, span_type, call_count, trace_count, last_seen, last_synced)
+                   (experiment_id, tool_name, span_type, call_count, trace_count,
+                    error_count, total_latency_ms, last_seen, last_synced)
                    VALUES %s""",
                 values, page_size=500)
     obs_conn.commit()
