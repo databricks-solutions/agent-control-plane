@@ -684,9 +684,18 @@ else:
 # COMMAND ----------
 
 model_rows = []
+# Resolve the deploy workspace id defensively — spark.conf.get raises
+# CONFIG_NOT_AVAILABLE on serverless (the 2-arg default is NOT honored for this
+# key), which would otherwise abort the whole enumeration below.
+try:
+    _mw_ws_id = spark.conf.get("spark.databricks.clusterUsageTags.orgId")
+except Exception:
+    _mw_ws_id = None
+if not _mw_ws_id:
+    # Fall back to the local workspace id resolved earlier for host mapping.
+    _mw_ws_id = _local_ws_id if "_local_ws_id" in dir() else None
 try:
     _mw = WorkspaceClient()
-    _mw_ws_id = spark.conf.get("spark.databricks.clusterUsageTags.orgId", "") or None
     page_token = None
     pages = 0
     while pages < 50:  # safety bound; 100/page → up to 5k models
@@ -756,6 +765,7 @@ result = {
     "total_traces": len(all_traces),
     "total_trace_details": len(all_details),
     "total_detail_errors": total_detail_errors,
+    "registered_models": len(model_rows),
     "retention_days": RETENTION_DAYS,
     "sp_auth_enabled": bool(SP_CLIENT_ID),
     "narrow_test_ws": NARROW_TEST_WS or None,
