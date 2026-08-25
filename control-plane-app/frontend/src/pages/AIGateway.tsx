@@ -21,6 +21,10 @@ import {
   type UagBreakdownRow,
   useGatewayInferenceLogs,
   useGatewayMetrics,
+  useEndpointInventory,
+  useUagBudgetStatus,
+  useModelServices,
+  useModelServiceGrants,
   useAppConfig,
   useRefreshGateway,
   useCurrentUser,
@@ -58,21 +62,40 @@ import {
   Pencil,
   Info,
   Sparkles,
+  Archive,
+  Server,
+  Wallet,
 } from 'lucide-react'
 
 /* ── tab definitions ─────────────────────────────────────────── */
 const baseTabs = [
-  { id: 'uag-v2', label: 'Unity AI Gateway', icon: Sparkles, beta: true, legacy: false },
-  { id: 'overview', label: 'Overview', icon: LayoutDashboard, beta: false, legacy: true },
-  { id: 'metrics', label: 'Metrics', icon: Cpu, beta: false, legacy: true },
-  { id: 'permissions', label: 'Permissions', icon: Shield, beta: false, legacy: true },
-  { id: 'rate-limits', label: 'Rate Limits & Guardrails', icon: ShieldAlert, beta: false, legacy: true },
+  { id: 'uag-v2', label: 'Unity Gateway', icon: Sparkles },
+  { id: 'budgets', label: 'Budgets', icon: Wallet },
+  { id: 'legacy', label: 'Legacy AI Gateway', icon: Archive },
 ] as const
 
-type TabId = 'overview' | 'metrics' | 'permissions' | 'rate-limits' | 'uag-v2'
+/** Compact USD formatter for budget caps/spend (matches the Governance style). */
+function fmtCost(v: number): string {
+  if (v >= 1000) return `$${(v / 1000).toFixed(1)}k`
+  if (v >= 1) return `$${v.toFixed(2)}`
+  return `$${v.toFixed(4)}`
+}
+
+// Secondary nav inside the Legacy AI Gateway tab — the per-endpoint serving-gateway
+// views (v1), plus Permissions (endpoint ACLs + UC grants).
+const legacyTabs = [
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'metrics', label: 'Metrics', icon: Cpu },
+  { id: 'permissions', label: 'Permissions', icon: Shield },
+  { id: 'rate-limits', label: 'Rate Limits & Guardrails', icon: ShieldAlert },
+] as const
+
+type TabId = 'uag-v2' | 'budgets' | 'legacy'
+type LegacyTabId = 'overview' | 'metrics' | 'permissions' | 'rate-limits'
 
 export default function AIGatewayPage() {
   const [activeTab, setActiveTab] = useState<TabId>('uag-v2')
+  const [legacyTab, setLegacyTab] = useState<LegacyTabId>('overview')
   const [days, setDays] = useState(7)
   const [searchQuery, setSearchQuery] = useState('')
 
@@ -101,7 +124,7 @@ export default function AIGatewayPage() {
               rel="noopener noreferrer"
               className="text-blue-600 hover:underline inline-flex items-center gap-0.5"
             >
-              (Beta docs <ExternalLink className="w-3 h-3" />)
+              (docs <ExternalLink className="w-3 h-3" />)
             </a>
           </p>
         </div>
@@ -139,17 +162,17 @@ export default function AIGatewayPage() {
       <div className="flex items-start gap-2.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3.5 py-2.5 text-[13px] text-indigo-900 dark:border-indigo-900/50 dark:bg-indigo-950/30 dark:text-indigo-200">
         <Sparkles className="w-4 h-4 mt-0.5 flex-shrink-0 text-indigo-500 dark:text-indigo-400" />
         <p className="leading-snug">
-          <span className="font-semibold">Unity AI Gateway is where this is headed.</span>{' '}
-          It's Databricks' native control plane for AI governance. We integrate its capabilities
-          as soon as their APIs are available — start with the{' '}
-          <span className="font-medium">Unity AI Gateway (Beta)</span> tab — and retire legacy
-          views here as they're superseded. Expect this page to shift toward Unity AI Gateway over time.
+          <span className="font-semibold">Unity Gateway is where this is headed.</span>{' '}
+          It's Databricks' native, generally available control plane for AI governance. We
+          integrate its capabilities as their APIs become available — start with the{' '}
+          <span className="font-medium">Unity Gateway</span> tab — and retire legacy
+          views here as they're superseded. Expect this page to shift toward Unity Gateway over time.
         </p>
       </div>
 
       {/* Tab bar */}
       <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700 overflow-x-auto">
-        {tabs.map(({ id, label, icon: Icon, beta, legacy }) => (
+        {tabs.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => setActiveTab(id)}
@@ -161,43 +184,444 @@ export default function AIGatewayPage() {
           >
             <Icon className="w-4 h-4" />
             {label}
-            {beta && (
-              <span className="ml-0.5 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300">
-                Beta
-              </span>
-            )}
-            {legacy && (
-              <span className="ml-0.5 px-1.5 py-0.5 rounded text-[9px] font-semibold tracking-wide bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400">
-                v1
-              </span>
-            )}
           </button>
         ))}
       </div>
 
-      {/* KPI Row — Overview only */}
-      {activeTab === 'overview' && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
-          <KpiCard title="Total Endpoints" value={overview?.total_endpoints ?? 0} format="number" />
-          <KpiCard title="Ready" value={overview?.ready_endpoints ?? 0} format="number" />
-          <KpiCard title="Gateway Enabled" value={overview?.gateway_enabled ?? 0} format="number" />
-          <KpiCard title="Requests (24h)" value={overview?.total_requests_24h ?? 0} format="number" />
-          <KpiCard title="Unique Users (24h)" value={overview?.unique_users_24h ?? 0} format="number" />
-          <KpiCard title="Error Rate (24h)" value={overview?.error_rate_24h ?? 0} format="percentage" />
+      {/* Unity Gateway — primary surface, incl. account-wide endpoint inventory */}
+      {activeTab === 'uag-v2' && (
+        <div className="space-y-6">
+          <UagV2Section />
+          <ModelServicesSection />
+          <EndpointInventorySection />
         </div>
       )}
 
-      {/* Tab content */}
-      {activeTab === 'overview' && <OverviewSection endpoints={endpoints} overview={overview} workspaceUrl={workspaceUrl} loading={pageLoading} searchQuery={searchQuery} days={days} />}
-      {activeTab === 'metrics' && <MetricsSection />}
-      {activeTab === 'permissions' && <PermissionsSection />}
-      {activeTab === 'rate-limits' && <RateLimitsAndGuardrailsSection />}
-      {activeTab === 'uag-v2' && <UagV2Section />}
+      {/* Budgets — native account budgets (read-only), config + MTD spend vs cap */}
+      {activeTab === 'budgets' && <BudgetsTab />}
+
+      {/* Legacy AI Gateway — the per-endpoint serving-gateway views, consolidated */}
+      {activeTab === 'legacy' && (
+        <div className="space-y-4">
+          {/* Secondary sub-nav */}
+          <div className="flex flex-wrap gap-1">
+            {legacyTabs.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                onClick={() => setLegacyTab(id)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  legacyTab === id
+                    ? 'bg-gray-100 text-gray-900 dark:bg-gray-800 dark:text-gray-100'
+                    : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {/* KPI Row — Legacy Overview only */}
+          {legacyTab === 'overview' && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
+              <KpiCard title="Total Endpoints" value={overview?.total_endpoints ?? 0} format="number" />
+              <KpiCard title="Ready" value={overview?.ready_endpoints ?? 0} format="number" />
+              <KpiCard title="Gateway Enabled" value={overview?.gateway_enabled ?? 0} format="number" />
+              <KpiCard title="Requests (24h)" value={overview?.total_requests_24h ?? 0} format="number" />
+              <KpiCard title="Unique Users (24h)" value={overview?.unique_users_24h ?? 0} format="number" />
+              <KpiCard title="Error Rate (24h)" value={overview?.error_rate_24h ?? 0} format="percentage" />
+            </div>
+          )}
+
+          {legacyTab === 'overview' && <OverviewSection endpoints={endpoints} overview={overview} workspaceUrl={workspaceUrl} loading={pageLoading} searchQuery={searchQuery} days={days} />}
+          {legacyTab === 'metrics' && <MetricsSection />}
+          {legacyTab === 'permissions' && <PermissionsSection />}
+          {legacyTab === 'rate-limits' && <RateLimitsAndGuardrailsSection />}
+        </div>
+      )}
     </div>
   )
 }
 
-/* ── Unity AI Gateway (Beta) Section ───────────────────────── */
+/* ── Budgets (native account budgets, read-only) ───────────────── */
+
+function BudgetsTab() {
+  const { data, isLoading } = useUagBudgetStatus()
+  const budgets = data?.budgets ?? []
+  const totals = data?.totals ?? {}
+  const hasData = budgets.length > 0
+
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
+  const { sort, toggle } = useSort<string>('max_threshold_usd')
+
+  const sorted = useMemo(
+    () =>
+      sortRows(budgets, sort, (b: (typeof budgets)[number], k) => {
+        if (k === 'enforce') return b.enforce ? 2 : b.alerting ? 1 : 0
+        if (k === 'is_ai') return b.is_ai ? 1 : 0
+        return (b as any)[k]
+      }),
+    [budgets, sort],
+  )
+  const paged = sorted.slice(page * pageSize, (page + 1) * pageSize)
+
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            Budget Status
+            <span className="group relative inline-flex">
+              <Info className="w-3.5 h-3.5 text-gray-400 cursor-help" tabIndex={0} />
+              <span
+                role="tooltip"
+                className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 hidden w-80 rounded-lg border border-gray-200 bg-white p-3 text-left text-[11px] font-normal leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+              >
+                Read-only inventory of native Databricks budgets (account Budgets API).
+                Shows each budget's cap, whether it <strong>enforces</strong> a hard cap
+                (BLOCK_USAGE) or only <strong>alerts</strong>, its filter, and whether it
+                scopes AI spend. <strong>Spent (MTD)</strong> and <strong>% Used</strong> are
+                this month's list-price spend matched to the budget's filter (from
+                <code>system.billing.usage</code>); shown as <em>n/a</em> for complex filters
+                we don't estimate. Budgets are created and enforced by the platform — this app
+                only surfaces their status.
+              </span>
+            </span>
+            {data?.as_of && (
+              <span className="ml-auto text-[10px] font-normal text-gray-400 dark:text-gray-500">
+                as of {formatAsOf(data.as_of)}
+              </span>
+            )}
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="py-12 text-center text-gray-400 dark:text-gray-500">Loading…</div>
+          ) : !hasData ? (
+            <div className="py-12 text-center text-gray-400 dark:text-gray-500">
+              No budgets found. Either none are configured in your Databricks account, or the
+              discovery workflow has no account-level credentials to read the (account-scoped)
+              Budgets API — set <code>discovery_sp_secret_scope</code> to an account SP with
+              budget read access.
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-5">
+                <KpiCard title="Budgets" value={totals.budget_count ?? 0} />
+                <KpiCard title="Enforcing (hard cap)" value={totals.enforcing_count ?? 0} />
+                <KpiCard title="AI-scoped" value={totals.ai_budget_count ?? 0} />
+                <KpiCard title="≥80% of cap" value={(totals.near_cap_count ?? 0) + (totals.over_cap_count ?? 0)} />
+                <KpiCard title="Over cap" value={totals.over_cap_count ?? 0} />
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="border-b border-gray-200 dark:border-gray-700">
+                    <tr>
+                      <SortableHeader label="Budget" sortKey="display_name" current={sort} onToggle={toggle} />
+                      <SortableHeader label="Period" sortKey="time_period" current={sort} onToggle={toggle} />
+                      <SortableHeader label="Cap" sortKey="max_threshold_usd" current={sort} onToggle={toggle} align="right" />
+                      <SortableHeader label="Spent (MTD)" sortKey="spent_usd" current={sort} onToggle={toggle} align="right" />
+                      <SortableHeader label="% Used" sortKey="pct_used" current={sort} onToggle={toggle} align="right" />
+                      <SortableHeader label="Action" sortKey="enforce" current={sort} onToggle={toggle} />
+                      <SortableHeader label="Scope" sortKey="is_ai" current={sort} onToggle={toggle} />
+                      <th className="py-2 px-2 text-left text-xs text-gray-500 dark:text-gray-400">Filter</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paged.map((b) => (
+                      <tr
+                        key={b.budget_id}
+                        className="border-b border-gray-100 dark:border-gray-700/50 last:border-0 hover:bg-gray-50 dark:hover:bg-gray-800/50"
+                      >
+                        <td className="py-2 px-2 font-medium">{b.display_name || b.budget_id}</td>
+                        <td className="py-2 px-2 text-gray-500 dark:text-gray-400">{b.time_period || '—'}</td>
+                        <td className="text-right py-2 px-2 tabular-nums">
+                          {b.max_threshold_usd ? fmtCost(b.max_threshold_usd) : '—'}
+                        </td>
+                        <td className="text-right py-2 px-2 tabular-nums">
+                          {b.spent_usd != null ? fmtCost(b.spent_usd) : <span className="text-gray-400 dark:text-gray-500">n/a</span>}
+                        </td>
+                        <td className="py-2 px-2">
+                          {b.pct_used != null ? (
+                            <div className="flex items-center gap-2">
+                              <div className="h-1.5 w-16 rounded bg-gray-200 dark:bg-gray-700 overflow-hidden">
+                                <div
+                                  className={`h-full ${b.pct_used >= 100 ? 'bg-red-500' : b.pct_used >= 80 ? 'bg-amber-500' : 'bg-green-500'}`}
+                                  style={{ width: `${Math.min(b.pct_used, 100)}%` }}
+                                />
+                              </div>
+                              <span className="tabular-nums text-xs">{b.pct_used.toFixed(0)}%</span>
+                            </div>
+                          ) : (
+                            <span className="text-gray-400 dark:text-gray-500 text-xs">n/a</span>
+                          )}
+                        </td>
+                        <td className="py-2 px-2">
+                          {b.enforce ? (
+                            <Badge variant="error" className="text-xs">Enforces</Badge>
+                          ) : b.alerting ? (
+                            <Badge variant="warning" className="text-xs">Alerts</Badge>
+                          ) : (
+                            <Badge variant="default" className="text-xs">None</Badge>
+                          )}
+                        </td>
+                        <td className="py-2 px-2">
+                          {b.is_ai && <Badge variant="info" className="text-xs">AI</Badge>}
+                        </td>
+                        <td className="py-2 px-2 text-xs text-gray-500 dark:text-gray-400 max-w-xs truncate" title={b.filter_summary}>
+                          {b.filter_summary}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <TablePagination
+                page={page}
+                totalItems={sorted.length}
+                pageSize={pageSize}
+                onPageChange={setPage}
+                onPageSizeChange={setPageSize}
+              />
+            </>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+/* ── Model Services (v3 UC securables + UC grants, OBO/UC-enforced) ── */
+
+function ModelServiceGrantsEditor({ fullName }: { fullName: string }) {
+  const { data, isLoading } = useModelServiceGrants(fullName)
+  const grants = data?.grants ?? []
+  if (isLoading) return <div className="px-4 py-2 text-xs text-gray-400 dark:text-gray-500">Loading grants…</div>
+  return (
+    <div className="px-4 py-3 space-y-2">
+      {data?.error && <div className="text-xs text-amber-600 dark:text-amber-400">{data.error}</div>}
+      <table className="w-full text-xs">
+        <tbody>
+          {grants.length === 0 && (
+            <tr><td className="py-1 text-gray-400 dark:text-gray-500">No direct grants</td></tr>
+          )}
+          {grants.map((g) => (
+            <tr key={g.principal} className="border-b border-gray-100 dark:border-gray-700/50 last:border-0">
+              <td className="py-1 font-mono">{g.principal}</td>
+              <td className="py-1">{g.privileges.map((p) => <Badge key={p} variant="info" className="text-[10px] mr-1">{p}</Badge>)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="text-[11px] text-gray-400 dark:text-gray-500">
+        Read-only — grant editing isn't enabled yet (needs the app service principal to have <code>MANAGE</code> on the model service).
+      </p>
+    </div>
+  )
+}
+
+function ModelServicesSection() {
+  const { data, isLoading } = useModelServices()
+  const services = data?.services ?? []
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
+  const [q, setQ] = useState('')
+  const { sort, toggle } = useSort<string>('full_name', 'asc')
+
+  const filtered = useMemo(() => {
+    const n = q.trim().toLowerCase()
+    return n ? services.filter((s) => s.full_name.toLowerCase().includes(n) || (s.owner || '').toLowerCase().includes(n)) : services
+  }, [services, q])
+  const sorted = useMemo(() => sortRows(filtered, sort, (s: (typeof services)[number], k) => (s as any)[k]), [filtered, sort])
+  const paged = sorted.slice(page * pageSize, (page + 1) * pageSize)
+
+  if (isLoading || services.length === 0) return null
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <Sparkles className="w-4 h-4 text-db-red" />
+          Model Services
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">{services.length}</span>
+          <span className="group relative inline-flex">
+            <Info className="w-3.5 h-3.5 text-gray-400 cursor-help" tabIndex={0} />
+            <span role="tooltip" className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 hidden w-80 rounded-lg border border-gray-200 bg-white p-3 text-left text-[11px] font-normal leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">
+              Unity Gateway model services — UC securables governed by Unity Catalog grants
+              (metastore-wide). <strong>Read-only</strong>: the list is discovered by the workflow
+              and grants are shown live. Editing is deferred (needs the app SP to have MANAGE, or
+              a UC scope Apps OBO can't yet carry).
+            </span>
+          </span>
+        </CardTitle>
+        <p className="text-[11px] text-gray-400 dark:text-gray-500">Expand a service to view and edit its UC grants.</p>
+      </CardHeader>
+      <CardContent>
+        <div className="relative mb-3 max-w-xs">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+          <input type="text" placeholder="Search model services…" value={q} onChange={(e) => { setQ(e.target.value); setPage(0) }} className="pl-8 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-800 dark:text-gray-200 w-full" />
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="border-b dark:border-gray-700">
+              <tr>
+                <SortableHeader label="Model Service" sortKey="full_name" current={sort} onToggle={toggle} />
+                <SortableHeader label="Owner" sortKey="owner" current={sort} onToggle={toggle} />
+                <th className="py-2 px-2 text-left text-xs text-gray-500 dark:text-gray-400">API Types</th>
+                <th className="py-2 px-2 text-right text-xs text-gray-500 dark:text-gray-400">Grants</th>
+              </tr>
+            </thead>
+            <tbody>
+              {paged.map((s) => {
+                const open = expanded === s.full_name
+                return (
+                  <Fragment key={s.full_name}>
+                    <tr className="border-b border-gray-100 dark:border-gray-700/50 hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer" onClick={() => setExpanded(open ? null : s.full_name)}>
+                      <td className="py-2 px-2 font-mono text-xs truncate max-w-[320px]" title={s.full_name}>{s.full_name}</td>
+                      <td className="py-2 px-2 text-gray-500 dark:text-gray-400 truncate max-w-[200px]" title={s.owner}>{s.owner || '—'}</td>
+                      <td className="py-2 px-2 text-gray-500 dark:text-gray-400 text-xs">{(s.supported_api_types || []).join(', ') || '—'}</td>
+                      <td className="py-2 px-2 text-right text-xs text-db-red">{open ? 'Hide' : 'View'}</td>
+                    </tr>
+                    {open && (
+                      <tr className="bg-gray-50/60 dark:bg-gray-800/30">
+                        <td colSpan={4}><ModelServiceGrantsEditor fullName={s.full_name} /></td>
+                      </tr>
+                    )}
+                  </Fragment>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+        <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ── Endpoints Inventory (account-wide, read-only) ─────────────── */
+
+function EndpointInventorySection() {
+  const { data, isLoading } = useEndpointInventory()
+  const endpoints = data?.endpoints ?? []
+  const totals = data?.totals ?? {}
+  const hasData = endpoints.length > 0
+
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(20)
+  const [q, setQ] = useState('')
+  const { sort, toggle } = useSort<string>('change_time')
+
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase()
+    if (!needle) return endpoints
+    return endpoints.filter((e) =>
+      [e.endpoint_name, e.entity_name, e.workspace_id, e.created_by, e.entity_type, e.provider]
+        .some((v) => (v || '').toLowerCase().includes(needle)),
+    )
+  }, [endpoints, q])
+
+  const sorted = useMemo(
+    () => sortRows(filtered, sort, (e: (typeof endpoints)[number], k) => (e as any)[k]),
+    [filtered, sort],
+  )
+  const paged = sorted.slice(page * pageSize, (page + 1) * pageSize)
+
+  const typeVariant = (t: string): 'info' | 'warning' | 'success' | 'default' =>
+    t === 'FOUNDATION_MODEL' ? 'info' : t === 'EXTERNAL_MODEL' ? 'warning' : t === 'CUSTOM_MODEL' ? 'success' : 'default'
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Server className="w-4 h-4 text-db-red" />
+            Account-wide Endpoints
+            <span className="group relative inline-flex">
+              <Info className="w-3.5 h-3.5 text-gray-400 cursor-help" tabIndex={0} />
+              <span
+                role="tooltip"
+                className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 hidden w-80 rounded-lg border border-gray-200 bg-white p-3 text-left text-[11px] font-normal leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+              >
+                Every served entity across all workspaces in the metastore, from{' '}
+                <code>system.serving.served_entities</code>. <strong>Read-only</strong> — live
+                management (permissions, gateway config) is per-workspace via the Serving API; the
+                other tabs act on this workspace only.
+              </span>
+            </span>
+            {data?.as_of && (
+              <span className="ml-auto text-[10px] font-normal text-gray-400 dark:text-gray-500">as of {formatAsOf(data.as_of)}</span>
+            )}
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="py-12 text-center text-gray-400 dark:text-gray-500">Loading…</div>
+          ) : !hasData ? (
+            <div className="py-12 text-center text-gray-400 dark:text-gray-500">
+              No endpoint inventory yet — the discovery workflow hasn't synced{' '}
+              <code>system.serving.served_entities</code>, or it isn't readable at the discovery scope.
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-5">
+                <KpiCard title="Served Entities" value={totals.served_entity_count ?? 0} />
+                <KpiCard title="Endpoints" value={totals.endpoint_count ?? 0} />
+                <KpiCard title="Workspaces" value={totals.workspace_count ?? 0} />
+                <KpiCard title="Foundation" value={totals.foundation_count ?? 0} />
+                <KpiCard title="Custom / External" value={`${totals.custom_count ?? 0} / ${totals.external_count ?? 0}`} />
+              </div>
+              <div className="relative mb-3 max-w-xs">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                <input
+                  type="text"
+                  placeholder="Search endpoints…"
+                  value={q}
+                  onChange={(e) => { setQ(e.target.value); setPage(0) }}
+                  className="pl-8 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-800 dark:text-gray-200 w-full"
+                />
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="border-b border-gray-200 dark:border-gray-700">
+                    <tr>
+                      <SortableHeader label="Endpoint" sortKey="endpoint_name" current={sort} onToggle={toggle} />
+                      <SortableHeader label="Workspace" sortKey="workspace_id" current={sort} onToggle={toggle} />
+                      <SortableHeader label="Type" sortKey="entity_type" current={sort} onToggle={toggle} />
+                      <SortableHeader label="Model" sortKey="entity_name" current={sort} onToggle={toggle} />
+                      <SortableHeader label="Creator" sortKey="created_by" current={sort} onToggle={toggle} />
+                      <SortableHeader label="Changed" sortKey="change_time" current={sort} onToggle={toggle} align="right" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paged.map((e, i) => (
+                      <tr
+                        key={`${e.endpoint_name}-${e.entity_name}-${i}`}
+                        className="border-b border-gray-100 dark:border-gray-700/50 last:border-0 hover:bg-gray-50 dark:hover:bg-gray-800/50"
+                      >
+                        <td className="py-2 px-2 font-medium">{e.endpoint_name}</td>
+                        <td className="py-2 px-2 text-gray-500 dark:text-gray-400 tabular-nums">{e.workspace_id}</td>
+                        <td className="py-2 px-2"><Badge variant={typeVariant(e.entity_type)} className="text-xs">{e.entity_type || '—'}</Badge></td>
+                        <td className="py-2 px-2 text-gray-600 dark:text-gray-300">{e.provider ? `${e.provider}: ${e.entity_name}` : e.entity_name || '—'}</td>
+                        <td className="py-2 px-2 text-gray-500 dark:text-gray-400 max-w-[12rem] truncate" title={e.created_by}>{e.created_by || '—'}</td>
+                        <td className="text-right py-2 px-2 text-gray-500 dark:text-gray-400 whitespace-nowrap">{e.change_time ? formatAsOf(e.change_time) : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+            </>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+/* ── Unity Gateway Section ───────────────────────── */
 
 function UagV2Section() {
   const { data: uag, isLoading } = useUagV2Usage()
@@ -221,11 +645,11 @@ function UagV2Section() {
       <Card>
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
-            Unity AI Gateway (Beta) Usage
+            Unity Gateway Usage
             <span className="group relative inline-flex">
               <Info className="w-3.5 h-3.5 text-gray-400 cursor-help" tabIndex={0} />
               <span role="tooltip" className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 hidden w-72 rounded-lg border border-gray-200 bg-white p-3 text-left text-[11px] font-normal leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">
-                Only requests routed through <strong>Unity AI Gateway</strong> endpoints (~20-min fresh) — a subset of all serving. Broader serving usage is under <strong>Metrics</strong>; dollar cost is under <strong>Governance</strong>. Cached-token % and TTFB come only from this source.
+                Only requests routed through <strong>Unity Gateway</strong> endpoints (~20-min fresh) — a subset of all serving. Broader serving usage is under <strong>Metrics</strong>; dollar cost is under <strong>Governance</strong>. Cached-token % and TTFB come only from this source.
               </span>
             </span>
             {uag?.as_of && (
@@ -240,7 +664,7 @@ function UagV2Section() {
             <div className="py-12 text-center text-gray-400 dark:text-gray-500">Loading…</div>
           ) : !hasData ? (
             <div className="py-12 text-center text-gray-400 dark:text-gray-500">
-              No Unity AI Gateway usage yet — either no gateway-routed traffic in this workspace, or the discovery workflow hasn't synced <code>system.ai_gateway.usage</code> yet.
+              No Unity Gateway usage yet — either no gateway-routed traffic in this workspace, or the discovery workflow hasn't synced <code>system.ai_gateway.usage</code> yet.
             </div>
           ) : (
             <>
@@ -251,6 +675,9 @@ function UagV2Section() {
                 <KpiCard title="Cached Tokens" value={uag!.totals.cached_tokens ?? 0} format="number" />
                 <KpiCard title="Cache Read %" value={uag!.totals.cache_read_pct ?? 0} format="percentage" />
                 <KpiCard title="Endpoints" value={uag!.totals.endpoints ?? 0} format="number" />
+              </div>
+              <div className="mb-4">
+                <UagV2TrendCard />
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
@@ -351,7 +778,6 @@ function UagV2Section() {
         </div>
       )}
 
-      <UagV2TrendCard />
       <CodingAgentsCard />
       <UagMcpToolsCard />
       <GuardrailCoverageCard />
@@ -466,7 +892,7 @@ function GuardrailCoverageCard() {
           </span>
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
-          Endpoints with Unity AI Gateway guardrails running + the judge model evaluating them.
+          Endpoints with Unity Gateway guardrails running + the judge model evaluating them.
           Coverage &amp; activity only — block/mask outcomes require UAG feature-results (enrollment-gated).
           {data?.as_of && <> · as of {formatAsOf(data.as_of)}</>}
         </p>
@@ -538,7 +964,7 @@ function ThrottlingCard() {
           </span>
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
-          Endpoints returning HTTP 429 (rate-limited) or 5xx (server error) through Unity AI Gateway.
+          Endpoints returning HTTP 429 (rate-limited) or 5xx (server error) through Unity Gateway.
           Only endpoints with at least one 429/5xx are shown; rates are per-endpoint (share of that endpoint's own requests).
           {data?.as_of && <> · as of {formatAsOf(data.as_of)}</>}
         </p>
@@ -668,7 +1094,7 @@ function UagMcpToolsCard() {
           </span>
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
-          MCP tool invocations governed through Unity AI Gateway
+          MCP tool invocations governed through Unity Gateway
           {mcp?.as_of && <> · as of {formatAsOf(mcp.as_of)}</>}
         </p>
       </CardHeader>

@@ -500,19 +500,27 @@ export default function ToolsPage() {
   )
 }
 
-/* MCP usage via Unity AI Gateway v2 (uag_mcp_tool_daily). Server-grouped, with a
+/* MCP usage via Unity Gateway v2 (uag_mcp_tool_daily). Server-grouped, with a
  * managed (system.ai.*) vs UC-registered split — a distinct namespace from the
  * connection inventory below, so it's shown as its own panel. Hidden when no MCP
  * traffic has routed through the gateway. */
 function McpUsageSection({ query }: { query: string }) {
   const { data, isLoading } = useMcpActivity()
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
+  const { sort, toggle } = useSort<string>('request_count', 'desc')
   const q = query.trim().toLowerCase()
   const servers = (data?.servers || []).filter((s) =>
     !q ||
     s.service_name.toLowerCase().includes(q) ||
     s.tools.some((t) => t.tool_name.toLowerCase().includes(q))
   )
+  const sorted = useMemo(
+    () => sortRows(servers, sort, (s: any, k) => (k === 'managed' ? (s.managed ? 1 : 0) : (s as any)[k])),
+    [servers, sort],
+  )
+  const paged = sorted.slice(page * pageSize, (page + 1) * pageSize)
   if (isLoading || servers.length === 0) return null
 
   return (
@@ -525,7 +533,7 @@ function McpUsageSection({ query }: { query: string }) {
           </span>
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
-          MCP tool calls governed through Unity AI Gateway v2 (distinct from the configured connections below)
+          MCP tool calls governed through Unity Gateway (distinct from the configured connections below)
           {data?.as_of && <> · as of {formatAsOf(data.as_of)}</>}
         </p>
       </CardHeader>
@@ -533,16 +541,16 @@ function McpUsageSection({ query }: { query: string }) {
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
-                <th className="py-2 font-medium">MCP Service</th>
-                <th className="py-2 font-medium">Class</th>
-                <th className="py-2 font-medium text-right">Tools</th>
-                <th className="py-2 font-medium text-right">Requests</th>
-                <th className="py-2 font-medium text-right">Errors</th>
+              <tr className="border-b dark:border-gray-700">
+                <SortableHeader label="MCP Service" sortKey="service_name" current={sort} onToggle={toggle} />
+                <SortableHeader label="Class" sortKey="managed" current={sort} onToggle={toggle} />
+                <SortableHeader label="Tools" sortKey="tool_count" current={sort} onToggle={toggle} align="right" />
+                <SortableHeader label="Requests" sortKey="request_count" current={sort} onToggle={toggle} align="right" />
+                <SortableHeader label="Errors" sortKey="error_count" current={sort} onToggle={toggle} align="right" />
               </tr>
             </thead>
             <tbody>
-              {servers.map((s) => {
+              {paged.map((s) => {
                 const open = expanded === s.service_name
                 return (
                   <Fragment key={s.service_name}>
@@ -578,7 +586,7 @@ function McpUsageSection({ query }: { query: string }) {
                               </tr>
                             </thead>
                             <tbody>
-                              {s.tools.map((t, i) => (
+                              {s.tools.map((t: any, i: number) => (
                                 <tr key={`${s.service_name}:${t.tool_name}:${i}`}>
                                   <td className="py-1">{t.tool_name || <span className="text-gray-400">(server)</span>}</td>
                                   <td className="py-1 text-right tabular-nums">{t.request_count.toLocaleString()}</td>
@@ -597,6 +605,7 @@ function McpUsageSection({ query }: { query: string }) {
             </tbody>
           </table>
         </div>
+        <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
       </CardContent>
     </Card>
   )

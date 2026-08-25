@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  useAgents,
   useBillingPageData,
   useBillingRefresh,
   useBillingCacheStatus,
@@ -19,7 +18,7 @@ import { LineChart } from '@/components/charts/LineChart'
 import { BarChart } from '@/components/charts/BarChart'
 import { PieChart } from '@/components/charts/PieChart'
 import { DB_CHART } from '@/lib/brand'
-import { LayoutDashboard, Zap, Server, ChevronDown, ChevronRight, BarChart3, Layers, Globe, RefreshCw, Users, Info, Tag, Boxes } from 'lucide-react'
+import { LayoutDashboard, Zap, Server, ChevronDown, ChevronRight, Layers, Globe, RefreshCw, Users, Info, Tag, Boxes } from 'lucide-react'
 
 /* ── helpers ──────────────────────────────────────────────────── */
 
@@ -57,7 +56,6 @@ const TABS = [
   { key: 'endpoints', label: 'Endpoint Costs', icon: Server },
   { key: 'tokens', label: 'Token Usage', icon: Zap },
   { key: 'products', label: 'All Products', icon: Layers },
-  { key: 'guardrails', label: 'Guardrails', icon: BarChart3 },
 ] as const
 
 type TabKey = (typeof TABS)[number]['key']
@@ -233,7 +231,6 @@ export default function GovernancePage() {
       {tab === 'endpoints' && <EndpointCostsTab data={pageData} />}
       {tab === 'tokens' && <TokenUsageTab data={pageData} />}
       {tab === 'products' && <AllProductsTab data={pageData} />}
-      {tab === 'guardrails' && <GuardrailsTab />}
     </div>
   )
 }
@@ -404,10 +401,10 @@ function CostByUserSection({ costByUser, source = 'estimate' }: { costByUser: an
               >
                 <span className="mb-1 block font-semibold text-gray-900 dark:text-gray-100">How per-user cost is calculated</span>
                 <span className={`block ${source === 'actual' ? 'text-green-700 dark:text-green-300' : 'opacity-70'}`}>
-                  <strong>Actual</strong> — real per-user dollars attributed by Unity AI Gateway (<code>system.billing.usage</code>).
+                  <strong>Actual</strong> — real per-user dollars attributed by Unity Gateway (<code>system.billing.usage</code>).
                 </span>
                 <span className={`mt-1.5 block ${source === 'actual' ? 'opacity-70' : 'text-amber-700 dark:text-amber-300'}`}>
-                  <strong>Estimated</strong> — each endpoint’s total cost split across users by their share of tokens. Shown when AI Gateway v2 attribution isn’t available yet.
+                  <strong>Estimated</strong> — each endpoint’s total cost split across users by their share of tokens. Shown when Unity Gateway attribution isn’t available yet.
                 </span>
               </span>
             </span>
@@ -1137,7 +1134,7 @@ function ExternalModelSpendSection({ data }: { data?: BillingPageData }) {
           <span className="ml-1 text-xs font-normal text-gray-400">· {fmtCost(total)} total</span>
         </h3>
         <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-          Actual billed cost for external models (OpenAI, Microsoft Foundry, …) routed through the Unity AI Gateway.
+          Actual billed cost for external models (OpenAI, Microsoft Foundry, …) routed through the Unity Gateway.
           Real dollars from <code>system.ai_gateway.external_model_spend</code> — not estimated.
         </p>
       </div>
@@ -1194,86 +1191,3 @@ function ExternalModelSpendSection({ data }: { data?: BillingPageData }) {
   )
 }
 
-/* ── Guardrails Tab ───────────────────────────────────────────── */
-
-function GuardrailsTab() {
-  const { data: agents } = useAgents()
-
-  return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Rate Limiting Rules</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-3">
-            {agents?.map((agent: any) => (
-              <div
-                key={agent.agent_id}
-                className="flex items-center justify-between py-2 border-b border-gray-100 dark:border-gray-700/50 last:border-0"
-              >
-                <div>
-                  <div className="text-sm font-medium">{agent.name}</div>
-                  <div className="text-xs text-gray-400">{agent.type}</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Badge variant="default" className="text-xs">
-                    {agent.config?.max_tokens_per_min || '∞'} tok/min
-                  </Badge>
-                  <Badge variant="default" className="text-xs">
-                    {agent.config?.max_requests_per_min || '∞'} req/min
-                  </Badge>
-                </div>
-              </div>
-            ))}
-            {(!agents || agents.length === 0) && (
-              <div className="text-gray-400 dark:text-gray-500 text-center py-4">No agents configured</div>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Safety & Guardrails</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            {[
-              {
-                name: 'Input Content Filter',
-                desc: 'Blocks harmful or inappropriate user inputs',
-                status: 'Enabled',
-              },
-              {
-                name: 'Output Content Filter',
-                desc: 'Screens agent responses for policy violations',
-                status: 'Enabled',
-              },
-              {
-                name: 'PII Detection',
-                desc: 'Redacts personally identifiable information',
-                status: 'Monitoring',
-              },
-              {
-                name: 'Prompt Injection Guard',
-                desc: 'Detects and blocks prompt injection attacks',
-                status: 'Enabled',
-              },
-            ].map((guard) => (
-              <div key={guard.name} className="flex items-center justify-between">
-                <div>
-                  <div className="text-sm font-medium">{guard.name}</div>
-                  <div className="text-xs text-gray-400">{guard.desc}</div>
-                </div>
-                <Badge variant={guard.status === 'Enabled' ? 'success' : 'warning'} className="text-xs">
-                  {guard.status}
-                </Badge>
-              </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-    </div>
-  )
-}

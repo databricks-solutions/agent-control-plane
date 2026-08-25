@@ -10,12 +10,7 @@ import {
   useMlflowModelVersions,
   useMlflowObservabilityWorkspaces,
   useWorkspaceHosts,
-  useGatewayLogs,
-  useGatewayLogSources,
-  useGatewayLogDetail,
-  useGatewayLogTimeseries,
   useAgentToolUsage,
-  useAgentEvalScores,
   useAiAudit,
 } from '@/api/hooks'
 import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
@@ -66,7 +61,6 @@ import {
   Calendar,
   Info,
   Wrench,
-  ShieldCheck,
   ScrollText,
 } from 'lucide-react'
 import { DB_RED_SHADES } from '@/lib/brand'
@@ -164,11 +158,9 @@ function dataSourceBadge(source: string | undefined) {
 /* ── tab definitions ─────────────────────────────────────────── */
 const tabs = [
   { id: 'traces', label: 'Traces', icon: Search },
-  { id: 'gateway', label: 'Gateway Requests', icon: Activity },
   { id: 'experiments', label: 'Experiments', icon: FlaskConical },
   { id: 'runs', label: 'Evaluation Runs', icon: Activity },
   { id: 'tool-usage', label: 'Tool & Asset Usage', icon: Wrench },
-  { id: 'eval-scores', label: 'Quality & Evals', icon: ShieldCheck },
   { id: 'ai-audit', label: 'AI Audit', icon: ScrollText },
   { id: 'models', label: 'Model Registry', icon: Database },
 ] as const
@@ -266,11 +258,9 @@ export default function ObservabilityPage() {
 
       {/* Tab content */}
       {activeTab === 'traces' && <TracesPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
-      {activeTab === 'gateway' && <GatewayRequestsPanel />}
       {activeTab === 'experiments' && <ExperimentsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
       {activeTab === 'runs' && <RunsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
       {activeTab === 'tool-usage' && <ToolUsagePanel />}
-      {activeTab === 'eval-scores' && <EvalScoresPanel />}
       {activeTab === 'ai-audit' && <AiAuditPanel />}
       {activeTab === 'models' && <ModelsPanel workspaceUrl={workspaceUrl} workspaceId={wsParam} workspaceHosts={workspaceHosts} />}
     </div>
@@ -347,109 +337,6 @@ function ToolUsagePanel() {
                     <td className="py-1.5 text-gray-600 dark:text-gray-400 truncate max-w-[220px]" title={r.experiment_name || r.experiment_id}>{r.experiment_name || r.experiment_id || '—'}</td>
                     <td className="py-1.5 text-right tabular-nums">{r.call_count.toLocaleString()}</td>
                     <td className="py-1.5 text-right tabular-nums">{r.trace_count.toLocaleString()}</td>
-                    <td className="py-1.5 text-right text-xs text-gray-500 dark:text-gray-400 tabular-nums">{r.last_seen ? r.last_seen.slice(0, 10) : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <TablePagination page={safePage} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
-        </CardContent>
-      </Card>
-    </div>
-  )
-}
-
-/* ── Quality & Evals Panel (F7) ──────────────────────────────────
-   MLflow-3 assessments (LLM-judge + human) rolled up per experiment from
-   agent_eval_scores: how each agent's traces score on safety, relevance,
-   groundedness, etc. Same experiment grain as tool usage. */
-function pctLabel(v: number | null | undefined): string {
-  return v == null ? '—' : `${Math.round(v * 100)}%`
-}
-function passRateClass(v: number | null | undefined): string {
-  if (v == null) return 'text-gray-400 dark:text-gray-500'
-  // Threshold on the same rounded percentage the label shows, so colour and
-  // number never disagree (e.g. 0.896 → "90%" reads green, not amber).
-  const pct = Math.round(v * 100)
-  if (pct >= 90) return 'text-green-600 dark:text-green-400'
-  if (pct >= 70) return 'text-amber-600 dark:text-amber-400'
-  return 'text-red-600 dark:text-red-400'
-}
-
-function EvalScoresPanel() {
-  const { data, isLoading } = useAgentEvalScores()
-  const sort = useSort('assessment_count', 'desc')
-  const [page, setPage] = useState(0)
-  const [pageSize, setPageSize] = useState(15)
-  const rows = data?.rows || []
-  const sorted = useMemo(() => sortRows(rows, sort.sort, (r: any, k) => {
-    if (k === 'assessment_count' || k === 'pass_count' || k === 'fail_count') return Number(r[k] || 0)
-    // Return null (not a sentinel) so sortRows pushes ungraded scorers to the
-    // bottom in both directions, instead of ranking them below a genuine 0%.
-    if (k === 'pass_rate') return r[k] == null ? null : Number(r[k])
-    return (r[k] || '').toString().toLowerCase()
-  }), [rows, sort.sort])
-  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize))
-  const safePage = Math.min(page, totalPages - 1)
-  const paged = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize)
-
-  if (isLoading) return <div className="flex items-center justify-center h-32 text-gray-400 dark:text-gray-500">Loading…</div>
-  if (rows.length === 0) {
-    return (
-      <Card><CardContent className="py-12 text-center text-gray-400 dark:text-gray-500">
-        No eval scores yet — agents need MLflow-3 assessments (LLM-judge or human labels) attached to their traces,
-        and the discovery workflow must have synced them. Sourced from the <code>assessments</code> on Databricks-native
-        <code> trace_logs</code> tables.
-      </CardContent></Card>
-    )
-  }
-  const t = data!.totals
-  return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <KpiCard title="Experiments" value={t.experiments ?? 0} format="number" />
-        <KpiCard title="Scorers" value={t.scorers ?? 0} format="number" />
-        <KpiCard title="Assessments" value={t.assessments ?? 0} format="number" />
-        <KpiCard title="Overall Pass Rate" value={pctLabel(t.pass_rate)} />
-      </div>
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Quality & Eval Scores</CardTitle>
-          <p className="text-[11px] text-gray-400 dark:text-gray-500">
-            MLflow-3 assessments (LLM-judge & human) per scorer, rolled up by <strong>experiment</strong> — the app has no
-            experiment→agent mapping yet. Pass rate covers yes/no verdicts only; scorers with non-binary feedback show “—”.
-          </p>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
-                  <SortableHeader label="Scorer" sortKey="scorer_name" current={sort.sort} onToggle={sort.toggle} />
-                  <SortableHeader label="Source" sortKey="source_type" current={sort.sort} onToggle={sort.toggle} />
-                  <SortableHeader label="Experiment" sortKey="experiment_name" current={sort.sort} onToggle={sort.toggle} />
-                  <SortableHeader label="Assessments" sortKey="assessment_count" current={sort.sort} onToggle={sort.toggle} align="right" />
-                  <SortableHeader label="Pass" sortKey="pass_count" current={sort.sort} onToggle={sort.toggle} align="right" />
-                  <SortableHeader label="Fail" sortKey="fail_count" current={sort.sort} onToggle={sort.toggle} align="right" />
-                  <SortableHeader label="Pass Rate" sortKey="pass_rate" current={sort.sort} onToggle={sort.toggle} align="right" />
-                  <SortableHeader label="Last Seen" sortKey="last_seen" current={sort.sort} onToggle={sort.toggle} align="right" />
-                </tr>
-              </thead>
-              <tbody>
-                {paged.map((r: any, i: number) => (
-                  <tr key={`${r.experiment_id}-${r.scorer_name}-${r.source_type}-${i}`} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
-                    <td className="py-1.5 font-medium truncate max-w-[220px]" title={r.scorer_name}>{r.scorer_name}</td>
-                    <td className="py-1.5">
-                      <Badge variant={r.source_type === 'HUMAN' ? 'info' : 'default'} className="text-xs">
-                        {r.source_type === 'HUMAN' ? 'Human' : r.source_type === 'LLM_JUDGE' ? 'LLM judge' : (r.source_type || '—')}
-                      </Badge>
-                    </td>
-                    <td className="py-1.5 text-gray-600 dark:text-gray-400 truncate max-w-[200px]" title={r.experiment_name || r.experiment_id}>{r.experiment_name || r.experiment_id || '—'}</td>
-                    <td className="py-1.5 text-right tabular-nums">{r.assessment_count.toLocaleString()}</td>
-                    <td className="py-1.5 text-right tabular-nums text-green-600 dark:text-green-400">{r.pass_count.toLocaleString()}</td>
-                    <td className="py-1.5 text-right tabular-nums text-red-600 dark:text-red-400">{r.fail_count.toLocaleString()}</td>
-                    <td className={`py-1.5 text-right tabular-nums font-medium ${passRateClass(r.pass_rate)}`}>{pctLabel(r.pass_rate)}</td>
                     <td className="py-1.5 text-right text-xs text-gray-500 dark:text-gray-400 tabular-nums">{r.last_seen ? r.last_seen.slice(0, 10) : '—'}</td>
                   </tr>
                 ))}
@@ -2839,12 +2726,11 @@ function RunMetricTrends({ runs }: { runs: any[] }) {
   )
 }
 
-/* ── Gateway Requests time-series ─────────────────────────────── */
+/* ── MiniLineChart (shared inline chart) ──────────────────────── */
 
-/** A small line chart for one metric over time. Used in a 4-up grid above
- *  the Gateway Requests list (request rate / P95 latency / errors / tokens).
- *  Inline-recharts because the shared LineChart wrapper only supports a
- *  single 'value' field. */
+/** A small line chart for one metric over time (used by the Runs "Metric
+ *  trends" grid). Inline-recharts because the shared LineChart wrapper only
+ *  supports a single 'value' field. */
 function MiniLineChart({
   data, dataKey, name, color, height = 110, valueFormatter,
 }: {
@@ -2873,325 +2759,3 @@ function MiniLineChart({
   )
 }
 
-function GatewayTimeSeries({ windowDays, sourceTable }: { windowDays: number; sourceTable: string | null }) {
-  // Choose bucket size: hourly for 1d, daily for >7d, hourly otherwise.
-  const bucket: 'hour' | 'day' = windowDays >= 14 ? 'day' : 'hour'
-  const { data: rows, isLoading } = useGatewayLogTimeseries(windowDays, sourceTable, bucket)
-  if (isLoading) {
-    return (
-      <Card>
-        <CardContent className="py-6 text-xs text-gray-400 text-center flex items-center justify-center gap-2">
-          <Loader2 className="w-4 h-4 animate-spin" /> Loading trend data…
-        </CardContent>
-      </Card>
-    )
-  }
-  const list = rows || []
-  if (!list.length) return null
-
-  // Aggregate across endpoints when no specific filter; preserve per-endpoint
-  // when one source_table is selected. Group by bucket.
-  const byBucket = new Map<string, any>()
-  for (const r of list) {
-    const key = r.bucket
-    const cur = byBucket.get(key) || { bucket: key, requests: 0, errors: 0, total_tokens: 0, p95_acc: [], avg_acc: [] }
-    cur.requests += Number(r.requests || 0)
-    cur.errors += Number(r.errors || 0)
-    cur.total_tokens += Number(r.total_tokens || 0)
-    if (r.p95_ms != null) cur.p95_acc.push(Number(r.p95_ms))
-    if (r.avg_ms != null) cur.avg_acc.push(Number(r.avg_ms))
-    byBucket.set(key, cur)
-  }
-  const merged = Array.from(byBucket.values()).sort((a, b) => a.bucket.localeCompare(b.bucket))
-  // Take the max p95 across endpoints for that bucket — that's the worst-
-  // case latency anyone saw in that window. Avg is a simple mean.
-  for (const m of merged) {
-    m.p95_ms = m.p95_acc.length ? Math.round(Math.max(...m.p95_acc)) : null
-    m.avg_ms = m.avg_acc.length ? Math.round(m.avg_acc.reduce((s: number, n: number) => s + n, 0) / m.avg_acc.length) : null
-    m.error_rate = m.requests > 0 ? (m.errors / m.requests) * 100 : 0
-    m.bucket_label = (() => {
-      const t = Date.parse(m.bucket)
-      if (!Number.isFinite(t)) return m.bucket
-      return bucket === 'hour' ? format(new Date(t), 'MM-dd HH:mm') : format(new Date(t), 'MM-dd')
-    })()
-  }
-
-  const totalRequests = merged.reduce((s, m) => s + m.requests, 0)
-  const totalErrors = merged.reduce((s, m) => s + m.errors, 0)
-  const totalTokens = merged.reduce((s, m) => s + m.total_tokens, 0)
-
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-base flex items-center gap-2">
-          <BarChart3 className="w-4 h-4" /> Trends
-          <span className="text-[11px] text-gray-500 dark:text-gray-400 font-normal ml-2">
-            {sourceTable ? sourceTable.split('.').pop() : 'all endpoints'} · last {windowDays}d · per {bucket}
-            <span className="ml-2">· {totalRequests.toLocaleString()} requests · {totalErrors.toLocaleString()} errors · {totalTokens.toLocaleString()} tokens</span>
-          </span>
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div>
-            <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Requests</div>
-            <MiniLineChart data={merged} dataKey="requests" name="Requests" color="#dc2626" />
-          </div>
-          <div>
-            <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">P95 Latency</div>
-            <MiniLineChart data={merged} dataKey="p95_ms" name="P95 ms" color="#7c3aed"
-                           valueFormatter={(v) => v == null ? '—' : (Number(v) >= 1000 ? `${(Number(v)/1000).toFixed(1)}s` : `${v}ms`)} />
-          </div>
-          <div>
-            <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Error Rate</div>
-            <MiniLineChart data={merged} dataKey="error_rate" name="Error %" color="#f59e0b"
-                           valueFormatter={(v) => v == null ? '—' : `${Number(v).toFixed(1)}%`} />
-          </div>
-          <div>
-            <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Tokens</div>
-            <MiniLineChart data={merged} dataKey="total_tokens" name="Tokens" color="#0ea5e9"
-                           valueFormatter={(v) => Number(v).toLocaleString()} />
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-/* ── Gateway Requests Panel (Tier 2a) ─────────────────────────── */
-
-const GATEWAY_WINDOW_OPTIONS = [1, 7, 30, 90, 180, 365] as const
-type GatewayWindow = (typeof GATEWAY_WINDOW_OPTIONS)[number]
-
-function GatewayRequestsPanel() {
-  const [windowDays, setWindowDays] = useState<GatewayWindow>(7)
-  const [sourceFilter, setSourceFilter] = useState<string | null>(null)
-  const [selected, setSelected] = useState<{ source_table: string; request_id: string } | null>(null)
-  const [page, setPage] = useState(0)
-  const [pageSize, setPageSize] = useState(10)
-
-  const { data: rows, isLoading } = useGatewayLogs(windowDays, sourceFilter)
-  const { data: sources } = useGatewayLogSources()
-
-  const list = rows || []
-  const okCount = list.filter((r: any) => r.status_code != null && r.status_code < 400).length
-  const errCount = list.filter((r: any) => r.status_code != null && r.status_code >= 400).length
-  const avgLatency =
-    list.length > 0
-      ? list.reduce((sum: number, r: any) => sum + (Number(r.execution_ms) || 0), 0) / list.length
-      : 0
-
-  if (selected) {
-    return (
-      <GatewayRequestDetailView
-        sourceTable={selected.source_table}
-        requestId={selected.request_id}
-        onBack={() => setSelected(null)}
-      />
-    )
-  }
-
-  return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-        <KpiCard title="Total Requests" value={list.length} format="number" />
-        <KpiCard title="Successful" value={okCount} format="number" />
-        <KpiCard title="Errors" value={errCount} format="number" />
-        <KpiCard title="Avg Latency" value={avgLatency} format="duration" />
-      </div>
-
-      <GatewayTimeSeries windowDays={windowDays} sourceTable={sourceFilter} />
-
-      <Card>
-        <CardHeader className="pb-3 flex flex-row items-center justify-between gap-3 flex-wrap">
-          <CardTitle className="text-base">AI Gateway / Inference Requests</CardTitle>
-          <div className="flex items-center gap-3">
-            <select
-              value={sourceFilter || ''}
-              onChange={(e) => { setSourceFilter(e.target.value || null); setPage(0) }}
-              className="text-xs px-2 py-1 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800"
-            >
-              <option value="">All endpoints ({(sources || []).length})</option>
-              {(sources || []).map((s: any) => (
-                <option key={s.source_table} value={s.source_table}>
-                  {s.source_table.split('.').pop()} ({s.row_count})
-                </option>
-              ))}
-            </select>
-            <div className="inline-flex items-center gap-1 text-xs">
-              <span className="text-gray-500 dark:text-gray-400 mr-1">Window:</span>
-              {GATEWAY_WINDOW_OPTIONS.map((d) => (
-                <button
-                  key={d}
-                  onClick={() => { setWindowDays(d); setPage(0) }}
-                  className={`px-2 py-1 rounded font-medium transition-colors ${
-                    windowDays === d
-                      ? 'bg-db-red text-white'
-                      : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'
-                  }`}
-                >
-                  {d}d
-                </button>
-              ))}
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          {isLoading ? (
-            <div className="flex items-center justify-center py-12 text-gray-400">
-              <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading inference logs…
-            </div>
-          ) : list.length === 0 ? (
-            <div className="text-sm text-gray-400 text-center py-12">
-              No gateway/inference logs found. Enable AI Gateway request logging on your endpoints, or pick a wider window.
-            </div>
-          ) : (
-            <>
-              <div className="divide-y divide-gray-100 dark:divide-gray-700">
-                <div className="grid grid-cols-12 gap-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">
-                  <div className="col-span-2">Endpoint</div>
-                  <div className="col-span-2">Request ID</div>
-                  <div className="col-span-2">Time</div>
-                  <div className="col-span-2">Model</div>
-                  <div>Status</div>
-                  <div className="text-right">Latency</div>
-                  <div className="text-right">Tokens</div>
-                  <div>Requester</div>
-                </div>
-                {(() => {
-                  const totalPages = Math.max(1, Math.ceil(list.length / pageSize))
-                  const safePage = Math.min(page, totalPages - 1)
-                  const paged = list.slice(safePage * pageSize, (safePage + 1) * pageSize)
-                  return paged.map((r: any) => {
-                    const rid = r.request_id || ''
-                    const endpoint = (r.source_table || '').split('.').pop() || ''
-                    const status = r.status_code
-                    const isErr = status != null && status >= 400
-                    const modelShort = r.model ? (r.model.length > 22 ? r.model.slice(0, 22) + '…' : r.model) : '—'
-                    return (
-                      <div
-                        key={`${r.source_table}::${rid}`}
-                        className="grid grid-cols-12 gap-3 py-3 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/40"
-                        onClick={() => setSelected({ source_table: r.source_table, request_id: rid })}
-                      >
-                        <div className="col-span-2 truncate font-mono text-xs" title={r.source_table}>{endpoint}</div>
-                        <div className="col-span-2 truncate font-mono text-xs">{rid.slice(0, 36)}</div>
-                        <div className="col-span-2 text-xs text-gray-500">
-                          {r.request_time ? format(new Date(r.request_time), 'yyyy-MM-dd HH:mm:ss') : '—'}
-                        </div>
-                        <div className="col-span-2 truncate text-xs text-gray-600 dark:text-gray-300" title={r.model || ''}>{modelShort}</div>
-                        <div>
-                          <Badge variant={isErr ? 'error' : status != null ? 'success' : 'default'} className="text-[10px]">
-                            {status ?? '—'}
-                          </Badge>
-                        </div>
-                        <div className="text-xs text-right">{r.execution_ms != null ? msToReadable(Number(r.execution_ms)) : '—'}</div>
-                        <div className="text-xs text-right text-gray-600 dark:text-gray-300"
-                             title={r.input_tokens != null ? `in ${r.input_tokens} / out ${r.output_tokens || 0}` : ''}>
-                          {r.total_tokens != null ? Number(r.total_tokens).toLocaleString() : '—'}
-                        </div>
-                        <div className="truncate text-xs text-gray-500" title={r.requester || ''}>
-                          {r.requester || '—'}
-                        </div>
-                      </div>
-                    )
-                  })
-                })()}
-              </div>
-              <TablePagination page={page} totalItems={list.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
-            </>
-          )}
-        </CardContent>
-      </Card>
-    </div>
-  )
-}
-
-function GatewayRequestDetailView({
-  sourceTable, requestId, onBack,
-}: { sourceTable: string; requestId: string; onBack: () => void }) {
-  const { data: detail, isLoading } = useGatewayLogDetail(sourceTable, requestId)
-
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-12 text-gray-400">
-        <Loader2 className="w-6 h-6 animate-spin mr-3" /> Loading request detail…
-      </div>
-    )
-  }
-  if (!detail) {
-    return (
-      <div className="space-y-4">
-        <button onClick={onBack} className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
-          <ArrowLeft className="w-4 h-4" /> Back to gateway requests
-        </button>
-        <Card><CardContent className="py-12 text-center text-gray-400">
-          Request detail not found.
-        </CardContent></Card>
-      </div>
-    )
-  }
-
-  const statusCode = (detail as any).status_code
-  const isErr = statusCode != null && statusCode >= 400
-
-  return (
-    <div className="space-y-4">
-      <button onClick={onBack} className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
-        <ArrowLeft className="w-4 h-4" /> Back to gateway requests
-      </button>
-
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base flex items-center gap-2">
-            <span className="font-mono text-sm">{(detail as any).request_id}</span>
-            <Badge variant={isErr ? 'error' : 'success'} className="text-[10px]">
-              {statusCode ?? '—'}
-            </Badge>
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
-            <MetadataRow label="Endpoint" value={(detail as any).source_table} />
-            <MetadataRow label="Model" value={(detail as any).model || '—'} />
-            <MetadataRow label="Latency" value={(detail as any).execution_ms != null ? msToReadable(Number((detail as any).execution_ms)) : '—'} />
-            <MetadataRow label="Time" value={(detail as any).request_time ? format(new Date((detail as any).request_time), 'yyyy-MM-dd HH:mm:ss') : '—'} />
-            <MetadataRow label="Total Tokens" value={(detail as any).total_tokens != null ? Number((detail as any).total_tokens).toLocaleString() : '—'} />
-            <MetadataRow label="Input / Output" value={(detail as any).input_tokens != null ? `${(detail as any).input_tokens} / ${(detail as any).output_tokens || 0}` : '—'} />
-            <MetadataRow label="Finish Reason" value={(detail as any).finish_reason || '—'} />
-            <MetadataRow label="Tool Calls" value={(detail as any).tool_call_count != null ? String((detail as any).tool_call_count) : '—'} />
-            <MetadataRow label="Requester" value={(detail as any).requester || '—'} />
-            <MetadataRow label="Served Entity" value={(detail as any).served_entity_id || '—'} />
-            <MetadataRow label="Client Request ID" value={(detail as any).client_request_id || '—'} />
-            <MetadataRow label="Request Size" value={(detail as any).request_size_bytes != null ? `${(detail as any).request_size_bytes} B` : '—'} />
-            <MetadataRow label="Response Size" value={(detail as any).response_size_bytes != null ? `${(detail as any).response_size_bytes} B` : '—'} />
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="pb-2"><CardTitle className="text-base">Request payload</CardTitle></CardHeader>
-        <CardContent>
-          <pre className="text-xs font-mono overflow-auto max-h-96 bg-gray-50 dark:bg-gray-800 p-3 rounded">
-            {(() => {
-              const v = (detail as any).request_payload || ''
-              try { return JSON.stringify(JSON.parse(v), null, 2) } catch { return v || '(empty)' }
-            })()}
-          </pre>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="pb-2"><CardTitle className="text-base">Response payload</CardTitle></CardHeader>
-        <CardContent>
-          <pre className="text-xs font-mono overflow-auto max-h-96 bg-gray-50 dark:bg-gray-800 p-3 rounded">
-            {(() => {
-              const v = (detail as any).response_payload || ''
-              try { return JSON.stringify(JSON.parse(v), null, 2) } catch { return v || '(empty)' }
-            })()}
-          </pre>
-        </CardContent>
-      </Card>
-    </div>
-  )
-}

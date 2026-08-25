@@ -21,6 +21,9 @@ variables:
     description: Lakebase endpoint path for Autoscaling credential generation (e.g. projects/<name>/branches/<branch>/endpoints/<endpoint>). Leave empty for Provisioned.
   account_id:
     description: Databricks account ID for cross-workspace operations (find in your workspace URL or account console)
+  account_host:
+    default: "https://accounts.cloud.databricks.com"
+    description: "Account console host for the Budgets API (AWS default; use accounts.azuredatabricks.net or accounts.gcp.databricks.com on other clouds)."
   warehouse_id:
     description: SQL warehouse ID for system table queries
   trace_retention_days:
@@ -170,10 +173,41 @@ resources:
               schema: ${var.schema}
           environment_key: default
 
+        - task_key: discover_budgets
+          description: "Read the account Budgets API (/api/2.1/accounts/{id}/budgets) → Delta (uag_budget_status). Read-only config inventory: cap thresholds, enforce (BLOCK_USAGE) vs alert-only, filter, AI-relevance. Needs account-SP creds in discovery_sp_secret_scope; degrades to empty otherwise."
+          notebook_task:
+            notebook_path: ./13_discover_budgets.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              account_id: ${var.account_id}
+              account_host: ${var.account_host}
+              discovery_sp_secret_scope: ${var.discovery_sp_secret_scope}
+          environment_key: default
+
+        - task_key: discover_endpoint_inventory
+          description: "Account-wide served-entity inventory from system.serving.served_entities → Delta (serving_endpoints_inventory). Read-only fleet view across all workspaces in the metastore."
+          notebook_task:
+            notebook_path: ./14_discover_endpoint_inventory.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+          environment_key: default
+
+        - task_key: discover_model_services
+          description: "v3 Unity Gateway UC model services via UC REST (run-as metastore admin — the list endpoint the app's OBO/SP identities can't reach) → Delta (model_services_inventory)."
+          notebook_task:
+            notebook_path: ./15_discover_model_services.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+          environment_key: default
+
         - task_key: sync_to_lakebase
           description: "Sync all discovery data (Delta → Lakebase) + system table billing"
           depends_on:
             - task_key: discover_agents
+            - task_key: discover_endpoint_inventory
             - task_key: discover_observability
             - task_key: discover_knowledge_bases
             - task_key: discover_user_analytics
@@ -182,6 +216,8 @@ resources:
             - task_key: discover_gateway_inference_logs
             - task_key: discover_billing
             - task_key: discover_ai_gateway_usage
+            - task_key: discover_budgets
+            - task_key: discover_model_services
           notebook_task:
             notebook_path: ./02_sync_to_lakebase.py
             base_parameters:

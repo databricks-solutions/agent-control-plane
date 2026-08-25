@@ -684,6 +684,243 @@ def get_uag_v2_usage() -> Dict[str, Any]:
     }
 
 
+def get_uag_budget_status() -> Dict[str, Any]:
+    """Budget configuration inventory from `uag_budget_status` (sourced from the
+    account Budgets API, /api/2.1/accounts/{id}/budgets).
+
+    Read-only: surfaces each native budget's cap thresholds, whether it *enforces*
+    (BLOCK_USAGE) vs only *alerts* (email), its filter, and AI-relevance — the
+    fleet-wide view the native per-budget UI doesn't give. Enforcement stays
+    entirely platform-side; the app never creates or enforces budgets.
+
+    Returns {as_of, totals, budgets}. Degrades to empty when the table isn't
+    synced yet or the discovery workflow had no account-level credentials to
+    read the (account-scoped) Budgets API.
+
+    NOTE: consumption (% of cap used) is not populated yet — the account Budgets
+    API is config-only, so spend-vs-cap requires reproducing each budget's
+    tag/workspace filter against system.billing.usage (a separate validated pass).
+    """
+    from backend.database import execute_query
+    empty = {"as_of": None, "totals": {}, "budgets": []}
+    try:
+        # Totals aggregate the FULL table (not the limited list below), so KPIs
+        # stay correct on accounts with more budgets than the display cap.
+        agg = execute_query(
+            """SELECT count(*) AS budget_count,
+                      count(*) FILTER (WHERE enforce) AS enforcing_count,
+                      count(*) FILTER (WHERE alerting) AS alerting_count,
+                      count(*) FILTER (WHERE is_ai) AS ai_budget_count,
+                      count(*) FILTER (WHERE pct_used >= 100) AS over_cap_count,
+                      count(*) FILTER (WHERE pct_used >= 80 AND pct_used < 100) AS near_cap_count,
+                      max(discovered_at) AS max_discovered
+               FROM uag_budget_status"""
+        )
+        rows = execute_query(
+            """SELECT budget_id, display_name, enforce, alerting,
+                      min_threshold_usd, max_threshold_usd, time_period,
+                      filter_summary, is_ai, spent_usd, pct_used, discovered_at
+               FROM uag_budget_status
+               ORDER BY pct_used DESC NULLS LAST, max_threshold_usd DESC NULLS LAST LIMIT 500"""
+        )
+    except Exception as exc:
+        logger.warning("uag_budget_status not available: %s", exc)
+        return empty
+    if not agg or _row_int(agg[0], "budget_count") == 0:
+        return empty
+
+    a = agg[0]
+    as_of = str(a.get("max_discovered")) if a.get("max_discovered") else None
+
+    return {
+        "as_of": as_of,
+        "totals": {
+            "budget_count": _row_int(a, "budget_count"),
+            "enforcing_count": _row_int(a, "enforcing_count"),
+            "alerting_count": _row_int(a, "alerting_count"),
+            "ai_budget_count": _row_int(a, "ai_budget_count"),
+            "over_cap_count": _row_int(a, "over_cap_count"),
+            "near_cap_count": _row_int(a, "near_cap_count"),
+        },
+        "budgets": [
+            {
+                "budget_id": r.get("budget_id", ""),
+                "display_name": r.get("display_name", ""),
+                "enforce": bool(r.get("enforce")),
+                "alerting": bool(r.get("alerting")),
+                "min_threshold_usd": float(r.get("min_threshold_usd") or 0),
+                "max_threshold_usd": float(r.get("max_threshold_usd") or 0),
+                "time_period": r.get("time_period", ""),
+                "filter_summary": r.get("filter_summary", ""),
+                "is_ai": bool(r.get("is_ai")),
+                # spent/pct are None (n/a) when the budget's filter shape isn't computable
+                "spent_usd": float(r["spent_usd"]) if r.get("spent_usd") is not None else None,
+                "pct_used": float(r["pct_used"]) if r.get("pct_used") is not None else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+def get_endpoint_inventory() -> Dict[str, Any]:
+    """Account-wide served-entity inventory from `serving_endpoints_inventory`
+    (system.serving.served_entities). Read-only fleet view across ALL workspaces in
+    the metastore — the per-workspace serving API only sees the deploy workspace.
+    Live management (ACL/config edits) stays per-workspace. Degrades to empty if the
+    table isn't synced or served_entities wasn't readable at the discovery scope.
+    """
+    from backend.database import execute_query
+    empty = {"as_of": None, "totals": {}, "endpoints": []}
+    try:
+        agg = execute_query(
+            """SELECT count(*) AS served_entity_count,
+                      count(DISTINCT endpoint_id) AS endpoint_count,
+                      count(DISTINCT workspace_id) AS workspace_count,
+                      count(*) FILTER (WHERE entity_type = 'FOUNDATION_MODEL') AS foundation_count,
+                      count(*) FILTER (WHERE entity_type = 'CUSTOM_MODEL') AS custom_count,
+                      count(*) FILTER (WHERE entity_type = 'EXTERNAL_MODEL') AS external_count,
+                      max(discovered_at) AS max_discovered
+               FROM serving_endpoints_inventory"""
+        )
+        rows = execute_query(
+            """SELECT endpoint_name, workspace_id, entity_type, entity_name,
+                      entity_version, provider, task, created_by, change_time
+               FROM serving_endpoints_inventory
+               ORDER BY change_time DESC NULLS LAST LIMIT 2000"""
+        )
+    except Exception as exc:
+        logger.warning("serving_endpoints_inventory not available: %s", exc)
+        return empty
+    if not agg or _row_int(agg[0], "served_entity_count") == 0:
+        return empty
+    a = agg[0]
+    return {
+        "as_of": str(a.get("max_discovered")) if a.get("max_discovered") else None,
+        "totals": {
+            "served_entity_count": _row_int(a, "served_entity_count"),
+            "endpoint_count": _row_int(a, "endpoint_count"),
+            "workspace_count": _row_int(a, "workspace_count"),
+            "foundation_count": _row_int(a, "foundation_count"),
+            "custom_count": _row_int(a, "custom_count"),
+            "external_count": _row_int(a, "external_count"),
+        },
+        "endpoints": [
+            {
+                "endpoint_name": r.get("endpoint_name", ""),
+                "workspace_id": r.get("workspace_id", ""),
+                "entity_type": r.get("entity_type", ""),
+                "entity_name": r.get("entity_name", ""),
+                "entity_version": r.get("entity_version", ""),
+                "provider": r.get("provider", ""),
+                "task": r.get("task", ""),
+                "created_by": r.get("created_by", ""),
+                "change_time": str(r["change_time"]) if r.get("change_time") else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+# ── Unity Gateway v3 — UC model services + grants (OBO, UC-enforced) ──
+
+def _uc_call(method: str, path: str, user_token: str = "", json_body: Optional[dict] = None):
+    """Call the workspace UC REST API. Uses the caller's OBO token when present
+    (so UC enforces the user's own privileges — MANAGE required to edit grants);
+    falls back to the app SP for reads when OBO isn't enabled."""
+    from backend.config import get_databricks_host, _sdk_auth_headers
+    host = get_databricks_host()
+    if user_token:
+        headers = {"Authorization": f"Bearer {user_token}"}
+    else:
+        headers = _sdk_auth_headers() or {}
+    headers["Content-Type"] = "application/json"
+    return httpx.request(method, f"{host}{path}", headers=headers, json=json_body, timeout=30)
+
+
+def _uc_get_json(path: str, user_token: str = "") -> Optional[dict]:
+    """GET a UC REST path, preferring the caller's OBO token but falling back to
+    the app SP when OBO is rejected (the v3 UC APIs currently 403 downscoped OBO
+    tokens; the app SP has the metastore read access, like the app's other UC
+    calls). Returns parsed JSON or None."""
+    for tok in ([user_token, ""] if user_token else [""]):
+        try:
+            resp = _uc_call("GET", path, tok)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as exc:
+            logger.warning("UC GET %s failed: %s", path, exc)
+    return None
+
+
+def list_model_services(user_token: str = "") -> Dict[str, Any]:
+    """v3 Unity Gateway UC model services from the `model_services_inventory`
+    Lakebase cache (populated by the discovery workflow, which enumerates
+    account-wide via its metastore-admin run-as — the list endpoint the app's
+    OBO/SP identities can't reliably reach). Grants are read/edited live
+    per-service (get_model_service_grants / set_model_service_grant)."""
+    from backend.database import execute_query
+    try:
+        rows = execute_query(
+            """SELECT full_name, owner, supported_api_types, create_time
+               FROM model_services_inventory ORDER BY full_name LIMIT 2000"""
+        )
+    except Exception as exc:
+        logger.warning("model_services_inventory not available: %s", exc)
+        return {"services": []}
+    return {
+        "services": [
+            {
+                "full_name": r.get("full_name", ""),
+                "owner": r.get("owner", ""),
+                "supported_api_types": (r.get("supported_api_types") or "").split(",") if r.get("supported_api_types") else [],
+                "create_time": r.get("create_time"),
+            }
+            for r in rows
+        ]
+    }
+
+
+def get_model_service_grants(full_name: str, user_token: str = "") -> Dict[str, Any]:
+    """UC grants on one model service (securable_type MODEL_SERVICE)."""
+    body = _uc_get_json(f"/api/2.1/unity-catalog/permissions/model_service/{full_name}", user_token)
+    if body is None:
+        return {"grants": [], "error": "grants not readable (insufficient privileges)"}
+    return {
+        "grants": [
+            {"principal": pa.get("principal", ""), "privileges": pa.get("privileges", [])}
+            for pa in body.get("privilege_assignments", [])
+        ]
+    }
+
+
+def set_model_service_grant(
+    full_name: str, principal: str, add: Optional[List[str]] = None,
+    remove: Optional[List[str]] = None, user_token: str = "",
+) -> Dict[str, Any]:
+    """Add/remove UC privileges for a principal on a model service. Prefers the
+    caller's OBO token (UC-enforced), but Apps OBO can't carry the required
+    `unity-catalog` scope today, so it falls back to the app SP (which has MANAGE).
+    The route gates this on require_admin; when the SP path is used the authorization
+    boundary is that admin gate, not per-user UC enforcement, and the write is
+    SP-attributed. NOTE: currently dormant — the UI is read-only (see
+    ideas/model-services-write-path.md for the planned user-MANAGE-checked design)."""
+    body = {"changes": [{"principal": principal, "add": add or [], "remove": remove or []}]}
+    path = f"/api/2.1/unity-catalog/permissions/model_service/{full_name}"
+    # OBO can't carry the `unity-catalog` scope (not grantable to Apps OBO), so fall
+    # back to the app SP — same pattern as v1 local permission writes. The route gates
+    # this on require_admin; UC still enforces the SP has MANAGE on the securable.
+    last = "no attempt"
+    for tok in ([user_token, ""] if user_token else [""]):
+        try:
+            resp = _uc_call("PATCH", path, tok, json_body=body)
+            if resp.status_code == 200:
+                return {"ok": True, "via": "obo" if tok else "sp"}
+            last = f"{resp.status_code}: {resp.text[:220]}"
+        except Exception as exc:
+            last = str(exc)[:220]
+    return {"ok": False, "error": last}
+
+
 def get_uag_mcp_tools() -> Dict[str, Any]:
     """Per-tool MCP activity from `uag_mcp_tool_daily` (sourced from
     system.ai_gateway.usage rows where service_type = MCP_SERVICE).
