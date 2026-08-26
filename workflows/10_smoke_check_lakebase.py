@@ -95,6 +95,7 @@ EXPECTED = [
     "ai_audit_summary",              # AI activity rollup from system.access.audit; empty if audit unreadable
     "ai_audit_recent",               # recent AI audit events; empty if audit unreadable
     "mlflow_registered_models",       # UC registered models (deploy-ws); empty if none / not readable
+    "mlflow_model_versions",          # all versions per registered model; empty if none / not readable
     "uag_coding_agent_usage",        # coding-agent activity; empty when no coding-agent traffic
     "uag_throttling_daily",          # 429/5xx per endpoint; empty when no throttling/errors
     "uag_fallback_routing_daily",    # smart-routing fallbacks per endpoint; empty when no fallbacks

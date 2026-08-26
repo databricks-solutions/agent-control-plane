@@ -74,6 +74,7 @@ if ACCOUNT_ID:
 TRACES_TABLE = f"{CATALOG}.{SCHEMA}.observability_traces"
 TRACE_DETAILS_TABLE = f"{CATALOG}.{SCHEMA}.observability_trace_details"
 MODEL_REGISTRY_TABLE = f"{CATALOG}.{SCHEMA}.mlflow_registered_models"
+MODEL_VERSIONS_TABLE = f"{CATALOG}.{SCHEMA}.mlflow_model_versions"
 
 try:
     RETENTION_DAYS = max(1, int(dbutils.widgets.get("trace_retention_days") or "90"))
@@ -132,6 +133,24 @@ MODEL_REGISTRY_SCHEMA = StructType([
     StructField("description", StringType(), True),
     StructField("aliases", StringType(), True),          # JSON string
     StructField("latest_versions", StringType(), True),  # JSON string
+    StructField("discovered_at", TimestampType(), False),
+])
+
+# All versions per registered model, enumerated via the model-versions search
+# REST endpoint. Cached so the Model Registry drill-down reads Lakebase instead
+# of a live search on every model expand. `name` is the 3-part UC FQN.
+MODEL_VERSIONS_SCHEMA = StructType([
+    StructField("name", StringType(), False),
+    StructField("version", StringType(), False),
+    StructField("workspace_id", StringType(), True),
+    StructField("user_id", StringType(), True),
+    StructField("creation_timestamp", LongType(), True),
+    StructField("last_updated_timestamp", LongType(), True),
+    StructField("status", StringType(), True),
+    StructField("description", StringType(), True),
+    StructField("source", StringType(), True),
+    StructField("run_id", StringType(), True),
+    StructField("aliases", StringType(), True),  # JSON string
     StructField("discovered_at", TimestampType(), False),
 ])
 
@@ -736,6 +755,68 @@ print(f"✅ Wrote {len(model_rows)} rows to {MODEL_REGISTRY_TABLE}")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Model versions (UC Model Registry → Lakebase cache)
+# MAGIC
+# MAGIC Enumerate every version per registered model via the model-versions search
+# MAGIC REST endpoint so the app's per-model drill-down reads Lakebase instead of a
+# MAGIC live search on every expand. Bounded (versions/model + total) and fail-open.
+
+# COMMAND ----------
+
+# Bounds so a metastore with many models/versions can't make this task unbounded.
+_MV_PER_MODEL = 200      # newest versions kept per model
+_MV_TOTAL_CAP = 50000    # hard cap across all models
+version_rows = []
+if model_rows:
+    _mvw = WorkspaceClient()
+    _model_names = [m[0] for m in model_rows if m[0]]
+    for _mname in _model_names:
+        if len(version_rows) >= _MV_TOTAL_CAP:
+            print(f"  ⚠️  hit total version cap ({_MV_TOTAL_CAP}) — stopping enumeration")
+            break
+        try:
+            _v_token = None
+            _fetched = 0
+            while _fetched < _MV_PER_MODEL:
+                _vparams = {"filter": f"name='{_mname}'", "max_results": 50}
+                if _v_token:
+                    _vparams["page_token"] = _v_token
+                _vresp = _mvw.api_client.do(
+                    "GET", "/api/2.0/mlflow/unity-catalog/model-versions/search", query=_vparams
+                )
+                _batch = _vresp.get("model_versions") or []
+                for v in _batch:
+                    version_rows.append((
+                        v.get("name", _mname),
+                        str(v.get("version", "")),
+                        _mw_ws_id,
+                        v.get("user_id"),
+                        int(v["creation_timestamp"]) if v.get("creation_timestamp") is not None else None,
+                        int(v["last_updated_timestamp"]) if v.get("last_updated_timestamp") is not None else None,
+                        v.get("status"),
+                        v.get("description") or v.get("comment"),
+                        v.get("source"),
+                        v.get("run_id"),
+                        json.dumps(v.get("aliases") or []),
+                        now,
+                    ))
+                _fetched += len(_batch)
+                _v_token = _vresp.get("next_page_token")
+                if not _v_token or not _batch:
+                    break
+        except Exception as exc:
+            print(f"  ⚠️  version enumeration failed for {_mname}: {exc}")
+    print(f"  ✅ enumerated {len(version_rows)} model versions across {len(_model_names)} models")
+
+if version_rows:
+    spark.createDataFrame(version_rows, MODEL_VERSIONS_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(MODEL_VERSIONS_TABLE)
+else:
+    spark.createDataFrame([], MODEL_VERSIONS_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(MODEL_VERSIONS_TABLE)
+print(f"✅ Wrote {len(version_rows)} rows to {MODEL_VERSIONS_TABLE}")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Summary
 
 # COMMAND ----------
@@ -766,6 +847,7 @@ result = {
     "total_trace_details": len(all_details),
     "total_detail_errors": total_detail_errors,
     "registered_models": len(model_rows),
+    "model_versions": len(version_rows),
     "retention_days": RETENTION_DAYS,
     "sp_auth_enabled": bool(SP_CLIENT_ID),
     "narrow_test_ws": NARROW_TEST_WS or None,

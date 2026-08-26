@@ -774,10 +774,20 @@ def get_trace_detail(request_id: str, *, user_token: Optional[str] = None) -> Op
         return cached
 
     data = _get(f"/api/2.0/mlflow/traces/{request_id}", user_token=user_token)
-    trace_info = data.get("trace", {}).get("trace_info", {})
+    trace = data.get("trace", {})
+    trace_info = trace.get("trace_info", {})
     if not trace_info:
         return None
-    return _parse_trace_info_to_detail(trace_info, request_id)
+    detail = _parse_trace_info_to_detail(trace_info, request_id)
+    trace_data = trace.get("trace_data") or {}
+    spans = trace_data.get("spans")
+    if isinstance(spans, list):
+        detail["spans"] = spans
+    # Write-through so the next load reads from Lakebase (see _cache_trace_detail_row).
+    _cache_trace_detail_row(
+        "", request_id, detail.get("experiment_id"), trace_info, trace_data,
+    )
+    return detail
 
 
 # ── Cross-workspace helpers ────────────────────────────────────
@@ -1161,6 +1171,54 @@ def _get_trace_detail_from_cache(
     return _row_to_trace_detail(rows[0], request_id, workspace_id)
 
 
+def _cache_trace_detail_row(
+    workspace_id: str,
+    request_id: str,
+    experiment_id: Optional[str],
+    trace_info: Dict[str, Any],
+    trace_data: Optional[Dict[str, Any]],
+    *,
+    source_type: str = "live_writethrough",
+) -> None:
+    """Write-through: persist a live-fetched trace detail into
+    `observability_trace_details` so the next load reads from Lakebase instead of
+    hitting the live MLflow REST API again. Best-effort — never raises into the
+    request path (a cache-write failure must not fail the trace-detail response).
+
+    workspace_id is "" for UC / cross-backend traces that are keyed by request_id
+    alone (matches how the discovery workflow and `_get_trace_detail_from_cache_any`
+    treat them)."""
+    try:
+        info_json = _json.dumps(trace_info or {})
+        data_json = _json.dumps(trace_data or {})
+        size_bytes = len(info_json) + len(data_json)
+        execute_update(
+            """INSERT INTO observability_trace_details
+                   (workspace_id, request_id, experiment_id, trace_info, trace_data,
+                    request_raw, response_raw, size_bytes, source_type, cached_at)
+               VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, NOW())
+               ON CONFLICT (workspace_id, request_id) DO UPDATE SET
+                   experiment_id = EXCLUDED.experiment_id,
+                   trace_info    = EXCLUDED.trace_info,
+                   trace_data    = EXCLUDED.trace_data,
+                   request_raw   = EXCLUDED.request_raw,
+                   response_raw  = EXCLUDED.response_raw,
+                   size_bytes    = EXCLUDED.size_bytes,
+                   source_type   = EXCLUDED.source_type,
+                   cached_at     = NOW()""",
+            (
+                workspace_id or "", request_id, experiment_id or "",
+                info_json, data_json,
+                trace_info.get("request", "") or "",
+                trace_info.get("response", "") or "",
+                size_bytes, source_type,
+            ),
+        )
+    except Exception as exc:
+        logger.warning("Trace detail write-through failed (ws=%s rid=%s): %s",
+                       workspace_id, request_id, exc)
+
+
 def get_trace_detail_for_workspace(
     request_id: str,
     workspace_id: str,
@@ -1180,11 +1238,20 @@ def get_trace_detail_for_workspace(
     data = _get_for_workspace(
         f"/api/2.0/mlflow/traces/{request_id}", None, workspace_id, user_token,
     )
-    trace_info = data.get("trace", {}).get("trace_info", {})
+    trace = data.get("trace", {})
+    trace_info = trace.get("trace_info", {})
     if not trace_info:
         return None
     detail = _parse_trace_info_to_detail(trace_info, request_id, workspace_id)
+    trace_data = trace.get("trace_data") or {}
+    spans = trace_data.get("spans")
+    if isinstance(spans, list):
+        detail["spans"] = spans
     detail["data_source"] = "live"
+    # Write-through so the next load reads from Lakebase (see _cache_trace_detail_row).
+    _cache_trace_detail_row(
+        workspace_id, request_id, detail.get("experiment_id"), trace_info, trace_data,
+    )
     return detail
 
 
@@ -1447,6 +1514,32 @@ def get_cached_models(limit: int = 1000) -> Optional[List[Dict[str, Any]]]:
         logger.warning("mlflow_registered_models cache not available: %s", exc)
         return None
     # psycopg2 returns JSONB as already-parsed Python objects; pass through.
+    return rows
+
+
+def get_cached_model_versions(name: str, limit: int = 100) -> Optional[List[Dict[str, Any]]]:
+    """Read a registered model's versions from the Lakebase cache (populated by
+    04_discover_observability). Returns the same field shape the live
+    search_model_versions produced (version, status, user_id, creation_timestamp,
+    last_updated_timestamp, description, source, run_id) so the frontend is unchanged.
+
+    Returns None when the cache table is ABSENT (never synced) so the caller can
+    fall back to a live search; returns [] when the table exists but the model has
+    no cached versions — the caller should NOT keep hitting the live API in that case.
+    """
+    try:
+        rows = execute_query(
+            """SELECT name, version, workspace_id, user_id, creation_timestamp,
+                      last_updated_timestamp, status, description, source, run_id
+               FROM mlflow_model_versions WHERE name = %s
+               ORDER BY CASE WHEN version ~ '^[0-9]+$' THEN CAST(version AS BIGINT) END DESC NULLS LAST,
+                        version DESC LIMIT %s""",
+            (name, limit),
+        )
+    except Exception as exc:
+        # Table missing / not yet created by the discovery sync → signal "unknown".
+        logger.warning("mlflow_model_versions cache not available: %s", exc)
+        return None
     return rows
 
 

@@ -694,6 +694,13 @@ with obs_conn.cursor() as cur:
             description TEXT, aliases JSONB, latest_versions JSONB,
             last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             PRIMARY KEY (name))""",
+        """CREATE TABLE IF NOT EXISTS mlflow_model_versions (
+            name TEXT NOT NULL, version TEXT NOT NULL, workspace_id TEXT,
+            user_id TEXT, creation_timestamp BIGINT, last_updated_timestamp BIGINT,
+            status TEXT, description TEXT, source TEXT, run_id TEXT, aliases JSONB,
+            last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (name, version))""",
+        "CREATE INDEX IF NOT EXISTS idx_mmv_name ON mlflow_model_versions (name)",
         """CREATE TABLE IF NOT EXISTS agent_eval_scores (
             experiment_id TEXT, scorer_name TEXT NOT NULL, source_type TEXT,
             assessment_count BIGINT DEFAULT 0, pass_count BIGINT DEFAULT 0,
@@ -1308,6 +1315,34 @@ try:
 except Exception as exc:
     obs_conn.rollback()
     print(f"  ⚠️  mlflow_registered_models sync failed: {exc}")
+
+# COMMAND ----------
+
+# Sync mlflow_model_versions (all versions per model from 04_discover_observability).
+MODEL_VERSIONS_DELTA = f"{CATALOG}.{SCHEMA}.mlflow_model_versions"
+mv_count = 0
+print(f"▸ Syncing {MODEL_VERSIONS_DELTA} → mlflow_model_versions ...")
+try:
+    mv_rows = spark.read.table(MODEL_VERSIONS_DELTA).collect()
+    values = [(r.name, r.version, r.workspace_id, r.user_id,
+               int(r.creation_timestamp) if r.creation_timestamp is not None else None,
+               int(r.last_updated_timestamp) if r.last_updated_timestamp is not None else None,
+               r.status, r.description, r.source, r.run_id, r.aliases, now) for r in mv_rows]
+    with obs_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE mlflow_model_versions")
+        if values:
+            execute_values(cur,
+                """INSERT INTO mlflow_model_versions
+                   (name, version, workspace_id, user_id, creation_timestamp,
+                    last_updated_timestamp, status, description, source, run_id, aliases, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+    obs_conn.commit()
+    mv_count = len(values)
+    print(f"  ✅ {mv_count} model-version rows synced")
+except Exception as exc:
+    obs_conn.rollback()
+    print(f"  ⚠️  mlflow_model_versions sync failed: {exc}")
 
 # COMMAND ----------
 

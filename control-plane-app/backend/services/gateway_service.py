@@ -697,9 +697,10 @@ def get_uag_budget_status() -> Dict[str, Any]:
     synced yet or the discovery workflow had no account-level credentials to
     read the (account-scoped) Budgets API.
 
-    NOTE: consumption (% of cap used) is not populated yet — the account Budgets
-    API is config-only, so spend-vs-cap requires reproducing each budget's
-    tag/workspace filter against system.billing.usage (a separate validated pass).
+    Consumption (spent_usd / pct_used) is populated by 13_discover_budgets, which
+    reproduces each budget's tag/workspace filter against system.billing.usage for
+    the supported filter shapes (account-wide / workspace-only / single-tag); other
+    shapes stay n/a. The full budget list is returned (no cap); the frontend paginates.
     """
     from backend.database import execute_query
     empty = {"as_of": None, "totals": {}, "budgets": []}
@@ -721,7 +722,7 @@ def get_uag_budget_status() -> Dict[str, Any]:
                       min_threshold_usd, max_threshold_usd, time_period,
                       filter_summary, is_ai, spent_usd, pct_used, discovered_at
                FROM uag_budget_status
-               ORDER BY pct_used DESC NULLS LAST, max_threshold_usd DESC NULLS LAST LIMIT 500"""
+               ORDER BY pct_used DESC NULLS LAST, max_threshold_usd DESC NULLS LAST"""
         )
     except Exception as exc:
         logger.warning("uag_budget_status not available: %s", exc)

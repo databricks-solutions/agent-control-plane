@@ -191,9 +191,18 @@ async def list_models(
 
 @router.get("/models/{name:path}/versions")
 async def list_model_versions(name: str, max_results: int = Query(20, le=100)):
-    """Search versions for a registered model."""
+    """Versions for a registered model, from the Lakebase cache (populated by the
+    discovery workflow). Reads the cache instead of a live REST search on every
+    model expand; the live search now only runs in the discovery workflow.
+
+    Cache-first with a one-off live fallback only when the cache table is ABSENT
+    (never synced) — a real empty list (a model with no cached versions) is
+    returned as-is, so we don't hit the live API on every expand."""
     try:
-        return mlflow_service.search_model_versions(name, max_results)
+        cached = mlflow_service.get_cached_model_versions(name, max_results)
+        if cached is None:
+            return mlflow_service.search_model_versions(name, max_results)
+        return cached
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"MLflow API error: {e}")
 
