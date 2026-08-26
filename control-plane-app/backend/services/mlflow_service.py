@@ -735,9 +735,11 @@ def search_model_versions(
     name: str, max_results: int = 20
 ) -> List[Dict[str, Any]]:
     """Search versions for a registered model."""
+    # Escape single quotes so a model name with an apostrophe can't break the filter.
+    name_esc = name.replace("'", "''")
     data = _get(
         "/api/2.0/mlflow/unity-catalog/model-versions/search",
-        {"filter": f"name='{name}'", "max_results": max_results},
+        {"filter": f"name='{name_esc}'", "max_results": max_results},
     )
     return data.get("model_versions", [])
 
@@ -1530,7 +1532,7 @@ def get_cached_model_versions(name: str, limit: int = 100) -> Optional[List[Dict
     try:
         rows = execute_query(
             """SELECT name, version, workspace_id, user_id, creation_timestamp,
-                      last_updated_timestamp, status, description, source, run_id
+                      last_updated_timestamp, status, description, source, run_id, aliases
                FROM mlflow_model_versions WHERE name = %s
                ORDER BY CASE WHEN version ~ '^[0-9]+$' THEN CAST(version AS BIGINT) END DESC NULLS LAST,
                         version DESC LIMIT %s""",

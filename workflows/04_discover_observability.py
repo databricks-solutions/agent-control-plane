@@ -770,42 +770,56 @@ version_rows = []
 if model_rows:
     _mvw = WorkspaceClient()
     _model_names = [m[0] for m in model_rows if m[0]]
+    def _fetch_versions(mname):
+        """Newest-first versions for one model, capped at _MV_PER_MODEL. Orders by
+        last_updated_timestamp DESC so the cap keeps the NEWEST versions (not an
+        arbitrary page order); retries once without order_by if the endpoint rejects
+        it, so an unsupported order_by never silently zeroes a model. Escapes single
+        quotes in the name so a name with an apostrophe can't break the filter."""
+        name_esc = mname.replace("'", "''")
+        for order_by in (["last_updated_timestamp DESC"], None):
+            got, token = [], None
+            try:
+                while len(got) < _MV_PER_MODEL:
+                    p = {"filter": f"name='{name_esc}'", "max_results": 50}
+                    if order_by:
+                        p["order_by"] = order_by
+                    if token:
+                        p["page_token"] = token
+                    resp = _mvw.api_client.do(
+                        "GET", "/api/2.0/mlflow/unity-catalog/model-versions/search", query=p
+                    )
+                    batch = resp.get("model_versions") or []
+                    got.extend(batch)
+                    token = resp.get("next_page_token")
+                    if not token or not batch:
+                        break
+                return got[:_MV_PER_MODEL]
+            except Exception as exc:
+                if order_by is None:  # unordered attempt also failed → give up on this model
+                    print(f"  ⚠️  version enumeration failed for {mname}: {exc}")
+                    return []
+        return []
+
     for _mname in _model_names:
         if len(version_rows) >= _MV_TOTAL_CAP:
             print(f"  ⚠️  hit total version cap ({_MV_TOTAL_CAP}) — stopping enumeration")
             break
-        try:
-            _v_token = None
-            _fetched = 0
-            while _fetched < _MV_PER_MODEL:
-                _vparams = {"filter": f"name='{_mname}'", "max_results": 50}
-                if _v_token:
-                    _vparams["page_token"] = _v_token
-                _vresp = _mvw.api_client.do(
-                    "GET", "/api/2.0/mlflow/unity-catalog/model-versions/search", query=_vparams
-                )
-                _batch = _vresp.get("model_versions") or []
-                for v in _batch:
-                    version_rows.append((
-                        v.get("name", _mname),
-                        str(v.get("version", "")),
-                        _mw_ws_id,
-                        v.get("user_id"),
-                        int(v["creation_timestamp"]) if v.get("creation_timestamp") is not None else None,
-                        int(v["last_updated_timestamp"]) if v.get("last_updated_timestamp") is not None else None,
-                        v.get("status"),
-                        v.get("description") or v.get("comment"),
-                        v.get("source"),
-                        v.get("run_id"),
-                        json.dumps(v.get("aliases") or []),
-                        now,
-                    ))
-                _fetched += len(_batch)
-                _v_token = _vresp.get("next_page_token")
-                if not _v_token or not _batch:
-                    break
-        except Exception as exc:
-            print(f"  ⚠️  version enumeration failed for {_mname}: {exc}")
+        for v in _fetch_versions(_mname):
+            version_rows.append((
+                v.get("name", _mname),
+                str(v.get("version", "")),
+                _mw_ws_id,
+                v.get("user_id"),
+                int(v["creation_timestamp"]) if v.get("creation_timestamp") is not None else None,
+                int(v["last_updated_timestamp"]) if v.get("last_updated_timestamp") is not None else None,
+                v.get("status"),
+                v.get("description") or v.get("comment"),
+                v.get("source"),
+                v.get("run_id"),
+                json.dumps(v.get("aliases") or []),
+                now,
+            ))
     print(f"  ✅ enumerated {len(version_rows)} model versions across {len(_model_names)} models")
 
 if version_rows:
