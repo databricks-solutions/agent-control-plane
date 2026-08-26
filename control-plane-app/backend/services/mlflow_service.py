@@ -785,10 +785,16 @@ def get_trace_detail(request_id: str, *, user_token: Optional[str] = None) -> Op
     spans = trace_data.get("spans")
     if isinstance(spans, list):
         detail["spans"] = spans
-    # Write-through so the next load reads from Lakebase (see _cache_trace_detail_row).
-    _cache_trace_detail_row(
-        "", request_id, detail.get("experiment_id"), trace_info, trace_data,
-    )
+    # Write-through so the next load reads from Lakebase — but ONLY when this fetch
+    # used the app SP (no user_token). observability_trace_details is a SHARED cache
+    # read by every app user with no per-user authz recheck, so it must never hold
+    # anything broader than SP-visible data (the invariant the discovery workflow
+    # already maintains). A user-scoped OBO fetch could see traces the SP can't, so
+    # persisting it would leak that trace to other users — skip write-through then.
+    if not user_token:
+        _cache_trace_detail_row(
+            "", request_id, detail.get("experiment_id"), trace_info, trace_data,
+        )
     return detail
 
 
@@ -1187,6 +1193,12 @@ def _cache_trace_detail_row(
     hitting the live MLflow REST API again. Best-effort — never raises into the
     request path (a cache-write failure must not fail the trace-detail response).
 
+    SECURITY: this table is a SHARED cache read by every app user with no per-user
+    authz recheck, so callers MUST only invoke this for SP-authority fetches (no
+    user OBO token) — persisting a user-scoped fetch could leak a trace to users who
+    can't see it. This keeps the cache ⊆ SP-visible data, the same invariant the
+    discovery workflow maintains.
+
     workspace_id is "" for UC / cross-backend traces that are keyed by request_id
     alone (matches how the discovery workflow and `_get_trace_detail_from_cache_any`
     treat them)."""
@@ -1250,10 +1262,12 @@ def get_trace_detail_for_workspace(
     if isinstance(spans, list):
         detail["spans"] = spans
     detail["data_source"] = "live"
-    # Write-through so the next load reads from Lakebase (see _cache_trace_detail_row).
-    _cache_trace_detail_row(
-        workspace_id, request_id, detail.get("experiment_id"), trace_info, trace_data,
-    )
+    # No write-through here: this cross-workspace path is ALWAYS a user-scoped OBO
+    # fetch (user_token is required), and observability_trace_details is a shared
+    # cache served to every app user with no per-user authz recheck. Persisting an
+    # OBO-visible trace could leak it to users who can't see it, so cross-workspace
+    # detail stays live-per-request. The discovery workflow (SP authority) remains
+    # the only writer of shared cross-workspace trace details.
     return detail
 
 
