@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-26
+
+This release grows the **Unity Gateway** (v3) story and moves the app's read
+layer onto cached Lakebase tables where it was still doing live per-load calls.
+Two threads drove it: give native platform primitives (budgets, endpoints, UC
+model services) fleet-wide read-only visibility the per-object UIs don't, and
+stop the remaining Observability drill-downs from querying live on every click.
+
+### Added
+- **Budget status + consumption** (F5). Fleet-wide inventory of native account
+  budgets — cap thresholds, whether each *enforces* (BLOCK_USAGE) vs only *alerts*,
+  its filter, and AI-relevance — plus month-to-date spend vs cap (%-used), sortable
+  and paginated. Read-only: enforcement stays platform-side. New discovery task
+  `workflows/13_discover_budgets.py` → `uag_budget_status`; backend
+  `get_uag_budget_status()` and `GET /gateway/uag-budget-status`, degrading to empty
+  without account credentials.
+- **Account-wide endpoint inventory.** Read-only served-entity fleet view across
+  every workspace in the metastore from `system.serving.served_entities` — the view
+  the per-workspace serving API can't give. New `workflows/14_discover_endpoint_inventory.py`
+  → `serving_endpoints_inventory`, surfaced on the Unity Gateway tab.
+- **v3 Unity Gateway UC model services** (read-only). Metastore-wide list via the UC
+  REST API (workflow run-as a metastore admin — the list endpoint the app's OBO/SP
+  identities can't reach) plus live per-service grant reads. New
+  `workflows/15_discover_model_services.py` → `model_services_inventory`.
+- **Model Registry version cache.** Every version per registered model is cached to
+  Lakebase (`mlflow_model_versions`, from `04_discover_observability`) so the model
+  drill-down reads cache-first instead of a live REST search on each expand;
+  `GET /mlflow/models/{name}/versions` falls back to live only on a cold cache.
+- **MLflow trace-detail write-through.** SP-fetched trace details are persisted to
+  `observability_trace_details` on a cache miss, so repeat opens read from Lakebase.
+
+### Changed
+- **AI Gateway page reorganized and rebranded "Unity Gateway"**; Beta and version
+  labels removed (GA). v1 per-endpoint views consolidated into a **"Legacy AI
+  Gateway"** tab; Budgets moved next to Unity Gateway; Requests/Tokens-per-day charts
+  moved directly under the KPI cards.
+- **Tools → MCP Usage** is now sortable and paginated.
+- **Budget list is uncapped.** `GET /gateway/uag-budget-status` returns the full
+  budget list (totals already aggregate the whole table; the frontend paginates),
+  replacing the prior 500-row cap.
+
+### Removed
+- Pruned dead tabs: Observability **Gateway Requests** and **Quality & Evals**, and
+  Governance **Guardrails** (plus their now-unused panels and imports).
+
+### Fixed
+- `10_smoke_check_lakebase` `authenticate()` bug that crashed every run.
+- Budget month-to-date total now includes NULL-workspace (account-level) usage
+  instead of under-counting it.
+- Model-versions discovery orders by `last_updated_timestamp DESC` so the per-model
+  cap keeps the newest versions (with a retry-without-order_by fallback so an
+  unsupported order_by never silently zeroes a model); single quotes in the name
+  filter are escaped; and a transient full-enumeration failure no longer overwrites
+  the good `mlflow_model_versions` table with empty.
+
+### Security
+- **Trace-detail write-through is scoped to SP-authority fetches only.**
+  `observability_trace_details` is a shared cache served to every app user with no
+  per-user authorization recheck. Persisting a user-scoped (OBO) fetch could expose a
+  trace to users who lack access to it, so write-through now fires only when the fetch
+  used the app service principal — keeping the shared cache ⊆ SP-visible data, the
+  invariant the discovery workflow already maintains. Cross-workspace trace detail
+  (always OBO) stays live-per-request.
+
 ## [0.1.2] - 2026-06-02
 
 This release builds the Unity AI Gateway **v2** story and steps the app back from

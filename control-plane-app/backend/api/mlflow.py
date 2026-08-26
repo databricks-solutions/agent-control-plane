@@ -171,15 +171,18 @@ async def list_models(
     max_results: int = Query(500, le=10000),
     workspace_id: Optional[str] = Query(None, description="Workspace ID, 'all' for all workspaces"),
 ):
-    """Search Unity Catalog registered models, optionally cross-workspace."""
+    """UC registered models from the Lakebase cache (populated by the discovery
+    workflow). Reads the cache instead of a live REST search on every load; the
+    live search now only runs in the discovery workflow. Same row shape as before."""
     try:
-        token = _obo_token(request)
-        if workspace_id == "all" or workspace_id:
-            # Models are only available on the current workspace via REST
-            # Cross-workspace model registry not supported (no system table, OBO scope too narrow)
+        cached = mlflow_service.get_cached_models(max_results)
+        # None = cache table absent (never synced) → one-off live fallback so the
+        # tab isn't empty before the first discovery run. A real empty list (0
+        # models in the workspace) is returned as-is, so we don't hit the live API
+        # on every load.
+        if cached is None:
             return mlflow_service.search_registered_models(max_results)
-        else:
-            return mlflow_service.search_registered_models(max_results)
+        return cached
     except HTTPException:
         raise
     except Exception as e:
@@ -188,9 +191,18 @@ async def list_models(
 
 @router.get("/models/{name:path}/versions")
 async def list_model_versions(name: str, max_results: int = Query(20, le=100)):
-    """Search versions for a registered model."""
+    """Versions for a registered model, from the Lakebase cache (populated by the
+    discovery workflow). Reads the cache instead of a live REST search on every
+    model expand; the live search now only runs in the discovery workflow.
+
+    Cache-first with a one-off live fallback only when the cache table is ABSENT
+    (never synced) — a real empty list (a model with no cached versions) is
+    returned as-is, so we don't hit the live API on every expand."""
     try:
-        return mlflow_service.search_model_versions(name, max_results)
+        cached = mlflow_service.get_cached_model_versions(name, max_results)
+        if cached is None:
+            return mlflow_service.search_model_versions(name, max_results)
+        return cached
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"MLflow API error: {e}")
 

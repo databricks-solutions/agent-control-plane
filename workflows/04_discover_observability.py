@@ -73,6 +73,8 @@ if ACCOUNT_ID:
     os.environ["DATABRICKS_ACCOUNT_ID"] = ACCOUNT_ID
 TRACES_TABLE = f"{CATALOG}.{SCHEMA}.observability_traces"
 TRACE_DETAILS_TABLE = f"{CATALOG}.{SCHEMA}.observability_trace_details"
+MODEL_REGISTRY_TABLE = f"{CATALOG}.{SCHEMA}.mlflow_registered_models"
+MODEL_VERSIONS_TABLE = f"{CATALOG}.{SCHEMA}.mlflow_model_versions"
 
 try:
     RETENTION_DAYS = max(1, int(dbutils.widgets.get("trace_retention_days") or "90"))
@@ -118,6 +120,39 @@ if CROSS_WS_FANOUT_ENABLED:
 # MAGIC ## Delta Table Schema
 
 # COMMAND ----------
+
+# UC registered models (Model Registry), enumerated via REST on the deploy
+# workspace. Cached so the Observability → MLflow Assets tab reads Lakebase
+# instead of a live REST search on every load. `name` is the 3-part UC FQN.
+MODEL_REGISTRY_SCHEMA = StructType([
+    StructField("name", StringType(), False),
+    StructField("workspace_id", StringType(), True),
+    StructField("user_id", StringType(), True),
+    StructField("last_updated_timestamp", LongType(), True),
+    StructField("creation_timestamp", LongType(), True),
+    StructField("description", StringType(), True),
+    StructField("aliases", StringType(), True),          # JSON string
+    StructField("latest_versions", StringType(), True),  # JSON string
+    StructField("discovered_at", TimestampType(), False),
+])
+
+# All versions per registered model, enumerated via the model-versions search
+# REST endpoint. Cached so the Model Registry drill-down reads Lakebase instead
+# of a live search on every model expand. `name` is the 3-part UC FQN.
+MODEL_VERSIONS_SCHEMA = StructType([
+    StructField("name", StringType(), False),
+    StructField("version", StringType(), False),
+    StructField("workspace_id", StringType(), True),
+    StructField("user_id", StringType(), True),
+    StructField("creation_timestamp", LongType(), True),
+    StructField("last_updated_timestamp", LongType(), True),
+    StructField("status", StringType(), True),
+    StructField("description", StringType(), True),
+    StructField("source", StringType(), True),
+    StructField("run_id", StringType(), True),
+    StructField("aliases", StringType(), True),  # JSON string
+    StructField("discovered_at", TimestampType(), False),
+])
 
 TRACES_SCHEMA = StructType([
     StructField("request_id", StringType(), False),
@@ -659,6 +694,157 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Registered models (UC Model Registry → Lakebase cache)
+# MAGIC
+# MAGIC Enumerate UC registered models via REST on the deploy workspace so the app's
+# MAGIC Model Registry view reads Lakebase instead of a live search on every load.
+# MAGIC Deploy-workspace scope (same as the app's previous live call). Fail-open.
+
+# COMMAND ----------
+
+model_rows = []
+# Resolve the deploy workspace id defensively — spark.conf.get raises
+# CONFIG_NOT_AVAILABLE on serverless (the 2-arg default is NOT honored for this
+# key), which would otherwise abort the whole enumeration below.
+try:
+    _mw_ws_id = spark.conf.get("spark.databricks.clusterUsageTags.orgId")
+except Exception:
+    _mw_ws_id = None
+if not _mw_ws_id:
+    # Fall back to the local workspace id resolved earlier for host mapping.
+    _mw_ws_id = _local_ws_id if "_local_ws_id" in dir() else None
+try:
+    _mw = WorkspaceClient()
+    page_token = None
+    pages = 0
+    while pages < 50:  # safety bound; 100/page → up to 5k models
+        params = {"max_results": 100}
+        if page_token:
+            params["page_token"] = page_token
+        resp = _mw.api_client.do(
+            "GET", "/api/2.0/mlflow/unity-catalog/registered-models/search", query=params
+        )
+        for m in (resp.get("registered_models") or []):
+            model_rows.append((
+                m.get("name", ""),
+                _mw_ws_id,
+                m.get("user_id"),
+                int(m["last_updated_timestamp"]) if m.get("last_updated_timestamp") is not None else None,
+                int(m["creation_timestamp"]) if m.get("creation_timestamp") is not None else None,
+                # search endpoint returns `description`, not `comment`
+                m.get("description") or m.get("comment"),
+                json.dumps(m.get("aliases") or []),
+                json.dumps(m.get("latest_versions") or []),
+                now,
+            ))
+        page_token = resp.get("next_page_token")
+        pages += 1
+        if not page_token:
+            break
+    print(f"  ✅ enumerated {len(model_rows)} registered models")
+except Exception as exc:
+    print(f"  ⚠️  registered-models enumeration unavailable: {exc}")
+    model_rows = []
+
+if model_rows:
+    spark.createDataFrame(model_rows, MODEL_REGISTRY_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(MODEL_REGISTRY_TABLE)
+else:
+    spark.createDataFrame([], MODEL_REGISTRY_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(MODEL_REGISTRY_TABLE)
+print(f"✅ Wrote {len(model_rows)} rows to {MODEL_REGISTRY_TABLE}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Model versions (UC Model Registry → Lakebase cache)
+# MAGIC
+# MAGIC Enumerate every version per registered model via the model-versions search
+# MAGIC REST endpoint so the app's per-model drill-down reads Lakebase instead of a
+# MAGIC live search on every expand. Bounded (versions/model + total) and fail-open.
+
+# COMMAND ----------
+
+# Bounds so a metastore with many models/versions can't make this task unbounded.
+_MV_PER_MODEL = 200      # newest versions kept per model
+_MV_TOTAL_CAP = 50000    # hard cap across all models
+version_rows = []
+if model_rows:
+    _mvw = WorkspaceClient()
+    _model_names = [m[0] for m in model_rows if m[0]]
+    def _fetch_versions(mname):
+        """Newest-first versions for one model, capped at _MV_PER_MODEL. Orders by
+        last_updated_timestamp DESC so the cap keeps the NEWEST versions (not an
+        arbitrary page order); retries once without order_by if the endpoint rejects
+        it, so an unsupported order_by never silently zeroes a model. Escapes single
+        quotes in the name so a name with an apostrophe can't break the filter."""
+        name_esc = mname.replace("'", "''")
+        for order_by in (["last_updated_timestamp DESC"], None):
+            got, token = [], None
+            try:
+                while len(got) < _MV_PER_MODEL:
+                    p = {"filter": f"name='{name_esc}'", "max_results": 50}
+                    if order_by:
+                        p["order_by"] = order_by
+                    if token:
+                        p["page_token"] = token
+                    resp = _mvw.api_client.do(
+                        "GET", "/api/2.0/mlflow/unity-catalog/model-versions/search", query=p
+                    )
+                    batch = resp.get("model_versions") or []
+                    got.extend(batch)
+                    token = resp.get("next_page_token")
+                    if not token or not batch:
+                        break
+                return got[:_MV_PER_MODEL]
+            except Exception as exc:
+                if order_by is None:  # unordered attempt also failed → give up on this model
+                    print(f"  ⚠️  version enumeration failed for {mname}: {exc}")
+                    return []
+        return []
+
+    for _mname in _model_names:
+        if len(version_rows) >= _MV_TOTAL_CAP:
+            print(f"  ⚠️  hit total version cap ({_MV_TOTAL_CAP}) — stopping enumeration")
+            break
+        for v in _fetch_versions(_mname):
+            version_rows.append((
+                v.get("name", _mname),
+                str(v.get("version", "")),
+                _mw_ws_id,
+                v.get("user_id"),
+                int(v["creation_timestamp"]) if v.get("creation_timestamp") is not None else None,
+                int(v["last_updated_timestamp"]) if v.get("last_updated_timestamp") is not None else None,
+                v.get("status"),
+                v.get("description") or v.get("comment"),
+                v.get("source"),
+                v.get("run_id"),
+                json.dumps(v.get("aliases") or []),
+                now,
+            ))
+    print(f"  ✅ enumerated {len(version_rows)} model versions across {len(_model_names)} models")
+
+try:
+    _mv_table_exists = spark.catalog.tableExists(MODEL_VERSIONS_TABLE)
+except Exception:
+    _mv_table_exists = False
+
+if version_rows:
+    spark.createDataFrame(version_rows, MODEL_VERSIONS_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(MODEL_VERSIONS_TABLE)
+    print(f"✅ Wrote {len(version_rows)} rows to {MODEL_VERSIONS_TABLE}")
+elif model_rows and _mv_table_exists:
+    # Models exist but enumeration produced zero versions — almost certainly a
+    # transient/permission failure this run (real models virtually always have
+    # ≥1 version). Preserve the last-good table instead of overwriting it empty,
+    # which would blank the Model Registry drill-down for every model until the
+    # next fully-successful run. Self-heals on the next good run.
+    print(f"⚠️  0 versions enumerated for {len(model_rows)} models — preserving existing {MODEL_VERSIONS_TABLE} (assumed transient)")
+else:
+    # No registered models at all, or the table doesn't exist yet → (re)initialize empty.
+    spark.createDataFrame([], MODEL_VERSIONS_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(MODEL_VERSIONS_TABLE)
+    print(f"✅ Wrote 0 rows to {MODEL_VERSIONS_TABLE}")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Summary
 
 # COMMAND ----------
@@ -688,6 +874,8 @@ result = {
     "total_traces": len(all_traces),
     "total_trace_details": len(all_details),
     "total_detail_errors": total_detail_errors,
+    "registered_models": len(model_rows),
+    "model_versions": len(version_rows),
     "retention_days": RETENTION_DAYS,
     "sp_auth_enabled": bool(SP_CLIENT_ID),
     "narrow_test_ws": NARROW_TEST_WS or None,

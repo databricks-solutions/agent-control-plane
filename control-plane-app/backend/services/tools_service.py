@@ -654,6 +654,51 @@ def get_uc_functions() -> List[Dict[str, Any]]:
     return result
 
 
+def _normalize_tool_name(name: str, span_type: str) -> str:
+    """TOOL span names arrive as catalog__schema__function (MLflow sanitizes the
+    UC FQN's dots to '__'). Reverse only the exact 3-part shape — a blanket
+    replace would mangle names like search__web. Mirrors mlflow_service._asset."""
+    if span_type == "TOOL" and name:
+        parts = name.split("__")
+        if len(parts) == 3 and all(parts):
+            return ".".join(parts)
+    return name or ""
+
+
 def get_tool_usage(days: int = 7) -> List[Dict[str, Any]]:
-    """Get tool call frequency from MLflow traces."""
-    return _get_tool_call_usage(days)
+    """Tool-call frequency/error/latency from the cached agent_tool_usage table
+    (TOOL/RETRIEVER span rollup produced by 07_discover_uc_otel_traces), instead
+    of a live per-request MLflow trace scan. Aggregates across experiments per
+    (tool, span_type). Falls back to the live scan only if the cache is absent.
+    The `days` arg is accepted for compatibility but the cache reflects the
+    discovery window.
+    """
+    try:
+        rows = execute_query(
+            """SELECT tool_name, span_type,
+                      SUM(call_count)::BIGINT       AS call_count,
+                      SUM(error_count)::BIGINT      AS error_count,
+                      SUM(total_latency_ms)::DOUBLE PRECISION AS total_latency_ms
+               FROM agent_tool_usage
+               GROUP BY tool_name, span_type
+               ORDER BY call_count DESC LIMIT 500"""
+        )
+    except Exception as exc:
+        # Cache table absent (never synced) → one-off live fallback.
+        logger.warning("agent_tool_usage cache not available, falling back to live: %s", exc)
+        return _get_tool_call_usage(days)
+
+    usage = []
+    for r in rows:
+        count = int(r.get("call_count") or 0)
+        errors = int(r.get("error_count") or 0)
+        total_lat = float(r.get("total_latency_ms") or 0.0)
+        usage.append({
+            "tool_name": _normalize_tool_name(r.get("tool_name") or "", r.get("span_type") or ""),
+            "span_type": r.get("span_type") or "",
+            "call_count": count,
+            "error_count": errors,
+            "error_rate": round(errors / count * 100, 1) if count > 0 else 0,
+            "avg_latency_ms": round(total_lat / count, 1) if count > 0 else 0,
+        })
+    return usage

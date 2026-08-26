@@ -679,9 +679,28 @@ with obs_conn.cursor() as cur:
         """CREATE TABLE IF NOT EXISTS agent_tool_usage (
             experiment_id TEXT, tool_name TEXT NOT NULL, span_type TEXT NOT NULL,
             call_count BIGINT DEFAULT 0, trace_count BIGINT DEFAULT 0,
+            error_count BIGINT DEFAULT 0, total_latency_ms DOUBLE PRECISION DEFAULT 0,
             last_seen TEXT,
             last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW())""",
         "CREATE INDEX IF NOT EXISTS idx_atu_exp ON agent_tool_usage (experiment_id)",
+        # Reconcile the error/latency columns onto pre-existing tables (CREATE IF
+        # NOT EXISTS is a no-op when the table already exists). Workflow-owned, so
+        # the workflow can ALTER it.
+        "ALTER TABLE agent_tool_usage ADD COLUMN IF NOT EXISTS error_count BIGINT DEFAULT 0",
+        "ALTER TABLE agent_tool_usage ADD COLUMN IF NOT EXISTS total_latency_ms DOUBLE PRECISION DEFAULT 0",
+        """CREATE TABLE IF NOT EXISTS mlflow_registered_models (
+            name TEXT NOT NULL, workspace_id TEXT, user_id TEXT,
+            last_updated_timestamp BIGINT, creation_timestamp BIGINT,
+            description TEXT, aliases JSONB, latest_versions JSONB,
+            last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (name))""",
+        """CREATE TABLE IF NOT EXISTS mlflow_model_versions (
+            name TEXT NOT NULL, version TEXT NOT NULL, workspace_id TEXT,
+            user_id TEXT, creation_timestamp BIGINT, last_updated_timestamp BIGINT,
+            status TEXT, description TEXT, source TEXT, run_id TEXT, aliases JSONB,
+            last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (name, version))""",
+        "CREATE INDEX IF NOT EXISTS idx_mmv_name ON mlflow_model_versions (name)",
         """CREATE TABLE IF NOT EXISTS agent_eval_scores (
             experiment_id TEXT, scorer_name TEXT NOT NULL, source_type TEXT,
             assessment_count BIGINT DEFAULT 0, pass_count BIGINT DEFAULT 0,
@@ -1174,13 +1193,15 @@ try:
     # insert rolls back the truncate rather than leaving the table empty.
     atu_rows = spark.read.table(TOOL_USAGE_DELTA).collect()
     values = [(r.experiment_id, r.tool_name, r.span_type, int(r.call_count or 0),
-               int(r.trace_count or 0), r.last_seen, now) for r in atu_rows]
+               int(r.trace_count or 0), int(getattr(r, "error_count", 0) or 0),
+               float(getattr(r, "total_latency_ms", 0.0) or 0.0), r.last_seen, now) for r in atu_rows]
     with obs_conn.cursor() as cur:
         cur.execute("TRUNCATE TABLE agent_tool_usage")
         if values:
             execute_values(cur,
                 """INSERT INTO agent_tool_usage
-                   (experiment_id, tool_name, span_type, call_count, trace_count, last_seen, last_synced)
+                   (experiment_id, tool_name, span_type, call_count, trace_count,
+                    error_count, total_latency_ms, last_seen, last_synced)
                    VALUES %s""",
                 values, page_size=500)
     obs_conn.commit()
@@ -1268,6 +1289,60 @@ try:
 except Exception as exc:
     obs_conn.rollback()
     print(f"  ⚠️  ai_audit_recent sync failed: {exc}")
+
+# Sync mlflow_registered_models (UC registered models from 04_discover_observability).
+MODEL_REGISTRY_DELTA = f"{CATALOG}.{SCHEMA}.mlflow_registered_models"
+mr_count = 0
+print(f"▸ Syncing {MODEL_REGISTRY_DELTA} → mlflow_registered_models ...")
+try:
+    mr_rows = spark.read.table(MODEL_REGISTRY_DELTA).collect()
+    values = [(r.name, r.workspace_id, r.user_id,
+               int(r.last_updated_timestamp) if r.last_updated_timestamp is not None else None,
+               int(r.creation_timestamp) if r.creation_timestamp is not None else None,
+               r.description, r.aliases, r.latest_versions, now) for r in mr_rows]
+    with obs_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE mlflow_registered_models")
+        if values:
+            execute_values(cur,
+                """INSERT INTO mlflow_registered_models
+                   (name, workspace_id, user_id, last_updated_timestamp, creation_timestamp,
+                    description, aliases, latest_versions, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+    obs_conn.commit()
+    mr_count = len(values)
+    print(f"  ✅ {mr_count} registered-model rows synced")
+except Exception as exc:
+    obs_conn.rollback()
+    print(f"  ⚠️  mlflow_registered_models sync failed: {exc}")
+
+# COMMAND ----------
+
+# Sync mlflow_model_versions (all versions per model from 04_discover_observability).
+MODEL_VERSIONS_DELTA = f"{CATALOG}.{SCHEMA}.mlflow_model_versions"
+mv_count = 0
+print(f"▸ Syncing {MODEL_VERSIONS_DELTA} → mlflow_model_versions ...")
+try:
+    mv_rows = spark.read.table(MODEL_VERSIONS_DELTA).collect()
+    values = [(r.name, r.version, r.workspace_id, r.user_id,
+               int(r.creation_timestamp) if r.creation_timestamp is not None else None,
+               int(r.last_updated_timestamp) if r.last_updated_timestamp is not None else None,
+               r.status, r.description, r.source, r.run_id, r.aliases, now) for r in mv_rows]
+    with obs_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE mlflow_model_versions")
+        if values:
+            execute_values(cur,
+                """INSERT INTO mlflow_model_versions
+                   (name, version, workspace_id, user_id, creation_timestamp,
+                    last_updated_timestamp, status, description, source, run_id, aliases, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+    obs_conn.commit()
+    mv_count = len(values)
+    print(f"  ✅ {mv_count} model-version rows synced")
+except Exception as exc:
+    obs_conn.rollback()
+    print(f"  ⚠️  mlflow_model_versions sync failed: {exc}")
 
 # COMMAND ----------
 
@@ -2040,6 +2115,138 @@ try:
 except Exception as exc:
     uag_conn.rollback()
     print(f"  ⚠️  uag_fallback_routing_daily sync failed: {exc}")
+
+# Sync uag_budget_status (account Budgets API config inventory — F5, read-only).
+UAG_BUDGET_TABLE = f"{CATALOG}.{SCHEMA}.uag_budget_status"
+uag_budget_count = 0
+with uag_conn.cursor() as cur:
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS uag_budget_status (
+            budget_id         TEXT NOT NULL,
+            account_id        TEXT,
+            display_name      TEXT,
+            enforce           BOOLEAN DEFAULT FALSE,
+            alerting          BOOLEAN DEFAULT FALSE,
+            min_threshold_usd NUMERIC(18,2),
+            max_threshold_usd NUMERIC(18,2),
+            time_period       TEXT,
+            filter_summary    TEXT,
+            is_ai             BOOLEAN DEFAULT FALSE,
+            spent_usd         NUMERIC(18,2),
+            pct_used          DOUBLE PRECISION,
+            discovered_at     TIMESTAMP WITH TIME ZONE,
+            last_synced       TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (budget_id))""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ubs_ai ON uag_budget_status (is_ai)")
+    # additive columns for pre-existing tables (workflow-owned, so ALTER is safe here)
+    cur.execute("ALTER TABLE uag_budget_status ADD COLUMN IF NOT EXISTS spent_usd NUMERIC(18,2)")
+    cur.execute("ALTER TABLE uag_budget_status ADD COLUMN IF NOT EXISTS pct_used DOUBLE PRECISION")
+    uag_conn.commit()
+print(f"▸ Syncing {UAG_BUDGET_TABLE} → uag_budget_status ...")
+try:
+    bg_rows = spark.read.table(UAG_BUDGET_TABLE).collect()
+    values = [(r.budget_id, r.account_id, r.display_name, bool(r.enforce), bool(r.alerting),
+               r.min_threshold_usd, r.max_threshold_usd, r.time_period, r.filter_summary,
+               bool(r.is_ai), r.spent_usd, r.pct_used, r.discovered_at, now) for r in bg_rows]
+    with uag_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE uag_budget_status")
+        if values:
+            execute_values(cur,
+                """INSERT INTO uag_budget_status
+                   (budget_id, account_id, display_name, enforce, alerting,
+                    min_threshold_usd, max_threshold_usd, time_period, filter_summary,
+                    is_ai, spent_usd, pct_used, discovered_at, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+    uag_conn.commit()
+    uag_budget_count = len(values)
+    print(f"  ✅ {uag_budget_count} budget rows synced")
+except Exception as exc:
+    uag_conn.rollback()
+    print(f"  ⚠️  uag_budget_status sync failed: {exc}")
+
+# Sync serving_endpoints_inventory (account-wide served-entity inventory, read-only).
+EP_INV_TABLE = f"{CATALOG}.{SCHEMA}.serving_endpoints_inventory"
+ep_inv_count = 0
+with uag_conn.cursor() as cur:
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS serving_endpoints_inventory (
+            served_entity_id        TEXT NOT NULL,
+            endpoint_id             TEXT,
+            endpoint_name           TEXT,
+            workspace_id            TEXT,
+            served_entity_name      TEXT,
+            entity_type             TEXT,
+            entity_name             TEXT,
+            entity_version          TEXT,
+            provider                TEXT,
+            task                    TEXT,
+            created_by              TEXT,
+            endpoint_config_version INTEGER,
+            change_time             TIMESTAMP WITH TIME ZONE,
+            discovered_at           TIMESTAMP WITH TIME ZONE,
+            last_synced             TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (served_entity_id))""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sei_ws ON serving_endpoints_inventory (workspace_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sei_type ON serving_endpoints_inventory (entity_type)")
+    uag_conn.commit()
+print(f"▸ Syncing {EP_INV_TABLE} → serving_endpoints_inventory ...")
+try:
+    ei_rows = spark.read.table(EP_INV_TABLE).collect()
+    values = [(r.served_entity_id, r.endpoint_id, r.endpoint_name, r.workspace_id,
+               r.served_entity_name, r.entity_type, r.entity_name, r.entity_version,
+               r.provider, r.task, r.created_by, r.endpoint_config_version,
+               r.change_time, r.discovered_at, now) for r in ei_rows]
+    with uag_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE serving_endpoints_inventory")
+        if values:
+            execute_values(cur,
+                """INSERT INTO serving_endpoints_inventory
+                   (served_entity_id, endpoint_id, endpoint_name, workspace_id,
+                    served_entity_name, entity_type, entity_name, entity_version,
+                    provider, task, created_by, endpoint_config_version,
+                    change_time, discovered_at, last_synced)
+                   VALUES %s""",
+                values, page_size=1000)
+    uag_conn.commit()
+    ep_inv_count = len(values)
+    print(f"  ✅ {ep_inv_count} endpoint-inventory rows synced")
+except Exception as exc:
+    uag_conn.rollback()
+    print(f"  ⚠️  serving_endpoints_inventory sync failed: {exc}")
+
+# Sync model_services_inventory (v3 UC model services — account-wide, read-only).
+MS_INV_TABLE = f"{CATALOG}.{SCHEMA}.model_services_inventory"
+ms_inv_count = 0
+with uag_conn.cursor() as cur:
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS model_services_inventory (
+            full_name           TEXT NOT NULL,
+            owner               TEXT,
+            supported_api_types TEXT,
+            create_time         TEXT,
+            discovered_at       TIMESTAMP WITH TIME ZONE,
+            last_synced         TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (full_name))""")
+    uag_conn.commit()
+print(f"▸ Syncing {MS_INV_TABLE} → model_services_inventory ...")
+try:
+    ms_rows = spark.read.table(MS_INV_TABLE).collect()
+    values = [(r.full_name, r.owner, r.supported_api_types, r.create_time, r.discovered_at, now) for r in ms_rows]
+    with uag_conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE model_services_inventory")
+        if values:
+            execute_values(cur,
+                """INSERT INTO model_services_inventory
+                   (full_name, owner, supported_api_types, create_time, discovered_at, last_synced)
+                   VALUES %s""",
+                values, page_size=500)
+    uag_conn.commit()
+    ms_inv_count = len(values)
+    print(f"  ✅ {ms_inv_count} model-service rows synced")
+except Exception as exc:
+    uag_conn.rollback()
+    print(f"  ⚠️  model_services_inventory sync failed: {exc}")
 
 uag_conn.close()
 

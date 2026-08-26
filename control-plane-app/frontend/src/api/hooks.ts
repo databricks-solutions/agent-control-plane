@@ -730,7 +730,7 @@ export interface UagBreakdownRow {
   cached_tokens: number
 }
 
-/** Unity AI Gateway (v2) usage — v2-routed endpoints only, ~20-min fresh. */
+/** Unity Gateway (v2) usage — v2-routed endpoints only, ~20-min fresh. */
 export function useUagV2Usage() {
   return useQuery({
     queryKey: ['gateway', 'uag-v2-usage'],
@@ -739,6 +739,125 @@ export function useUagV2Usage() {
       return data as UagV2Usage
     },
     staleTime: GW_STALE,
+  })
+}
+
+/** Read-only budget config inventory from the account Budgets API. */
+export interface UagBudgetStatus {
+  as_of: string | null
+  totals: {
+    budget_count?: number
+    enforcing_count?: number
+    alerting_count?: number
+    ai_budget_count?: number
+    over_cap_count?: number
+    near_cap_count?: number
+  }
+  budgets: Array<{
+    budget_id: string
+    display_name: string
+    enforce: boolean
+    alerting: boolean
+    min_threshold_usd: number
+    max_threshold_usd: number
+    time_period: string
+    filter_summary: string
+    is_ai: boolean
+    spent_usd: number | null
+    pct_used: number | null
+  }>
+}
+
+export function useUagBudgetStatus() {
+  return useQuery({
+    queryKey: ['gateway', 'uag-budget-status'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/uag-budget-status')
+      return data as UagBudgetStatus
+    },
+    staleTime: GW_STALE,
+  })
+}
+
+/** Account-wide served-entity inventory (read-only) from system.serving.served_entities. */
+export interface EndpointInventory {
+  as_of: string | null
+  totals: {
+    served_entity_count?: number
+    endpoint_count?: number
+    workspace_count?: number
+    foundation_count?: number
+    custom_count?: number
+    external_count?: number
+  }
+  endpoints: Array<{
+    endpoint_name: string
+    workspace_id: string
+    entity_type: string
+    entity_name: string
+    entity_version: string
+    provider: string
+    task: string
+    created_by: string
+    change_time: string | null
+  }>
+}
+
+export function useEndpointInventory() {
+  return useQuery({
+    queryKey: ['gateway', 'endpoint-inventory'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/endpoint-inventory')
+      return data as EndpointInventory
+    },
+    staleTime: GW_STALE,
+  })
+}
+
+/** v3 Unity Gateway UC model services + their UC grants (OBO, UC-enforced). */
+export interface ModelService {
+  full_name: string
+  owner: string
+  supported_api_types: string[]
+  create_time: string | null
+}
+export interface ModelServiceGrantRow {
+  principal: string
+  privileges: string[]
+}
+
+export function useModelServices() {
+  return useQuery({
+    queryKey: ['gateway', 'model-services'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/model-services')
+      return data as { services: ModelService[] }
+    },
+    staleTime: GW_STALE,
+  })
+}
+
+export function useModelServiceGrants(fullName: string | null) {
+  return useQuery({
+    queryKey: ['gateway', 'model-service-grants', fullName],
+    enabled: !!fullName,
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/model-services/grants', { params: { full_name: fullName } })
+      return data as { grants: ModelServiceGrantRow[]; error?: string }
+    },
+  })
+}
+
+export function useSetModelServiceGrant() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (body: { full_name: string; principal: string; add?: string[]; remove?: string[] }) => {
+      const { data } = await apiClient.post('/gateway/model-services/grant', body)
+      return data as { ok: boolean; error?: string }
+    },
+    onSuccess: (_d, vars) => {
+      qc.invalidateQueries({ queryKey: ['gateway', 'model-service-grants', vars.full_name] })
+    },
   })
 }
 
@@ -765,7 +884,7 @@ export interface GuardrailCoverage {
   }>
 }
 
-/** Guardrail coverage/activity per endpoint from Unity AI Gateway v2 (not outcomes). */
+/** Guardrail coverage/activity per endpoint from Unity Gateway v2 (not outcomes). */
 export function useGuardrailCoverage() {
   return useQuery({
     queryKey: ['gateway', 'guardrail-coverage'],
@@ -789,7 +908,7 @@ export interface Throttling {
   }>
 }
 
-/** Per-endpoint throttling (HTTP 429) + server errors (5xx) from Unity AI Gateway usage. */
+/** Per-endpoint throttling (HTTP 429) + server errors (5xx) from Unity Gateway usage. */
 export function useThrottling() {
   return useQuery({
     queryKey: ['gateway', 'throttling'],
@@ -814,7 +933,7 @@ export interface FallbackRouting {
   }>
 }
 
-/** Per-endpoint smart-routing fallback (backup-model routing) from Unity AI Gateway usage. */
+/** Per-endpoint smart-routing fallback (backup-model routing) from Unity Gateway usage. */
 export function useFallbackRouting() {
   return useQuery({
     queryKey: ['gateway', 'fallback-routing'],
@@ -977,7 +1096,7 @@ export interface McpActivity {
   }>
 }
 
-/** Server-grouped MCP tool activity from Unity AI Gateway v2. */
+/** Server-grouped MCP tool activity from Unity Gateway v2. */
 export function useMcpActivity() {
   return useQuery({
     queryKey: ['tools', 'mcp-activity'],
@@ -1131,7 +1250,7 @@ export interface BillingPageData {
   daily_tokens: any[]
   products: any[]
   cost_by_user: any[]
-  /** "actual" = Unity AI Gateway v2 per-user attribution; "estimate" = token-share split */
+  /** "actual" = Unity Gateway v2 per-user attribution; "estimate" = token-share split */
   cost_by_user_source: 'actual' | 'estimate'
   tokens_by_user: any[]
   /** MODEL_SERVING $ attributed by custom_tag (window aggregate, workspace-agnostic) */

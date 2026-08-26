@@ -1,7 +1,7 @@
 """FastAPI routes for AI Gateway — powered by real Databricks APIs."""
 from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from backend.config import settings
 from backend.services import gateway_service
 from backend.utils.auth import get_current_user, require_admin, require_account_admin, UserInfo
@@ -179,6 +179,57 @@ def uag_v2_usage():
     Breakdowns include requester_type, destination_model, api_type,
     service_type (model/MCP/provider) and route_action (routing outcomes)."""
     return gateway_service.get_uag_v2_usage()
+
+
+class ModelServiceGrant(BaseModel):
+    full_name: str
+    principal: str
+    add: List[str] = []
+    remove: List[str] = []
+
+
+@router.get("/model-services")
+def model_services(user: UserInfo = Depends(get_current_user)):
+    """v3 Unity Gateway UC model services (metastore-wide). Read via the caller's
+    OBO token so UC scopes what they can see."""
+    return gateway_service.list_model_services(user_token=user.token)
+
+
+@router.get("/model-services/grants")
+def model_service_grants(full_name: str = Query(...), user: UserInfo = Depends(get_current_user)):
+    """UC grants on one model service securable."""
+    return gateway_service.get_model_service_grants(full_name, user_token=user.token)
+
+
+@router.post("/model-services/grant")
+def model_service_grant(body: ModelServiceGrant, request: Request, user: UserInfo = Depends(require_admin)):
+    """Add/remove UC privileges on a model service. Admin-gated (workspace admin),
+    mirroring the app's v1 local permission writes: the write prefers the user's OBO
+    token (UC-enforced) but OBO can't carry the `unity-catalog` scope, so it falls
+    back to the app SP, which has MANAGE. The require_admin gate is the authorization
+    boundary; writes are SP-attributed in the audit trail."""
+    token = request.headers.get("x-forwarded-access-token", "") or user.token
+    return gateway_service.set_model_service_grant(
+        body.full_name, body.principal, body.add, body.remove, user_token=token,
+    )
+
+
+@router.get("/endpoint-inventory")
+def endpoint_inventory():
+    """Account-wide served-entity inventory (read-only) from
+    system.serving.served_entities — all serving endpoints across every workspace in
+    the metastore, not just the deploy workspace. Live management stays per-workspace."""
+    return gateway_service.get_endpoint_inventory()
+
+
+@router.get("/uag-budget-status")
+def uag_budget_status():
+    """Read-only budget configuration inventory from the account Budgets API
+    (/api/2.1/accounts/{id}/budgets): per-budget cap thresholds, enforce
+    (BLOCK_USAGE) vs alert-only, filter, and AI-relevance. Fleet-wide view;
+    enforcement stays platform-side. Empty when the workflow had no account
+    credentials to read the (account-scoped) API."""
+    return gateway_service.get_uag_budget_status()
 
 
 @router.get("/uag-mcp-tools")

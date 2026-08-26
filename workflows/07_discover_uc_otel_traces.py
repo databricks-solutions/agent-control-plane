@@ -137,6 +137,8 @@ TOOL_USAGE_SCHEMA = StructType([
     StructField("span_type",     StringType(), False),   # TOOL | RETRIEVER
     StructField("call_count",    LongType(),   True),
     StructField("trace_count",   LongType(),   True),
+    StructField("error_count",   LongType(),   True),     # spans with status_code != OK
+    StructField("total_latency_ms", DoubleType(), True),  # summed span duration (for avg = /call_count)
     StructField("last_seen",     StringType(), True),
     StructField("discovered_at", TimestampType(), False),
 ])
@@ -597,6 +599,9 @@ for cat, sch, tbl in trace_log_tables:
                    trim(BOTH '"' FROM s.attributes['mlflow.spanType'])       AS span_type,
                    COUNT(*)                                                 AS call_count,
                    COUNT(DISTINCT trace_id)                                 AS trace_count,
+                   SUM(CASE WHEN upper(COALESCE(s.status_code, '')) NOT IN ('OK', 'STATUS_CODE_OK', '')
+                            THEN 1 ELSE 0 END)                              AS error_count,
+                   SUM((unix_micros(s.end_time) - unix_micros(s.start_time)) / 1000.0) AS total_latency_ms,
                    CAST(MAX(request_time) AS STRING)                        AS last_seen
             FROM src LATERAL VIEW explode(spans) t AS s
             WHERE trim(BOTH '"' FROM s.attributes['mlflow.spanType']) IN ('TOOL', 'RETRIEVER')
@@ -606,6 +611,8 @@ for cat, sch, tbl in trace_log_tables:
         for r in agg:
             tool_usage_rows.append((r["experiment_id"], r["tool_name"], r["span_type"],
                                     int(r["call_count"] or 0), int(r["trace_count"] or 0),
+                                    int(r["error_count"] or 0),
+                                    float(r["total_latency_ms"] or 0.0),
                                     r["last_seen"], NOW))
         print(f"  ✅ tool-usage {label}: {len(agg)} (tool,type) rows")
     except Exception as exc:
