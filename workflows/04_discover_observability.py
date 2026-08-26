@@ -822,11 +822,25 @@ if model_rows:
             ))
     print(f"  ✅ enumerated {len(version_rows)} model versions across {len(_model_names)} models")
 
+try:
+    _mv_table_exists = spark.catalog.tableExists(MODEL_VERSIONS_TABLE)
+except Exception:
+    _mv_table_exists = False
+
 if version_rows:
     spark.createDataFrame(version_rows, MODEL_VERSIONS_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(MODEL_VERSIONS_TABLE)
+    print(f"✅ Wrote {len(version_rows)} rows to {MODEL_VERSIONS_TABLE}")
+elif model_rows and _mv_table_exists:
+    # Models exist but enumeration produced zero versions — almost certainly a
+    # transient/permission failure this run (real models virtually always have
+    # ≥1 version). Preserve the last-good table instead of overwriting it empty,
+    # which would blank the Model Registry drill-down for every model until the
+    # next fully-successful run. Self-heals on the next good run.
+    print(f"⚠️  0 versions enumerated for {len(model_rows)} models — preserving existing {MODEL_VERSIONS_TABLE} (assumed transient)")
 else:
+    # No registered models at all, or the table doesn't exist yet → (re)initialize empty.
     spark.createDataFrame([], MODEL_VERSIONS_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(MODEL_VERSIONS_TABLE)
-print(f"✅ Wrote {len(version_rows)} rows to {MODEL_VERSIONS_TABLE}")
+    print(f"✅ Wrote 0 rows to {MODEL_VERSIONS_TABLE}")
 
 # COMMAND ----------
 
