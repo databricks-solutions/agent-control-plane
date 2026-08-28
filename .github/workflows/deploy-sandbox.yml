@@ -1,0 +1,97 @@
+name: Deploy → Ecolab sandbox
+
+# Triggers a Databricks bundle deploy (workflow + app) into the Ecolab sandbox
+# workspace, then triggers the discovery workflow once and gates promotion on
+# the smoke_check_lakebase task. See docs/decisions/2026-06-06-cicd-deployment-pattern.md.
+#
+# This is the SANDBOX gate. Stage and prod deployments use sibling workflows
+# with their own secrets and approval rules.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_SANDBOX }}
+  DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID_SANDBOX }}
+  DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET_SANDBOX }}
+  BUNDLE_TARGET: dev
+
+jobs:
+  deploy-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: control-plane-app/package-lock.json
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Build frontend
+        working-directory: control-plane-app
+        run: |
+          npm ci
+          npm run build
+
+      - name: Bundle validate
+        working-directory: workflows
+        run: databricks bundle validate --target "$BUNDLE_TARGET"
+
+      - name: Bundle deploy
+        working-directory: workflows
+        run: databricks bundle deploy --target "$BUNDLE_TARGET"
+
+      - name: Deploy app
+        working-directory: control-plane-app
+        run: bash deploy.sh
+
+      - name: Trigger discovery workflow
+        id: trigger
+        run: |
+          # Find the deployed job ID from bundle state.
+          JOB_ID=$(databricks bundle summary --target "$BUNDLE_TARGET" --output json \
+            --working-dir workflows \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); jobs=d.get('resources',{}).get('jobs',{}); print(next(iter(jobs.values())).get('id',''))")
+          if [ -z "$JOB_ID" ]; then
+            echo "Could not resolve job ID from bundle summary"; exit 1
+          fi
+          echo "Triggering job $JOB_ID..."
+          RUN_ID=$(databricks jobs run-now "$JOB_ID" --output json | python3 -c "import sys,json; print(json.load(sys.stdin).get('run_id',''))")
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Triggered run $RUN_ID"
+
+      - name: Wait for run + gate on smoke check
+        run: |
+          RUN_ID="${{ steps.trigger.outputs.run_id }}"
+          # Poll until terminal. The smoke task runs last in the DAG; if it fails,
+          # the whole run reports result_state=FAILED.
+          while true; do
+            STATE=$(databricks jobs get-run "$RUN_ID" --output json \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); s=d.get('state',{}); print(s.get('life_cycle_state','')+'/'+(s.get('result_state') or '-'))")
+            echo "$(date -u +%FT%TZ) state=$STATE"
+            case "$STATE" in
+              TERMINATED/SUCCESS) echo "✅ Discovery + smoke passed."; exit 0 ;;
+              TERMINATED/*|INTERNAL_ERROR/*|SKIPPED/*)
+                echo "❌ Discovery run terminal with non-success: $STATE"
+                # Surface per-task results to the CI log so the smoke FAIL message lands
+                databricks jobs get-run "$RUN_ID" --output json \
+                  | python3 -c "
+                  import sys, json
+                  d = json.load(sys.stdin)
+                  for t in d.get('tasks', []):
+                      s = t.get('state', {})
+                      print(f\"  {t.get('task_key'):35s} {s.get('life_cycle_state'):12s} {s.get('result_state','-')}\")"
+                exit 1 ;;
+              *) sleep 30 ;;
+            esac
+          done
