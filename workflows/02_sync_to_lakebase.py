@@ -25,6 +25,29 @@ from pyspark.sql import SparkSession
 
 spark = SparkSession.builder.getOrCreate()
 
+
+def _dedupe(rows, key_idx, prefer=None):
+    """Collapse a batch to one row per conflict key before an
+    `execute_values(... ON CONFLICT (<key>) DO UPDATE ...)` upsert.
+
+    A single such command must NOT carry the same conflict key twice, or Postgres
+    raises CardinalityViolation ("ON CONFLICT DO UPDATE cannot affect row a second
+    time") — ON CONFLICT only resolves against *existing* rows, never intra-batch
+    duplicates. Row-level upserts that union multiple discovery sources (experiments
+    /runs/traces/trace-details/agents) can legitimately produce the same key twice;
+    GROUP BY-aggregated upserts are already unique by key and don't need this.
+
+    key_idx: tuple of value-tuple indices forming the conflict key.
+    prefer:  optional fn(row)->comparable; higher wins on collision (ties keep the
+             last seen). Use to preserve source-precedence (e.g. REST over system).
+    """
+    out = {}
+    for r in rows:
+        k = tuple(r[i] for i in key_idx)
+        if prefer is None or k not in out or prefer(r) >= prefer(out[k]):
+            out[k] = r
+    return list(out.values())
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -380,6 +403,9 @@ try:
                     _rg(r, "raw_signals"),
                 ))
 
+            # Dedupe on the ON CONFLICT key (agent_id) — after TRUNCATE the ON CONFLICT
+            # can only be hit by intra-batch dups, which it can't resolve (see _dedupe).
+            values = _dedupe(values, (0,))
             execute_values(cur, insert_sql, values, page_size=100)
             conn.commit()
         except Exception:
@@ -770,6 +796,11 @@ if all_experiments:
             exp.get("data_source", "system_table"),
             now,
         ))
+    # Dedupe on (workspace_id, experiment_id) to guard the upsert against an
+    # intra-batch duplicate key. Experiments are single-source today (system tables:
+    # all_experiments = st_experiments), so no cross-source precedence is needed;
+    # add a `prefer=` here if a REST experiment source is ever unioned in.
+    exp_values = _dedupe(exp_values, (1, 0))
     with obs_conn.cursor() as cur:
         execute_values(
             cur,
@@ -827,6 +858,8 @@ if st_runs:
             r.get("data_source", "system_table"),
             now,
         ))
+    # Dedupe on (workspace_id, run_id) before the upsert (guards intra-batch dups).
+    run_values = _dedupe(run_values, (1, 0))
     with obs_conn.cursor() as cur:
         execute_values(
             cur,
@@ -929,6 +962,10 @@ if delta_traces:
             r.data_source or "rest_api",
             now,
         ))
+    # Dedupe on (workspace_id, request_id) — delta_traces unions the default-backend
+    # and UC-OTel Delta tables (UC traces carry empty workspace_id), so the same
+    # request_id can appear twice in one batch.
+    trace_values = _dedupe(trace_values, (1, 0))
     with obs_conn.cursor() as cur:
         execute_values(
             cur,
@@ -977,6 +1014,9 @@ if delta_trace_details:
             r.source_type or "mlflow_rest",
             now,
         ))
+    # Dedupe on (workspace_id, request_id) — delta_trace_details unions the default
+    # and UC-OTel detail tables (UC details carry empty workspace_id).
+    detail_values = _dedupe(detail_values, (0, 1))
     if detail_values:
         with obs_conn.cursor() as cur:
             execute_values(
@@ -1124,14 +1164,21 @@ def _parse_gateway_payload(req_raw: str, resp_raw: str) -> dict:
     return out
 
 if gw_log_rows:
-    values = []
+    # Dedupe on the ON CONFLICT key (source_table, request_id) BEFORE the batch
+    # upsert. A single execute_values command must not carry the same conflict key
+    # twice, or Postgres raises CardinalityViolation ("ON CONFLICT DO UPDATE cannot
+    # affect row a second time"). The source inference-log tables can legitimately
+    # surface a request_id more than once per table, so collapse to one row per key,
+    # keeping the latest by request_time (string-coerced compare is None-safe and
+    # ISO-sortable).
+    by_key = {}
     for r in gw_log_rows:
         rid = r.request_id
         src = r.source_table
         if not rid or not src:
             continue
         parsed = _parse_gateway_payload(r.request_payload or "", r.response_payload or "")
-        values.append((
+        row = (
             rid, src,
             r.client_request_id,
             r.request_time,
@@ -1150,7 +1197,12 @@ if gw_log_rows:
             parsed["finish_reason"],
             parsed["tool_call_count"],
             now,
-        ))
+        )
+        key = (src, rid)
+        prev = by_key.get(key)
+        if prev is None or str(row[3] or "") >= str(prev[3] or ""):
+            by_key[key] = row
+    values = list(by_key.values())
     if values:
         with obs_conn.cursor() as cur:
             execute_values(
