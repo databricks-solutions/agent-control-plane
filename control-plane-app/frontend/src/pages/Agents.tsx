@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { useQueryClient, useIsFetching } from '@tanstack/react-query'
 import { usePinnedAgents } from '@/lib/usePinnedAgents'
 import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
-import { WorkspaceSelect } from '@/components/WorkspaceSelect'
+import { WorkspaceSelect, workspaceOption } from '@/components/WorkspaceSelect'
 import {
   useAllAgentsMerged,
   useDiscoveryStatus,
@@ -12,6 +12,7 @@ import {
   useGatewayUsageSummary,
   useGatewayUsageTimeseries,
   useGatewayUsageByUser,
+  useWorkspaceDirectory,
 } from '@/api/hooks'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -119,6 +120,7 @@ function OverviewTab() {
   const { data: discoveryStatus } = useDiscoveryStatus()
   const syncAgents = useSyncAgents()
   const { pinned, togglePin } = usePinnedAgents()
+  const { data: wsDir } = useWorkspaceDirectory()
 
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
@@ -341,7 +343,7 @@ function OverviewTab() {
           <WorkspaceSelect
             value={workspaceId}
             onChange={(v) => { setWorkspaceId(v); setPage(0) }}
-            options={workspaces.map((ws) => ({ value: String(ws), label: String(ws) }))}
+            options={workspaces.map((ws) => workspaceOption(String(ws), wsDir))}
             allValue={ALL_WORKSPACES}
             showIcon={false}
             className="border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm bg-white dark:bg-gray-700 dark:text-gray-200"

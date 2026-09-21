@@ -468,6 +468,22 @@ export function useWorkspaceHosts() {
   })
 }
 
+export interface WorkspaceMeta { host: string; name: string; deployment_name: string }
+
+/** workspace_id → {host, name, deployment_name} from the Lakebase-cached registry.
+ * Used to label the workspace picker with human-readable names instead of numeric
+ * ids. Small and static-ish, so cache generously. */
+export function useWorkspaceDirectory() {
+  return useQuery({
+    queryKey: ['mlflow', 'workspace-directory'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/mlflow/workspace-directory')
+      return (data || {}) as Record<string, WorkspaceMeta>
+    },
+    staleTime: 10 * 60_000,
+  })
+}
+
 // ── AI Gateway (real Databricks data) ───────────────────────────
 // Backend caches for 10 min; match that on the client so React Query
 // never refetches while the server-side cache is still fresh.

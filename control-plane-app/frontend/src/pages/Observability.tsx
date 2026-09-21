@@ -10,12 +10,13 @@ import {
   useMlflowModelVersions,
   useMlflowObservabilityWorkspaces,
   useWorkspaceHosts,
+  useWorkspaceDirectory,
   useAgentToolUsage,
   useAiAudit,
 } from '@/api/hooks'
 import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
 import { RefreshButton } from '@/components/RefreshButton'
-import { WorkspaceSelect } from '@/components/WorkspaceSelect'
+import { WorkspaceSelect, workspaceOption } from '@/components/WorkspaceSelect'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { KpiCard } from '@/components/KpiCard'
@@ -182,6 +183,7 @@ export default function ObservabilityPage() {
   const mlflowLastSynced = mlflowUpdatedAt ? new Date(mlflowUpdatedAt).toISOString() : null
   const { data: obsWorkspaces } = useMlflowObservabilityWorkspaces()
   const { data: workspaceHosts } = useWorkspaceHosts()
+  const { data: wsDir } = useWorkspaceDirectory()
 
   // The workspace_id value to pass to hooks: undefined means current workspace (no param sent)
   const wsParam = selectedWs || undefined
@@ -203,10 +205,8 @@ export default function ObservabilityPage() {
             onChange={(v) => setSelectedWs(v || 'all')}
             options={(obsWorkspaces || [])
               .filter((ws) => ws.trace_count > 0)
-              .map((ws) => ({
-                value: String(ws.workspace_id),
-                label: `Workspace ${ws.workspace_id} (${ws.trace_count} traces)`,
-              }))}
+              .map((ws) =>
+                workspaceOption(String(ws.workspace_id), wsDir, `${ws.trace_count} traces`))}
             allValue="all"
             className="text-xs border border-gray-300 dark:border-gray-600 rounded-md px-2.5 py-1.5 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300"
           />

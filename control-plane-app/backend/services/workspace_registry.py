@@ -136,6 +136,40 @@ def get_all_workspace_hosts() -> Dict[str, str]:
     return result
 
 
+def get_workspace_directory() -> Dict[str, Dict[str, str]]:
+    """Return workspace_id → {host, name, deployment_name} from the Lakebase
+    registry (cached data only — no live Account API / system-table call on the
+    request path). Powers human-readable labels in the workspace picker so users
+    can find/search a workspace by name instead of a numeric id.
+
+    workspace_name / deployment_name are populated by the discovery workflow
+    (04_discover_observability, from system.access.workspaces_latest + the Account
+    API). Values may be empty for workspaces resolved by host only; the frontend
+    falls back to the id label in that case.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    try:
+        rows = execute_query(
+            "SELECT workspace_id, workspace_host, workspace_name, deployment_name "
+            "FROM workspace_registry"
+        )
+        for r in rows:
+            out[r["workspace_id"]] = {
+                "host": r.get("workspace_host") or "",
+                "name": r.get("workspace_name") or "",
+                "deployment_name": r.get("deployment_name") or "",
+            }
+    except Exception:
+        pass
+    # Overlay in-memory host cache (names unknown there — host only).
+    with _cache_lock:
+        for wid, host in _registry_cache.items():
+            entry = out.setdefault(wid, {"host": "", "name": "", "deployment_name": ""})
+            if not entry.get("host"):
+                entry["host"] = host
+    return out
+
+
 # ── Populate registry via Account API ────────────────────────────
 
 def _get_account_id() -> Optional[str]:

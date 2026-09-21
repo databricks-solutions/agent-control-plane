@@ -17,10 +17,11 @@ import {
   useKBTopWorkspacesDaily,
   useVSTopWorkspacesDaily,
   useLBTopWorkspacesDaily,
+  useWorkspaceDirectory,
 } from '@/api/hooks'
 import { apiClient } from '@/api/client'
 import { RefreshButton } from '@/components/RefreshButton'
-import { WorkspaceSelect } from '@/components/WorkspaceSelect'
+import { WorkspaceSelect, workspaceOption } from '@/components/WorkspaceSelect'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { KpiCard } from '@/components/KpiCard'
@@ -90,6 +91,7 @@ export default function VectorSearchPage() {
 
   // Fetch overview for workspace list in filter dropdown
   const { data: overviewForFilter } = useKnowledgeBasesOverview(days)
+  const { data: wsDir } = useWorkspaceDirectory()
 
   const handleRefresh = async () => {
     try {
@@ -114,10 +116,8 @@ export default function VectorSearchPage() {
           <WorkspaceSelect
             value={selectedWs || ''}
             onChange={(v) => setSelectedWs(v || null)}
-            options={(overviewForFilter?.top_workspaces || []).map((ws: any) => ({
-              value: String(ws.workspace_id),
-              label: `WS ${ws.workspace_id}`,
-            }))}
+            options={(overviewForFilter?.top_workspaces || []).map((ws: any) =>
+              workspaceOption(String(ws.workspace_id), wsDir))}
             allValue=""
             className="text-xs border border-gray-300 dark:border-gray-600 rounded-md px-2.5 py-1.5 bg-white dark:bg-gray-800 dark:text-gray-200"
           />

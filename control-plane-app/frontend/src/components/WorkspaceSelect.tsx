@@ -10,6 +10,32 @@ export interface WorkspaceOption {
   keywords?: string
 }
 
+/** Metadata shape from useWorkspaceDirectory (subset used for labelling). */
+export interface WorkspaceDirMeta { name?: string; deployment_name?: string }
+
+/**
+ * Build a WorkspaceOption for a workspace id, leading with its human-readable
+ * name (falling back to deployment name, then "WS <id>"). `suffix` appends a
+ * per-page detail (e.g. "4 endpoints"). The id and deployment name are folded
+ * into `keywords` so the picker still matches when a user types the numeric id.
+ */
+export function workspaceOption(
+  id: string,
+  dir?: Record<string, WorkspaceDirMeta>,
+  suffix?: string,
+): WorkspaceOption {
+  const meta = (dir && dir[id]) || {}
+  const name = (meta.name || meta.deployment_name || '').trim()
+  const base = name || `WS ${id}`
+  return {
+    value: id,
+    label: suffix ? `${base} · ${suffix}` : base,
+    // Always searchable by id; include the deployment name and, when we lead with
+    // a name, the "WS <id>" form too, so every prior search term still matches.
+    keywords: `${id} ${meta.deployment_name || ''} ${name ? `WS ${id}` : ''}`.trim(),
+  }
+}
+
 interface WorkspaceSelectProps {
   value: string
   onChange: (value: string) => void

@@ -232,6 +232,19 @@ async def list_workspace_hosts():
         raise HTTPException(status_code=502, detail=f"Workspace registry error: {e}")
 
 
+@router.get("/workspace-directory")
+async def list_workspace_directory():
+    """Return workspace_id → {host, name, deployment_name} from the Lakebase
+    registry (cached; no live query). Powers human-readable, searchable labels in
+    the workspace picker so a workspace can be found by name instead of a numeric id.
+    """
+    try:
+        from backend.services.workspace_registry import get_workspace_directory
+        return get_workspace_directory()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Workspace directory error: {e}")
+
+
 @router.post("/refresh-cache")
 async def refresh_cache(request: Request):
     """Trigger a cross-workspace observability cache refresh via system tables.

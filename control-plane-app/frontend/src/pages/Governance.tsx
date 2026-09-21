@@ -4,12 +4,13 @@ import {
   useBillingPageData,
   useBillingRefresh,
   useBillingCacheStatus,
+  useWorkspaceDirectory,
   type BillingPageData,
   type CostByTagRow,
   type ExternalModelSpendRow,
 } from '@/api/hooks'
 import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
-import { WorkspaceSelect, type WorkspaceOption } from '@/components/WorkspaceSelect'
+import { WorkspaceSelect, workspaceOption, type WorkspaceOption } from '@/components/WorkspaceSelect'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { KpiCard } from '@/components/KpiCard'
@@ -77,12 +78,14 @@ function WorkspaceSelector({
   workspaces: BillingPageData['workspaces']
   isLoading: boolean
 }) {
-  const options: WorkspaceOption[] = (workspaces || []).map((ws) => ({
-    value: String(ws.workspace_id),
-    label:
-      `WS ${ws.workspace_id}` +
-      (Number(ws.endpoint_count) > 0 ? ` · ${ws.endpoint_count} endpoints` : ''),
-  }))
+  const { data: wsDir } = useWorkspaceDirectory()
+  const options: WorkspaceOption[] = (workspaces || []).map((ws) =>
+    workspaceOption(
+      String(ws.workspace_id),
+      wsDir,
+      Number(ws.endpoint_count) > 0 ? `${ws.endpoint_count} endpoints` : undefined,
+    ),
+  )
   return (
     <WorkspaceSelect
       value={value}
