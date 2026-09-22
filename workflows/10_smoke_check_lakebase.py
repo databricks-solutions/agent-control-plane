@@ -111,6 +111,12 @@ EXPECTED = [
     # 0 rows allowed before first user activity).
     "tool_registry",
     "request_logs",
+    # App registries now ensured in Phase 7 too (canonical DDL: backend/app_schema.py).
+    # Promoted from OPTIONAL → EXPECTED so a missing table (which 500'd /agents,
+    # /kpis, /analytics/cost on a fresh deploy) is caught here instead of in prod.
+    "agent_registry",
+    "model_registry",
+    "gateway_budgets",
 ]
 
 OPTIONAL = [
@@ -119,7 +125,6 @@ OPTIONAL = [
     "playground_messages",
     "workspace_registry",
     "agent_permissions_cache",
-    "agent_registry",
 ]
 
 # COMMAND ----------
