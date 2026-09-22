@@ -89,26 +89,44 @@ def _seed_from_env():
 
 # ── Resolve workspace_id → host URL ─────────────────────────────
 
-# Only these host suffixes are accepted as Databricks workspace hosts. The
-# registry host is used to mint the app service principal's OAuth token
-# (client_credentials → {host}/oidc/v1/token), so an attacker-influenced host
-# would receive the SP's client_id/secret. Validate before storing AND before
-# use so those credentials can never be sent anywhere but a real Databricks
-# workspace. Extend this list for other Databricks clouds/regions as needed.
-_ALLOWED_WORKSPACE_HOST_SUFFIXES = (
-    ".cloud.databricks.com",    # AWS commercial
-    ".gcp.databricks.com",      # GCP
-    ".azuredatabricks.net",     # Azure
-    ".cloud.databricks.us",     # AWS GovCloud
+# Host suffixes accepted as Databricks workspace hosts. The registry host is
+# used to mint the app service principal's OAuth token (client_credentials →
+# {host}/oidc/v1/token), so an attacker-influenced host would receive the SP's
+# client_id/secret. Validate before storing AND before use so those credentials
+# can never be sent anywhere but a real Databricks workspace.
+#
+# These are Databricks-operated apex domains — their subdomains cannot be
+# registered by a third party — so the defaults cover every region/cloud
+# (AWS commercial + GovCloud, Azure commercial + Gov, GCP, dev/staging) without
+# enumerating each host pattern. Workspaces on a custom PrivateLink / vanity
+# domain (not under a Databricks apex) must be allowed via the comma-separated
+# EXTRA_WORKSPACE_HOST_SUFFIXES env var so they aren't silently dropped.
+_DEFAULT_WORKSPACE_HOST_SUFFIXES = (
+    ".databricks.com",       # AWS commercial (*.cloud.*), GCP (*.gcp.*), dev/staging
+    ".azuredatabricks.net",  # Azure commercial
+    ".databricks.us",        # AWS GovCloud (*.cloud.databricks.us)
+    ".databricks.azure.us",  # Azure Government
 )
 
 
+def _allowed_host_suffixes() -> tuple:
+    """Default Databricks apex suffixes plus any operator-configured extras."""
+    import os
+    raw = os.environ.get("EXTRA_WORKSPACE_HOST_SUFFIXES", "")
+    extras = tuple(
+        (s.strip().lower() if s.strip().startswith(".") else "." + s.strip().lower())
+        for s in raw.split(",") if s.strip()
+    )
+    return _DEFAULT_WORKSPACE_HOST_SUFFIXES + extras
+
+
 def is_valid_workspace_host(host: Optional[str]) -> bool:
-    """True only for an https Databricks workspace host on a known cloud domain.
+    """True only for an https Databricks workspace host on an allowed domain.
 
     Guards the credential-forwarding paths: the SP OAuth client_id/secret is
     POSTed to ``{host}/oidc/v1/token`` for cross-workspace calls, so ``host``
     must be provably a Databricks workspace, never a caller-supplied endpoint.
+    Custom PrivateLink/vanity domains are supported via EXTRA_WORKSPACE_HOST_SUFFIXES.
     """
     if not host:
         return False
@@ -120,7 +138,7 @@ def is_valid_workspace_host(host: Optional[str]) -> bool:
     if parsed.scheme != "https" or not parsed.hostname:
         return False
     hostname = parsed.hostname.lower()
-    return any(hostname.endswith(suffix) for suffix in _ALLOWED_WORKSPACE_HOST_SUFFIXES)
+    return any(hostname.endswith(suffix) for suffix in _allowed_host_suffixes())
 
 
 def get_workspace_host(workspace_id: str) -> Optional[str]:

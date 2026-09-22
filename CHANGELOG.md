@@ -47,10 +47,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registry host is used to mint the app service principal's OAuth token
   (`client_credentials` → `{host}/oidc/v1/token`) for cross-workspace calls, so
   a bad host would leak the SP `client_id`/`secret`. Hosts are now checked
-  against a Databricks-cloud allowlist (`*.cloud.databricks.com` /
-  `*.azuredatabricks.net` / `*.gcp.databricks.com` / `*.cloud.databricks.us`,
-  https only) at store time (`_upsert_workspace`), at read time
-  (`get_workspace_host`), and again immediately before each token POST.
+  against a Databricks-operated apex allowlist (`*.databricks.com` /
+  `*.azuredatabricks.net` / `*.databricks.us` / `*.databricks.azure.us`, https
+  only — covering every region/cloud) at store time (`_upsert_workspace`), at
+  read time (`get_workspace_host`), and again immediately before each token
+  POST. Custom PrivateLink / vanity workspace domains are added via the
+  `EXTRA_WORKSPACE_HOST_SUFFIXES` env var so they aren't silently dropped.
 
 ### Fixed
 - **Workspace admins no longer see "No workspace access".** `get_allowed_workspace_ids`

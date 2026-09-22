@@ -23,6 +23,8 @@ class TestIsValidWorkspaceHost:
             "adb-1234567890.4.azuredatabricks.net",
             "x.gcp.databricks.com",
             "ws.cloud.databricks.us",                    # AWS GovCloud
+            "ws.databricks.azure.us",                    # Azure Government
+            "vanity.databricks.com",                     # any Databricks apex subdomain
         ]:
             assert is_valid_workspace_host(host) is True, host
 
@@ -31,12 +33,26 @@ class TestIsValidWorkspaceHost:
             "http://x.cloud.databricks.com",             # not https
             "https://evil.com",
             "https://cloud.databricks.com.evil.com",     # suffix-append trick
+            "https://databricks.com.evil.com",           # apex suffix-append trick
             "https://attacker.com/x.cloud.databricks.com",  # path trick
+            "https://ws.databricks.mycorp.com",          # custom domain, not allowlisted
             "not a url",
             "",
             None,
         ]:
             assert is_valid_workspace_host(host) is False, host
+
+    def test_extra_suffixes_env_allows_custom_privatelink_domain(self, monkeypatch):
+        host = "https://ws.databricks.mycorp.com"
+        assert is_valid_workspace_host(host) is False
+        # Operators onboard PrivateLink / vanity domains via env (with or
+        # without the leading dot) instead of a code change.
+        monkeypatch.setenv("EXTRA_WORKSPACE_HOST_SUFFIXES", "databricks.mycorp.com, .other.example.com")
+        assert is_valid_workspace_host(host) is True
+        assert is_valid_workspace_host("https://x.other.example.com") is True
+        # Still https-only and still suffix-anchored.
+        assert is_valid_workspace_host("http://ws.databricks.mycorp.com") is False
+        assert is_valid_workspace_host("https://databricks.mycorp.com.evil.com") is False
 
 
 class TestUpsertGuard:
