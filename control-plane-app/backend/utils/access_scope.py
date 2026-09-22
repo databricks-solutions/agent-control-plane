@@ -39,11 +39,29 @@ def get_allowed_workspace_ids(user: UserInfo) -> Optional[List[str]]:
 
     try:
         from backend.services.workspace_admins_service import get_admin_workspace_ids
-        return get_admin_workspace_ids(user.username)
+        ids = set(get_admin_workspace_ids(user.username))
     except Exception:
         # Fail closed: an access-scope lookup that can't be resolved must
         # not silently grant access.
-        return []
+        ids = set()
+
+    # A user whose OBO token resolved with workspace-admin rights is, by
+    # definition, an admin of the workspace that authenticated them — the
+    # deploy workspace this app runs in. Trust that directly so a workspace
+    # admin always sees the deploy workspace, even when the cross-workspace
+    # admins cache (populated via the account permission-assignments API) is
+    # empty or unavailable. Cross-workspace admin rights still come from the
+    # cache above.
+    if user.is_admin:
+        try:
+            from backend.services.billing_service import get_current_workspace_id
+            current = get_current_workspace_id()
+            if current:
+                ids.add(str(current))
+        except Exception:
+            pass
+
+    return sorted(ids)
 
 
 def sees_deploy_workspace(allowed_workspace_ids: Optional[List[str]]) -> bool:

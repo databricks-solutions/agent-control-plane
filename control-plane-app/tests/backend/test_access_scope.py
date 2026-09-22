@@ -74,6 +74,46 @@ class TestGetAllowedWorkspaceIds:
             allowed = get_allowed_workspace_ids(user)
         assert allowed == ["111"]  # scoped, not None ("everything")
 
+    def test_workspace_admin_sees_deploy_ws_when_cache_empty(self):
+        """Regression: a verified workspace admin (is_admin=True) whose
+        cross-workspace admins cache is EMPTY must still see the deploy
+        workspace — resolved from is_admin + the current workspace id — rather
+        than fail-closing to [] ("No workspace access")."""
+        user = _user(username="ws-admin@databricks.com", is_admin=True, is_account_admin=False)
+        with patch(
+            "backend.services.workspace_admins_service.get_admin_workspace_ids",
+            return_value=[],
+        ), patch(
+            "backend.services.billing_service.get_current_workspace_id",
+            return_value="7474647387698456",
+        ):
+            assert get_allowed_workspace_ids(user) == ["7474647387698456"]
+
+    def test_workspace_admin_unions_cache_with_deploy_ws(self):
+        """Cross-workspace admin rows (from the cache) are unioned with the
+        deploy workspace the admin's token authenticated against."""
+        user = _user(username="ws-admin@databricks.com", is_admin=True, is_account_admin=False)
+        with patch(
+            "backend.services.workspace_admins_service.get_admin_workspace_ids",
+            return_value=["222"],
+        ), patch(
+            "backend.services.billing_service.get_current_workspace_id",
+            return_value="111",
+        ):
+            assert get_allowed_workspace_ids(user) == ["111", "222"]
+
+    def test_non_admin_still_gets_empty_even_with_current_ws(self):
+        """A non-admin (is_admin=False) is never granted the deploy workspace."""
+        user = _user(username="plain@databricks.com", is_admin=False)
+        with patch(
+            "backend.services.workspace_admins_service.get_admin_workspace_ids",
+            return_value=[],
+        ), patch(
+            "backend.services.billing_service.get_current_workspace_id",
+            return_value="111",
+        ):
+            assert get_allowed_workspace_ids(user) == []
+
 
 class TestResolveScope:
     def test_account_admin_ignores_requested_workspace(self):

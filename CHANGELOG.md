@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HTML with a 200 (which masked typos/removed routes).
 
 ### Fixed
+- **Workspace admins no longer see "No workspace access".** `get_allowed_workspace_ids`
+  resolved a non-account-admin's scope solely from the `workspace_admins` cache
+  (populated via the account permission-assignments API). When that cache is empty
+  or the account API is unreachable, a verified workspace admin fell through to
+  `[]` and the whole dashboard blanked. It now also trusts `user.is_admin` for the
+  deploy workspace the caller's token authenticated against — unioned with any
+  cross-workspace cache rows — so an admin always sees the deploy workspace.
 - Config no longer performs a live Databricks identity call at import time
   (it hung `pytest` collection offline); the diagnostic runs at app startup.
 - Removed the orphaned `test_budgets_service.py` (tested a module deleted in
