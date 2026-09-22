@@ -48,10 +48,10 @@ async def websocket_endpoint(websocket: WebSocket):
             await asyncio.sleep(5)
             
             # Get recent requests
-            recent_requests = query_service.get_recent_requests(10)
-            
+            recent_requests = get_recent_requests(10)
+
             # Get agent status
-            agents = agent_service.get_all_agents(active_only=True)
+            agents = get_all_agents(active_only=True)
             
             # Send update
             await websocket.send_json({
