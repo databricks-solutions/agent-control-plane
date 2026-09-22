@@ -186,17 +186,29 @@ def get_workspace_host(workspace_id: str) -> Optional[str]:
 
 
 def get_all_workspace_hosts() -> Dict[str, str]:
-    """Return all workspace_id → host mappings (in-memory cache + Lakebase)."""
-    result: Dict[str, str] = {}
+    """Return all valid workspace_id → host mappings (in-memory cache + Lakebase).
+
+    Hosts that don't pass ``is_valid_workspace_host`` are dropped (and logged),
+    mirroring ``get_workspace_host``'s guard: consumers (e.g. cross-workspace app
+    discovery) mint the app SP token against these hosts, so an invalid or
+    poisoned row must never reach them.
+    """
+    merged: Dict[str, str] = {}
     # Start with Lakebase
     try:
         rows = execute_query("SELECT workspace_id, workspace_host FROM workspace_registry")
-        result = {r["workspace_id"]: r["workspace_host"] for r in rows}
+        merged = {r["workspace_id"]: r["workspace_host"] for r in rows}
     except Exception:
         pass
     # Overlay in-memory cache (includes WORKSPACE_HOSTS env entries)
     with _cache_lock:
-        result.update(_registry_cache)
+        merged.update(_registry_cache)
+    result: Dict[str, str] = {}
+    for ws_id, host in merged.items():
+        if is_valid_workspace_host(host):
+            result[ws_id] = host
+        else:
+            logger.warning("Dropping non-Databricks workspace host for %s: %r", ws_id, host)
     return result
 
 

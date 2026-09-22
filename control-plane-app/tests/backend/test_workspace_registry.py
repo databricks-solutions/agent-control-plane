@@ -11,6 +11,7 @@ from backend.services.workspace_registry import (
     is_valid_workspace_host,
     _upsert_workspace,
     get_workspace_host,
+    get_all_workspace_hosts,
     _registry_cache,
 )
 
@@ -83,3 +84,22 @@ class TestGetWorkspaceHostGuard:
             assert get_workspace_host("444") == "https://ws.cloud.databricks.com"
         finally:
             _registry_cache.pop("444", None)
+
+
+class TestGetAllWorkspaceHostsGuard:
+    def test_invalid_hosts_are_dropped(self):
+        # get_all_workspace_hosts feeds cross-workspace SP token minting
+        # (discovery_service._get_sp_token_for_host), so invalid/poisoned rows
+        # must be filtered out just like get_workspace_host does.
+        with patch(
+            "backend.services.workspace_registry.execute_query",
+            return_value=[
+                {"workspace_id": "1", "workspace_host": "https://good.cloud.databricks.com"},
+                {"workspace_id": "2", "workspace_host": "https://evil.com"},
+                {"workspace_id": "3", "workspace_host": "http://x.cloud.databricks.com"},
+            ],
+        ):
+            hosts = get_all_workspace_hosts()
+        assert hosts.get("1") == "https://good.cloud.databricks.com"
+        assert "2" not in hosts   # evil.com dropped
+        assert "3" not in hosts   # http:// dropped

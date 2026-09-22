@@ -1181,6 +1181,12 @@ def _discover_from_system_tables() -> List[Dict[str, Any]]:
 
 def _get_sp_token_for_host(host: str) -> Optional[str]:
     """Exchange SP M2M credentials for a token on a remote workspace."""
+    # Never POST the SP client credentials to anything that isn't a Databricks
+    # workspace host (get_all_workspace_hosts already filters, but guard here too).
+    from backend.services.workspace_registry import is_valid_workspace_host
+    if not is_valid_workspace_host(host):
+        logger.warning("Refusing SP token exchange to non-Databricks host: %r", host)
+        return None
     client_id = os.environ.get("DATABRICKS_CLIENT_ID", "")
     client_secret = os.environ.get("DATABRICKS_CLIENT_SECRET", "")
     if not client_id or not client_secret:
