@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Frontend delivery resilience** (review finding #8). Route pages are now
+  code-split with `React.lazy` (each is its own on-demand chunk) and the
+  heaviest vendor libraries (`react`, `recharts`, `@xyflow/react`) split into
+  long-cached chunks — the entry bundle drops from ~770 kB to ~180 kB. Added a
+  top-level `ErrorBoundary` so a render error shows a recoverable message
+  instead of a blank screen, and the header connection badge now reflects the
+  live `/health/status` check (Connected / Degraded / Disconnected) instead of
+  being hardcoded to "Connected".
+
 ### Security
 - **Removed caller-controlled credential-forwarding paths.** Deleted the
   `/admin/probe-cross-workspace` diagnostic route, which read the discovery SP

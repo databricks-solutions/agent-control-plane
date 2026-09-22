@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, Suspense } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import {
   Bot,
@@ -17,7 +17,7 @@ import {
 } from 'lucide-react'
 import DatabricksLogo from './DatabricksLogo'
 import { useTheme } from '@/context/ThemeContext'
-import { useCurrentUser } from '@/api/hooks'
+import { useCurrentUser, useHealthStatus } from '@/api/hooks'
 import AskGenieOverlay from './AskGenieOverlay'
 
 const navItems = [
@@ -36,6 +36,16 @@ export default function Layout() {
   const { theme, toggleTheme } = useTheme()
   const isDark = theme === 'dark'
   const { data: user } = useCurrentUser()
+
+  // Real connection health — /health/status checks DB connectivity every 30s.
+  const { data: health, isError: healthError, isLoading: healthLoading } = useHealthStatus()
+  const conn = healthError
+    ? { label: 'Disconnected', dot: 'bg-red-500', wrap: 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400', pulse: false }
+    : healthLoading && !health
+    ? { label: 'Connecting…', dot: 'bg-gray-400', wrap: 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300', pulse: true }
+    : health?.status === 'healthy'
+    ? { label: 'Connected', dot: 'bg-green-500', wrap: 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400', pulse: true }
+    : { label: 'Degraded', dot: 'bg-amber-500', wrap: 'bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400', pulse: false }
 
   // Per-tab alert badges (none currently).
   const badges: Record<string, number> = {}
@@ -174,10 +184,13 @@ export default function Layout() {
             )}
           </button>
 
-          {/* Connected badge */}
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded-full text-xs font-medium">
-            <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
-            Connected
+          {/* Connection health badge — reflects the live /health/status check */}
+          <span
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${conn.wrap}`}
+            title={health?.timestamp ? `Last checked ${new Date(health.timestamp).toLocaleTimeString()}` : undefined}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${conn.dot} ${conn.pulse ? 'animate-pulse' : ''}`} />
+            {conn.label}
           </span>
         </header>
 
@@ -190,7 +203,9 @@ export default function Layout() {
           {user && user.username !== 'anonymous' && user.has_workspace_access === false ? (
             <NoWorkspaceAccess displayName={user.display_name} />
           ) : (
-            <Outlet />
+            <Suspense fallback={<PageLoading />}>
+              <Outlet />
+            </Suspense>
           )}
         </main>
       </div>
@@ -198,6 +213,14 @@ export default function Layout() {
       {/* Floating chatbot — Ask Genie. Gated on FEATURE_GENIE_ENABLED;
           renders nothing when the flag is off so the bundle stays clean. */}
       <AskGenieOverlay />
+    </div>
+  )
+}
+
+function PageLoading() {
+  return (
+    <div className="h-full flex items-center justify-center py-20" role="status" aria-label="Loading">
+      <span className="w-6 h-6 rounded-full border-2 border-gray-300 dark:border-gray-600 border-t-db-red animate-spin" />
     </div>
   )
 }
