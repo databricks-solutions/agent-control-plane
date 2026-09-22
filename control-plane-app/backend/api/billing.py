@@ -32,13 +32,19 @@ router = APIRouter(prefix="/billing", tags=["billing"], dependencies=[Depends(ge
 def page_data(
     days: int = Query(default=30, ge=1, le=365),
     workspace_id: Optional[str] = Query(default=None),
+    workspace_ids: Optional[str] = Query(
+        default=None,
+        description="Comma-separated workspace ids for multi-select; when present, "
+                    "overrides workspace_id. Empty/omitted = all workspaces.",
+    ),
 ):
     """Return ALL billing data the Governance page needs in one round-trip.
 
     This avoids 7+ parallel HTTP requests that each open a new Lakebase
     connection (each taking ~1 s SSL handshake from local dev).
     """
-    return get_all_page_data(days, workspace_id=workspace_id)
+    ids = [w for w in (workspace_ids.split(",") if workspace_ids else []) if w]
+    return get_all_page_data(days, workspace_id=(ids or workspace_id))
 
 
 # ── cache management ─────────────────────────────────────────────

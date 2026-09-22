@@ -706,7 +706,7 @@ def get_cache_status() -> Dict[str, Any]:
 # COMPOSITE: single-request endpoint for the Governance page
 # =====================================================================
 
-def get_all_page_data(days: int = 30, workspace_id: Optional[str] = None) -> Dict[str, Any]:
+def get_all_page_data(days: int = 30, workspace_id: "str | list[str] | None" = None) -> Dict[str, Any]:
     """Return ALL billing data the Governance page needs in a single DB connection.
 
     Instead of 7+ parallel HTTP requests each opening a connection (~1 s SSL
@@ -717,14 +717,16 @@ def get_all_page_data(days: int = 30, workspace_id: Optional[str] = None) -> Dic
 
     maybe_refresh_async()
 
-    # Build workspace filter fragment + params
-    ws_filter = "AND workspace_id = %s" if workspace_id else ""
-    _p = lambda extra_days=True: (  # noqa: E731
-        (days, workspace_id) if (workspace_id and extra_days)
-        else (days,) if extra_days
-        else (workspace_id,) if workspace_id
-        else ()
-    )
+    # Build workspace filter fragment + params. workspace_id may be a single id
+    # (str) or a list of ids (multi-select); [] / None / "" means all workspaces.
+    if isinstance(workspace_id, (list, tuple)):
+        ws_ids = [str(w) for w in workspace_id if w]
+    elif workspace_id:
+        ws_ids = [str(workspace_id)]
+    else:
+        ws_ids = []
+    ws_filter = f"AND workspace_id IN ({', '.join(['%s'] * len(ws_ids))})" if ws_ids else ""
+    _p = lambda extra_days=True: ((days, *ws_ids) if extra_days else tuple(ws_ids))  # noqa: E731
 
     with DatabasePool.get_connection() as conn:
         cur = conn.cursor(cursor_factory=RealDictCursor)

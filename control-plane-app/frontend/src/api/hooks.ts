@@ -1297,12 +1297,12 @@ export interface ExternalModelSpendRow {
  * Runs ~12 small queries on 1 DB connection (~1 s) instead of that many
  * parallel requests each opening a new connection (~14 s from local dev).
  */
-export function useBillingPageData(days = 30, workspaceId?: string | null) {
+export function useBillingPageData(days = 30, workspaceIds?: string[] | null) {
   return useQuery({
-    queryKey: ['billing', 'page-data', days, workspaceId],
+    queryKey: ['billing', 'page-data', days, (workspaceIds || []).join(',')],
     queryFn: async () => {
       const params: any = { days }
-      if (workspaceId) params.workspace_id = workspaceId
+      if (workspaceIds && workspaceIds.length) params.workspace_ids = workspaceIds.join(',')
       const { data } = await apiClient.get('/billing/page-data', { params })
       // Ensure all array fields have defaults to prevent .map() crashes
       return {
