@@ -824,7 +824,10 @@ def get_all_page_data(days: int = 30, workspace_id: "str | list[str] | None" = N
         # 9. serving cost by user (precise per-endpoint attribution)
         # The outer query JOINs 3 sources that all have workspace_id,
         # so we must qualify with the table alias to avoid ambiguity.
-        ws_filter_u = "AND u.workspace_id = %s" if workspace_id else ""
+        # Aliased twin of ws_filter for the JOIN query below (u.workspace_id). Must
+        # use the same IN(...) shape / placeholder count as ws_filter so the _p()
+        # params line up (the cost-by-user query reuses _p() * 3).
+        ws_filter_u = f"AND u.workspace_id IN ({', '.join(['%s'] * len(ws_ids))})" if ws_ids else ""
         cur.execute(
             f"""WITH ep_costs AS (
                     SELECT usage_date, workspace_id, endpoint_name,
