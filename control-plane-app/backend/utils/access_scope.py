@@ -24,8 +24,17 @@ def get_allowed_workspace_ids(user: UserInfo) -> Optional[List[str]]:
         return None
 
     if not user.username or user.username == "service-principal":
-        # SP fallback (OBO not enabled) is intentionally never treated as
-        # an admin of anything — see backend.utils.auth._SP_FALLBACK.
+        # SP fallback identity — no per-user OBO token on this request
+        # (see backend.utils.auth._SP_FALLBACK).
+        from backend.config import settings
+        if not settings.obo_enabled:
+            # OBO is not configured for this deployment: there is no per-user
+            # identity to scope by, so preserve the app's historical
+            # single-identity "show everything" behaviour rather than
+            # fail-closing every endpoint to empty. Opt in via OBO_ENABLED=false.
+            return None
+        # OBO IS enabled but this request carried no token — anomalous; the SP
+        # fallback must never be treated as an admin of anything. Fail closed.
         return []
 
     try:
@@ -89,26 +98,40 @@ class NoAccess(Exception):
 
 
 def resolve_ws_ids(
-    workspace_id: Optional[str],
+    workspace_id: "Optional[str | List[str]]",
     allowed_workspace_ids: Optional[List[str]],
 ) -> Optional[List[str]]:
-    """Combine a single UI-requested ``workspace_id`` with the caller's
-    access scope into one ``ws_ids`` list usable for ``= ANY(%s)`` filtering.
+    """Combine a UI-requested workspace selection with the caller's access
+    scope into one ``ws_ids`` list usable for ``= ANY(%s)`` filtering.
 
-    ``allowed_workspace_ids``: None = no restriction (real account admin —
-    unchanged existing behaviour); [] or [ids...] = restrict to that scope.
-    Raises ``NoAccess`` when the combination is empty (either the caller has
-    no workspace access at all, or asked for one they aren't scoped to).
+    ``workspace_id`` may be a single id (str), a list of ids (the multi-select
+    workspace picker), or None/empty (no specific request). ``allowed_workspace_ids``:
+    None = no restriction (real account admin — unchanged existing behaviour);
+    [] or [ids...] = restrict to that scope. The effective result is the
+    caller's selection intersected with their allow-list. Raises ``NoAccess``
+    when the combination is empty (the caller has no workspace access at all,
+    or asked only for workspaces they aren't scoped to).
     """
+    # Normalize the UI request to a de-duped list of requested ids.
+    if isinstance(workspace_id, (list, tuple)):
+        requested = [str(w) for w in workspace_id if w]
+    elif workspace_id:
+        requested = [str(workspace_id)]
+    else:
+        requested = []
+
     if allowed_workspace_ids is not None:
-        if workspace_id:
-            ws_ids = [workspace_id] if workspace_id in allowed_workspace_ids else []
+        allowed_set = {str(x) for x in allowed_workspace_ids}
+        if requested:
+            # selection ∩ allow-list
+            ws_ids = [w for w in requested if w in allowed_set]
         else:
-            ws_ids = list(allowed_workspace_ids)
+            ws_ids = [str(x) for x in allowed_workspace_ids]
         if not ws_ids:
             raise NoAccess()
         return ws_ids
-    return [workspace_id] if workspace_id else None
+    # Account admin: no restriction — honour the requested selection as-is.
+    return requested or None
 
 
 def resolve_scope(user: UserInfo, requested_workspace_id: Optional[str]) -> Optional[List[str]]:

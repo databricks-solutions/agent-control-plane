@@ -845,7 +845,7 @@ def _empty_page_data() -> Dict[str, Any]:
 
 def get_all_page_data(
     days: int = 30,
-    workspace_id: Optional[str] = None,
+    workspace_id: "str | list[str] | None" = None,
     allowed_workspace_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Return ALL billing data the Governance page needs in a single DB connection.
@@ -866,13 +866,12 @@ def get_all_page_data(
     maybe_refresh_async()
 
     try:
+        # Combines the (single- or multi-select) workspace_id request with the
+        # caller's access scope; `= ANY(%s)` handles both a single id and a list.
         ws_ids = _resolve_ws_ids(workspace_id, allowed_workspace_ids)
     except _NoAccess:
         return _empty_page_data()
 
-    # Build workspace filter fragment + params. NOTE: `= ANY(%s)` with a list
-    # param also works correctly for the single-id case, so one code path
-    # covers both "pick one workspace" and "restrict to my admin workspaces".
     ws_filter = "AND workspace_id = ANY(%s)" if ws_ids is not None else ""
     _p = lambda extra_days=True: (  # noqa: E731
         (days, ws_ids) if (ws_ids is not None and extra_days)
@@ -979,6 +978,7 @@ def get_all_page_data(
         # 9. serving cost by user (precise per-endpoint attribution)
         # The outer query JOINs 3 sources that all have workspace_id,
         # so we must qualify with the table alias to avoid ambiguity.
+        # Aliased twin of ws_filter for the JOIN query below (u.workspace_id).
         ws_filter_u = "AND u.workspace_id = ANY(%s)" if ws_ids is not None else ""
         cur.execute(
             f"""WITH ep_costs AS (

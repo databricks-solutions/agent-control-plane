@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from databricks.sdk import WorkspaceClient
 
-from backend.config import get_databricks_host, get_databricks_headers, _get_workspace_client
+from backend.config import get_databricks_host, get_databricks_headers, get_databricks_account_host, _get_workspace_client
 from backend.database import execute_query, execute_update, execute_one
 
 import logging
@@ -223,7 +223,7 @@ def refresh_workspace_registry(user_token: Optional[str] = None) -> int:
         logger.warning("Cannot refresh workspace registry: DATABRICKS_ACCOUNT_ID not set")
         return 0
 
-    account_url = f"https://accounts.cloud.databricks.com/api/2.0/accounts/{account_id}/workspaces"
+    account_url = f"{get_databricks_account_host()}/api/2.0/accounts/{account_id}/workspaces"
     workspaces = None
 
     # Strategy 1: OBO token → Accounts API (direct)

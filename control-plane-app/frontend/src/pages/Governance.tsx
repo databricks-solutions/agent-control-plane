@@ -68,13 +68,13 @@ const ALL_WORKSPACES = '__all__'
 // Build v2 – default "All Workspaces" (no auto-select)
 
 function WorkspaceSelector({
-  value,
+  values,
   onChange,
   workspaces,
   isLoading,
 }: {
-  value: string
-  onChange: (ws: string) => void
+  values: string[]
+  onChange: (ws: string[]) => void
   workspaces: BillingPageData['workspaces']
   isLoading: boolean
 }) {
@@ -88,8 +88,9 @@ function WorkspaceSelector({
   )
   return (
     <WorkspaceSelect
-      value={value}
-      onChange={onChange}
+      multiple
+      values={values}
+      onChangeMulti={onChange}
       options={options}
       allValue={ALL_WORKSPACES}
       disabled={isLoading}
@@ -106,11 +107,16 @@ export default function GovernancePage() {
   // Track local refresh completion time so the age display updates immediately
   const [localRefreshTime, setLocalRefreshTime] = useState<Date | null>(null)
 
-  // Convert selector value to the param we pass to the composite hook
-  const wsParam = workspaceId === ALL_WORKSPACES ? undefined : workspaceId
+  // Multi-select workspace filter. The persisted value is a comma-joined list of
+  // ids (or the ALL_WORKSPACES sentinel = every workspace).
+  const workspaceIds = workspaceId && workspaceId !== ALL_WORKSPACES
+    ? workspaceId.split(',').filter(Boolean)
+    : []
+  const setWorkspaceIds = (ids: string[]) =>
+    setWorkspaceId(ids.length ? ids.join(',') : ALL_WORKSPACES)
 
   // ★ Single composite fetch: ALL billing data in one request (~0.8 s)
-  const { data: pageData, isLoading } = useBillingPageData(days, wsParam)
+  const { data: pageData, isLoading } = useBillingPageData(days, workspaceIds)
 
   // Refresh mutation (still separate — it's a POST, not a read)
   const refreshMutation = useBillingRefresh()
@@ -186,8 +192,8 @@ export default function GovernancePage() {
           </div>
 
           <WorkspaceSelector
-            value={workspaceId}
-            onChange={setWorkspaceId}
+            values={workspaceIds}
+            onChange={setWorkspaceIds}
             workspaces={pageData?.workspaces || []}
             isLoading={isLoading}
           />

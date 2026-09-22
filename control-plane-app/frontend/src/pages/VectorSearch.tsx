@@ -82,7 +82,7 @@ type TabId = (typeof TABS)[number]['id']
 export default function VectorSearchPage() {
   const [tab, setTab] = useState<TabId>('overview')
   const [days, setDays] = useState(30)
-  const [selectedWs, setSelectedWs] = useState<string | null>(null)
+  const [selectedWsIds, setSelectedWsIds] = useState<string[]>([])
 
   const queryClient = useQueryClient()
   const isFetching = useIsFetching({ queryKey: ['vector-search'] }) > 0
@@ -114,8 +114,9 @@ export default function VectorSearchPage() {
         </div>
         <div className="flex items-center gap-3">
           <WorkspaceSelect
-            value={selectedWs || ''}
-            onChange={(v) => setSelectedWs(v || null)}
+            multiple
+            values={selectedWsIds}
+            onChangeMulti={setSelectedWsIds}
             options={(overviewForFilter?.top_workspaces || []).map((ws: any) =>
               workspaceOption(String(ws.workspace_id), wsDir))}
             allValue=""
@@ -153,9 +154,9 @@ export default function VectorSearchPage() {
       </div>
 
       {/* Tab content */}
-      {tab === 'overview' && <OverviewTab days={days} setDays={setDays} selectedWs={selectedWs} />}
-      {tab === 'vector-search' && <VectorSearchTab days={days} setDays={setDays} selectedWs={selectedWs} />}
-      {tab === 'lakebase' && <LakebaseTab days={days} setDays={setDays} selectedWs={selectedWs} />}
+      {tab === 'overview' && <OverviewTab days={days} setDays={setDays} selectedWsIds={selectedWsIds} />}
+      {tab === 'vector-search' && <VectorSearchTab days={days} setDays={setDays} selectedWsIds={selectedWsIds} />}
+      {tab === 'lakebase' && <LakebaseTab days={days} setDays={setDays} selectedWsIds={selectedWsIds} />}
     </div>
   )
 }
@@ -179,7 +180,7 @@ function SortIcon({ sortCol, sortDir, col }: { sortCol: string; sortDir: 'asc' |
 
 /* ── Overview Tab ────────────────────────────────────────────── */
 
-function OverviewTab({ days, setDays, selectedWs }: { days: number; setDays: (d: number) => void; selectedWs: string | null }) {
+function OverviewTab({ days, setDays, selectedWsIds }: { days: number; setDays: (d: number) => void; selectedWsIds: string[] }) {
   const { data: overview, isLoading: overviewLoading } = useKnowledgeBasesOverview(days)
   const { data: costTrend, isLoading: trendLoading } = useKnowledgeBasesCostTrend(days)
   const { data: kbTopWsDaily } = useKBTopWorkspacesDaily(days)
@@ -252,9 +253,9 @@ function OverviewTab({ days, setDays, selectedWs }: { days: number; setDays: (d:
 
   // Filter workspaces by selected workspace
   const filteredWorkspaces = useMemo(() => {
-    if (!selectedWs) return topWorkspaces
-    return topWorkspaces.filter((w: any) => w.workspace_id === selectedWs)
-  }, [topWorkspaces, selectedWs])
+    if (!selectedWsIds.length) return topWorkspaces
+    return topWorkspaces.filter((w: any) => selectedWsIds.includes(String(w.workspace_id)))
+  }, [topWorkspaces, selectedWsIds])
 
   // Sorted + paginated workspaces
   const sortedOwWorkspaces = useMemo(() => {
@@ -438,7 +439,7 @@ function OverviewTab({ days, setDays, selectedWs }: { days: number; setDays: (d:
 
 /* ── Vector Search Tab ──────────────────────────────────────── */
 
-function VectorSearchTab({ days, setDays, selectedWs }: { days: number; setDays: (d: number) => void; selectedWs: string | null }) {
+function VectorSearchTab({ days, setDays, selectedWsIds }: { days: number; setDays: (d: number) => void; selectedWsIds: string[] }) {
   const { data, isLoading: pageLoading } = useVectorSearchPageData(days)
   const { data: indexDetails, isLoading: idxLoading } = useVectorSearchIndexDetails()
   const { data: healthHistory } = useVectorSearchHealthHistory(days)
@@ -514,9 +515,9 @@ function VectorSearchTab({ days, setDays, selectedWs }: { days: number; setDays:
 
   // Filter workspaces by selected workspace
   const filteredVsWorkspaces = useMemo(() => {
-    if (!selectedWs) return pagedWorkspaces
-    return sortedWorkspaces.filter((w: any) => w.workspace_id === selectedWs)
-  }, [sortedWorkspaces, pagedWorkspaces, selectedWs])
+    if (!selectedWsIds.length) return pagedWorkspaces
+    return sortedWorkspaces.filter((w: any) => selectedWsIds.includes(String(w.workspace_id)))
+  }, [sortedWorkspaces, pagedWorkspaces, selectedWsIds])
 
   // Health KPIs
   const safeIndexDetails = Array.isArray(indexDetails) ? indexDetails : []
@@ -668,7 +669,7 @@ function VectorSearchTab({ days, setDays, selectedWs }: { days: number; setDays:
                   </tbody>
                 </table>
               </div>
-              {!selectedWs && (
+              {selectedWsIds.length === 0 && (
                 <TablePagination
                   page={wsPage}
                   totalItems={sortedWorkspaces.length}
@@ -808,7 +809,7 @@ function VectorSearchTab({ days, setDays, selectedWs }: { days: number; setDays:
 
 /* ── Lakebase Tab ────────────────────────────────────────────── */
 
-function LakebaseTab({ days, setDays, selectedWs }: { days: number; setDays: (d: number) => void; selectedWs: string | null }) {
+function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: (d: number) => void; selectedWsIds: string[] }) {
   const { data: costSummary, isLoading: summaryLoading } = useLakebaseCostSummary(days)
   const { data: costTrend, isLoading: trendLoading } = useLakebaseCostTrend(days)
   const { data: instances, isLoading: instancesLoading } = useLakebaseInstances()
@@ -894,9 +895,9 @@ function LakebaseTab({ days, setDays, selectedWs }: { days: number; setDays: (d:
 
   // Filter workspaces by selected workspace
   const filteredLbWorkspaces = useMemo(() => {
-    if (!selectedWs) return pagedWorkspaces
-    return sortedWorkspaces.filter((w: any) => w.workspace_id === selectedWs)
-  }, [sortedWorkspaces, pagedWorkspaces, selectedWs])
+    if (!selectedWsIds.length) return pagedWorkspaces
+    return sortedWorkspaces.filter((w: any) => selectedWsIds.includes(String(w.workspace_id)))
+  }, [sortedWorkspaces, pagedWorkspaces, selectedWsIds])
 
   if (isLoading) {
     return (
@@ -1081,7 +1082,7 @@ function LakebaseTab({ days, setDays, selectedWs }: { days: number; setDays: (d:
                   </tbody>
                 </table>
               </div>
-              {!selectedWs && (
+              {selectedWsIds.length === 0 && (
                 <TablePagination
                   page={wsPage}
                   totalItems={sortedWorkspaces.length}

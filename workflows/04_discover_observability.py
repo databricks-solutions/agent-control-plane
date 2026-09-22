@@ -310,6 +310,66 @@ def _get_lakebase_conn():
 # When disabled (default), the workflow processes only the local workspace —
 # the Tier 1 path. Cross-workspace observability is served by the UC SQL
 # discovery tasks (07, 08), not by this REST fan-out.
+# ── Populate workspace_registry (id → name / host / deployment) ──────────────
+# UNCONDITIONAL: the app reads workspace_registry from Lakebase for the workspace
+# picker's human-readable names AND the "Open in MLflow" host links, so it must be
+# filled even when cross-workspace REST fan-out (Tier 3) is OFF — which is the
+# default, and why b4nc10's registry was empty. Sourced from the cached
+# system.access.workspaces_latest (the workflow's one system-table read); the app
+# itself never queries it. Fail-open so a Lakebase/permission hiccup never fails run.
+try:
+    _wsl_rows = _execute_sql(
+        "SELECT CAST(workspace_id AS STRING) AS workspace_id, "
+        "       workspace_url, workspace_name "
+        "FROM system.access.workspaces_latest "
+        "WHERE status = 'RUNNING' AND workspace_url IS NOT NULL"
+    )
+    _reg_rows = []
+    for r in _wsl_rows:
+        ws_id = str(r.get("workspace_id") or "")
+        host = (r.get("workspace_url") or "").rstrip("/")
+        name = r.get("workspace_name") or ""
+        if not ws_id or not host:
+            continue
+        dep = host.replace("https://", "").split(".")[0]
+        _reg_rows.append((ws_id, host, name, dep))
+    if _reg_rows:
+        _reg_conn = _get_lakebase_conn()
+        try:
+            with _reg_conn.cursor() as cur:
+                # Ensure the table exists (the app creates it too, but the workflow
+                # may run before the app's startup hook has).
+                cur.execute(
+                    """CREATE TABLE IF NOT EXISTS workspace_registry (
+                           workspace_id    TEXT PRIMARY KEY,
+                           workspace_host  TEXT NOT NULL,
+                           workspace_name  TEXT DEFAULT '',
+                           deployment_name TEXT DEFAULT '',
+                           last_updated    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                       )"""
+                )
+                for ws_id, host, name, dep in _reg_rows:
+                    cur.execute(
+                        """INSERT INTO workspace_registry (workspace_id, workspace_host, workspace_name, deployment_name, last_updated)
+                           VALUES (%s, %s, %s, %s, NOW())
+                           ON CONFLICT (workspace_id) DO UPDATE SET
+                               workspace_host  = EXCLUDED.workspace_host,
+                               workspace_name  = EXCLUDED.workspace_name,
+                               deployment_name = EXCLUDED.deployment_name,
+                               last_updated    = NOW()""",
+                        (ws_id, host, name, dep),
+                    )
+            _reg_conn.commit()
+            _named = sum(1 for _, _, n, _ in _reg_rows if n)
+            print(f"  ✅ workspace_registry: upserted {len(_reg_rows)} workspaces ({_named} with names) from system.access.workspaces_latest")
+        finally:
+            try: _reg_conn.close()
+            except Exception: pass
+    else:
+        print("  ⚠️  system.access.workspaces_latest returned no usable rows — workspace_registry not updated")
+except Exception as exc:
+    print(f"  ⚠️  workspace_registry population failed ({type(exc).__name__}: {exc})")
+
 _lb_conn_for_refresh = None
 if CROSS_WS_FANOUT_ENABLED:
     try:

@@ -115,6 +115,25 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Request logs startup init skipped: %s", exc)
 
+    def _init_app_registries():
+        # App-managed tables that the discovery workflow does NOT create — they
+        # otherwise exist only via the standalone setup_lakebase_tables.py script.
+        # If that script is skipped on a fresh deploy, /agents, /agents/full,
+        # /kpis, /kpis/overview and /analytics/cost fail with
+        # `UndefinedTable: agent_registry`. Ensuring them here makes deploy order
+        # (workflow vs app) and running the setup script optional.
+        try:
+            from backend.database import execute_update
+            from backend.app_schema import APP_REGISTRY_DDL  # single source of truth
+            for stmt in APP_REGISTRY_DDL:
+                try:
+                    execute_update(stmt)
+                except Exception as exc:
+                    logger.warning("app registries DDL warning: %s", exc)
+            logger.info("App registry tables ensured (agent_registry, model_registry, gateway_budgets)")
+        except Exception as exc:
+            logger.warning("App registries startup init skipped: %s", exc)
+
     def _init_gateway():
         try:
             from backend.services.gateway_service import prewarm_cache, ensure_gateway_usage_columns
@@ -152,6 +171,7 @@ async def lifespan(app: FastAPI):
         _init_tools()
         _init_playground()
         _init_request_logs()
+        _init_app_registries()
         _init_gateway()
         _init_observability()
         _init_vector_search()

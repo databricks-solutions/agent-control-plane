@@ -1531,12 +1531,14 @@ def refresh_observability_cache(*, user_token: str) -> Dict[str, int]:
 # ── Lakebase cache: read ───────────────────────────────────────
 
 def get_cached_traces(
-    workspace_id: Optional[str] = None,
+    workspace_id: "Optional[str | List[str]]" = None,
     limit: int = 10000,
     window_days: Optional[int] = None,
     allowed_workspace_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Read traces from the Lakebase cache, optionally filtered by workspace and time window.
+    """Read traces from the Lakebase cache, optionally filtered by one or more
+    workspaces and a time window. ``workspace_id`` may be a single id or a list
+    (the multi-select picker); combined with the caller's scope below.
 
     `window_days` filters by `request_time` (TEXT epoch-ms). Rows with non-numeric
     or missing timestamps are excluded when a window is specified.
@@ -1646,15 +1648,17 @@ def get_cached_model_versions(
 
 
 def get_cached_experiments(
-    workspace_id: Optional[str] = None,
+    workspace_id: "Optional[str | List[str]]" = None,
     limit: int = 10000,
     allowed_workspace_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Read experiments from the Lakebase cache, optionally filtered by workspace.
+    """Read experiments from the Lakebase cache, optionally filtered by one or
+    more workspaces.
 
+    ``workspace_id`` may be a single id or a list (the multi-select picker);
     ``allowed_workspace_ids`` is the caller's access scope (see
-    ``backend.utils.access_scope``): combined with ``workspace_id`` the same
-    way as the billing/workspace read paths.
+    ``backend.utils.access_scope``) — the two are combined (selection ∩
+    allow-list) the same way as the billing/workspace read paths.
     """
     try:
         ws_ids = resolve_ws_ids(workspace_id, allowed_workspace_ids)
@@ -1674,11 +1678,13 @@ def get_cached_experiments(
 
 
 def get_cached_runs(
-    workspace_id: Optional[str] = None,
+    workspace_id: "Optional[str | List[str]]" = None,
     limit: int = 10000,
     allowed_workspace_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Read runs from the Lakebase cache, optionally filtered by workspace."""
+    """Read runs from the Lakebase cache, optionally filtered by one or more
+    workspaces. ``workspace_id`` may be a single id or a list (multi-select);
+    combined with ``allowed_workspace_ids`` (selection ∩ allow-list)."""
     try:
         ws_ids = resolve_ws_ids(workspace_id, allowed_workspace_ids)
     except NoAccess:

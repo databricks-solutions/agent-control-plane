@@ -103,7 +103,7 @@ def _lookup_account_admin(username: str) -> bool:
     try:
         # Lazy import — avoids a hard dependency / import cycle at module load.
         from backend.services.workspace_registry import _get_account_id
-        from backend.config import get_databricks_headers
+        from backend.config import get_databricks_headers, get_databricks_account_host
 
         account_id = _get_account_id()
         if not account_id:
@@ -111,7 +111,7 @@ def _lookup_account_admin(username: str) -> bool:
             return False
 
         sp_headers = get_databricks_headers()
-        url = f"https://accounts.cloud.databricks.com/api/2.0/accounts/{account_id}/scim/v2/Users"
+        url = f"{get_databricks_account_host()}/api/2.0/accounts/{account_id}/scim/v2/Users"
         resp = httpx.get(
             url,
             headers=sp_headers,

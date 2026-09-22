@@ -59,11 +59,18 @@ async def list_experiments(
     request: Request,
     max_results: int = Query(10000, le=100000),
     workspace_id: Optional[str] = Query(None, description="Workspace ID, 'all' for all workspaces"),
+    workspace_ids: Optional[str] = Query(None, description="Comma-separated workspace ids (multi-select); overrides workspace_id"),
     user: UserInfo = Depends(get_current_user),
 ):
     """List MLflow experiments, optionally cross-workspace."""
     try:
         token = _obo_token(request)
+        ids = [w for w in (workspace_ids.split(",") if workspace_ids else []) if w]
+        if ids:
+            # Multi-select: intersect the requested workspaces with the caller's
+            # access scope (resolve_scope(user, None) = the full allow-list).
+            allowed = resolve_scope(user, None)
+            return mlflow_service.get_cached_experiments(ids, max_results, allowed_workspace_ids=allowed)
         if workspace_id == "all":
             # Account-wide view — read from Lakebase cache only. The live
             # MLflow REST merge against the deploy workspace was adding
@@ -115,11 +122,17 @@ async def list_runs(
     filter_string: str = Query("", description="MLflow filter string"),
     max_results: int = Query(10000, le=100000),
     workspace_id: Optional[str] = Query(None, description="Workspace ID, 'all' for all workspaces"),
+    workspace_ids: Optional[str] = Query(None, description="Comma-separated workspace ids (multi-select); overrides workspace_id"),
     user: UserInfo = Depends(get_current_user),
 ):
     """Search MLflow runs, optionally cross-workspace."""
     try:
         token = _obo_token(request)
+        ids = [w for w in (workspace_ids.split(",") if workspace_ids else []) if w]
+        if ids:
+            # Multi-select: intersect requested workspaces with the caller's scope.
+            allowed = resolve_scope(user, None)
+            return mlflow_service.get_cached_runs(ids, max_results, allowed_workspace_ids=allowed)
         if workspace_id == "all":
             # Read from Lakebase cache (populated by scheduled workflow)
             allowed = resolve_scope(user, None)
@@ -152,6 +165,7 @@ async def list_traces(
     filter_string: str = Query(""),
     max_results: int = Query(10000, le=100000),
     workspace_id: Optional[str] = Query(None, description="Workspace ID, 'all' for all workspaces"),
+    workspace_ids: Optional[str] = Query(None, description="Comma-separated workspace ids (multi-select); overrides workspace_id"),
     window_days: Optional[int] = Query(None, ge=1, le=365, description="Time window in days (e.g. 7/14/30/90)"),
     user: UserInfo = Depends(get_current_user),
 ):
@@ -160,9 +174,13 @@ async def list_traces(
     no "current workspace only" fallback like /experiments and /runs have), so
     scope is always resolved, not just when workspace_id is set."""
     try:
+        ids = [w for w in (workspace_ids.split(",") if workspace_ids else []) if w]
         ws = None if (workspace_id == "all" or not workspace_id) else workspace_id
-        allowed = resolve_scope(user, ws)
-        return mlflow_service.get_cached_traces(ws, max_results, window_days=window_days, allowed_workspace_ids=allowed)
+        # Multi-select ids take precedence over the single ws; either is then
+        # intersected with the caller's access scope inside get_cached_traces.
+        selection = ids or ws
+        allowed = resolve_scope(user, None)
+        return mlflow_service.get_cached_traces(selection, max_results, window_days=window_days, allowed_workspace_ids=allowed)
     except HTTPException:
         raise
     except Exception as e:

@@ -20,6 +20,11 @@ import sys
 import uuid
 import psycopg2
 
+# Import the canonical app-registry DDL so this script and the app's startup hook
+# (backend.main) never drift. The backend package lives under control-plane-app/.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "control-plane-app"))
+from backend.app_schema import APP_REGISTRY_DDL
+
 # Read config from environment
 LAKEBASE_DNS = os.environ.get("LAKEBASE_DNS", "")
 DATABASE = os.environ.get("LAKEBASE_DATABASE", "control_plane")
@@ -111,48 +116,12 @@ def create_tables():
 
         cur = conn.cursor()
 
-        print("Creating agent_registry table...")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS agent_registry (
-              agent_id VARCHAR(255) PRIMARY KEY,
-              name VARCHAR(255) NOT NULL,
-              type VARCHAR(50) NOT NULL,
-              description TEXT,
-              endpoint_name VARCHAR(255),
-              endpoint_type VARCHAR(50),
-              endpoint_status VARCHAR(50),
-              app_id VARCHAR(255),
-              app_url VARCHAR(500),
-              version VARCHAR(50),
-              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-              created_by VARCHAR(255),
-              tags JSONB,
-              config JSONB,
-              is_active BOOLEAN DEFAULT TRUE
-            )
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_agent_registry_type ON agent_registry(type)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_agent_registry_status ON agent_registry(endpoint_status)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_agent_registry_active ON agent_registry(is_active)")
-
-        print("Creating model_registry table...")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS model_registry (
-              model_id VARCHAR(255) PRIMARY KEY,
-              name VARCHAR(255) NOT NULL,
-              version VARCHAR(50) NOT NULL,
-              model_uri VARCHAR(500),
-              model_type VARCHAR(50),
-              endpoint_name VARCHAR(255),
-              endpoint_type VARCHAR(50),
-              status VARCHAR(50),
-              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-              metrics JSONB,
-              tags JSONB
-            )
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_model_registry_name ON model_registry(name)")
+        # agent_registry, model_registry, gateway_budgets — from the shared
+        # backend.app_schema.APP_REGISTRY_DDL (single source; keeps this script in
+        # lockstep with the app's startup hook). All statements are idempotent.
+        print("Creating app registry tables (agent_registry, model_registry, gateway_budgets)...")
+        for stmt in APP_REGISTRY_DDL:
+            cur.execute(stmt)
 
         print("Creating request_logs table...")
         cur.execute("""
@@ -177,26 +146,7 @@ def create_tables():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_agent_id ON request_logs(agent_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_user_id ON request_logs(user_id)")
 
-        print("Creating gateway_budgets table...")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS gateway_budgets (
-              budget_id VARCHAR(36) PRIMARY KEY,
-              principal VARCHAR(255) NOT NULL,
-              principal_type VARCHAR(32) NOT NULL,
-              endpoint_name VARCHAR(255),
-              workspace_id VARCHAR(64),
-              budget_tokens BIGINT NOT NULL,
-              period VARCHAR(16) NOT NULL DEFAULT 'month',
-              alert_at_percent INTEGER NOT NULL DEFAULT 80,
-              is_active BOOLEAN NOT NULL DEFAULT TRUE,
-              created_by VARCHAR(255) NOT NULL,
-              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_gateway_budgets_principal ON gateway_budgets(principal)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_gateway_budgets_endpoint ON gateway_budgets(endpoint_name) WHERE endpoint_name IS NOT NULL")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_gateway_budgets_active ON gateway_budgets(is_active) WHERE is_active = TRUE")
+        # gateway_budgets is created above via APP_REGISTRY_DDL.
 
         conn.commit()
         print("All tables created successfully")

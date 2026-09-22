@@ -22,7 +22,7 @@ from typing import Dict, List, Optional, Set
 
 import httpx
 
-from backend.config import get_databricks_headers
+from backend.config import get_databricks_headers, get_databricks_account_host
 from backend.database import DatabasePool, execute_query
 
 import logging
@@ -180,7 +180,7 @@ def refresh_workspace_admins(user_token: Optional[str] = None) -> int:
 
 def _fetch_workspace_admin_users(account_id: str, workspace_id: str, token: str) -> List[str]:
     """Return usernames with an ADMIN permission on one workspace."""
-    url = f"https://accounts.cloud.databricks.com/api/2.0/accounts/{account_id}/workspaces/{workspace_id}/permissionassignments"
+    url = f"{get_databricks_account_host()}/api/2.0/accounts/{account_id}/workspaces/{workspace_id}/permissionassignments"
     try:
         resp = httpx.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
         if resp.status_code != 200:

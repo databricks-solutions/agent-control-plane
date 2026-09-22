@@ -236,8 +236,10 @@ export function useMlflowExperiments(workspaceId?: string | null) {
     queryFn: async () => {
       // Default to account-wide cache when no specific workspace is selected,
       // otherwise the local-MLflow REST path returns 0 rows even though the
-      // Lakebase cache is populated by the discovery workflow.
-      const params: Record<string, string> = { workspace_id: workspaceId || 'all' }
+      // Lakebase cache is populated by the discovery workflow. A workspaceId of
+      // one id or a comma-joined multi-selection is sent as workspace_ids.
+      const params: Record<string, string> =
+        workspaceId && workspaceId !== 'all' ? { workspace_ids: workspaceId } : { workspace_id: 'all' }
       const { data } = await apiClient.get('/mlflow/experiments', { params })
       return data as any[]
     },
@@ -248,7 +250,8 @@ export function useMlflowRuns(experimentIds?: string, workspaceId?: string | nul
   return useQuery({
     queryKey: ['mlflow', 'runs', experimentIds, workspaceId],
     queryFn: async () => {
-      const params: Record<string, string> = { workspace_id: workspaceId || 'all' }
+      const params: Record<string, string> =
+        workspaceId && workspaceId !== 'all' ? { workspace_ids: workspaceId } : { workspace_id: 'all' }
       if (experimentIds) params.experiment_ids = experimentIds
       const { data } = await apiClient.get('/mlflow/runs', { params })
       return data as any[]
@@ -261,7 +264,8 @@ export function useMlflowTraces(workspaceId?: string | null, windowDays?: number
     queryKey: ['mlflow', 'traces', workspaceId, windowDays],
     queryFn: async () => {
       const params: Record<string, string> = {}
-      if (workspaceId) params.workspace_id = workspaceId
+      // One id or a comma-joined multi-selection → workspace_ids (backend IN-filter).
+      if (workspaceId && workspaceId !== 'all') params.workspace_ids = workspaceId
       if (windowDays) params.window_days = String(windowDays)
       const { data } = await apiClient.get('/mlflow/traces', { params })
       return data as any[]
@@ -1310,12 +1314,12 @@ export interface ExternalModelSpendRow {
  * Runs ~12 small queries on 1 DB connection (~1 s) instead of that many
  * parallel requests each opening a new connection (~14 s from local dev).
  */
-export function useBillingPageData(days = 30, workspaceId?: string | null) {
+export function useBillingPageData(days = 30, workspaceIds?: string[] | null) {
   return useQuery({
-    queryKey: ['billing', 'page-data', days, workspaceId],
+    queryKey: ['billing', 'page-data', days, (workspaceIds || []).join(',')],
     queryFn: async () => {
       const params: any = { days }
-      if (workspaceId) params.workspace_id = workspaceId
+      if (workspaceIds && workspaceIds.length) params.workspace_ids = workspaceIds.join(',')
       const { data } = await apiClient.get('/billing/page-data', { params })
       // Ensure all array fields have defaults to prevent .map() crashes
       return {
