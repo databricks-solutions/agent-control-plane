@@ -185,7 +185,10 @@ export default function ObservabilityPage() {
   const { data: workspaceHosts } = useWorkspaceHosts()
   const { data: wsDir } = useWorkspaceDirectory()
 
-  // The workspace_id value to pass to hooks: undefined means current workspace (no param sent)
+  // Multi-select workspace filter: selectedWs holds a comma-joined id list or 'all'.
+  const selectedWsIds = selectedWs && selectedWs !== 'all' ? selectedWs.split(',').filter(Boolean) : []
+  // The value passed to the hooks — a comma-joined id list, or 'all'/undefined for
+  // every workspace. The hooks send it as workspace_ids (backend IN-filter).
   const wsParam = selectedWs || undefined
 
   return (
@@ -201,8 +204,9 @@ export default function ObservabilityPage() {
         <div className="flex items-center gap-3">
           {/* Workspace selector */}
           <WorkspaceSelect
-            value={selectedWs ?? 'all'}
-            onChange={(v) => setSelectedWs(v || 'all')}
+            multiple
+            values={selectedWsIds}
+            onChangeMulti={(vals) => setSelectedWs(vals.length ? vals.join(',') : 'all')}
             options={(obsWorkspaces || [])
               .filter((ws) => ws.trace_count > 0)
               .map((ws) =>
@@ -235,7 +239,9 @@ export default function ObservabilityPage() {
           <Info className="w-3.5 h-3.5 flex-shrink-0" />
           {selectedWs === 'all'
             ? 'Showing data from all registered workspaces. Cross-workspace queries require OBO authentication.'
-            : `Showing data from workspace ${selectedWs}.`}
+            : selectedWsIds.length > 1
+              ? `Showing data from ${selectedWsIds.length} selected workspaces.`
+              : `Showing data from workspace ${selectedWsIds[0] ?? selectedWs}.`}
         </div>
       )}
 

@@ -1482,8 +1482,10 @@ def get_cached_traces(
     workspace_id: Optional[str] = None,
     limit: int = 10000,
     window_days: Optional[int] = None,
+    workspace_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Read traces from the Lakebase cache, optionally filtered by workspace and time window.
+    """Read traces from the Lakebase cache, optionally filtered by one or more
+    workspaces and a time window (workspace_ids takes precedence; empty = all).
 
     `window_days` filters by `request_time` (TEXT epoch-ms). Rows with non-numeric
     or missing timestamps are excluded when a window is specified.
@@ -1491,9 +1493,10 @@ def get_cached_traces(
     import time as _time
     where_clauses = []
     params: List[Any] = []
-    if workspace_id:
-        where_clauses.append("workspace_id = %s")
-        params.append(workspace_id)
+    _ws = _ws_id_list(workspace_id, workspace_ids)
+    if _ws:
+        where_clauses.append(f"workspace_id IN ({', '.join(['%s'] * len(_ws))})")
+        params.extend(_ws)
     if window_days:
         cutoff_ms = int((_time.time() - window_days * 86400) * 1000)
         where_clauses.append("request_time ~ '^[0-9]+$' AND CAST(request_time AS BIGINT) >= %s")
@@ -1559,12 +1562,26 @@ def get_cached_model_versions(name: str, limit: int = 100) -> Optional[List[Dict
     return rows
 
 
-def get_cached_experiments(workspace_id: Optional[str] = None, limit: int = 10000) -> List[Dict[str, Any]]:
-    """Read experiments from the Lakebase cache, optionally filtered by workspace."""
-    if workspace_id:
+def _ws_id_list(workspace_id: Optional[str], workspace_ids: Optional[List[str]]) -> List[str]:
+    """Normalize a single workspace_id and/or a list into one de-duped id list
+    (empty = no workspace filter / all)."""
+    ids = [str(w) for w in (workspace_ids or []) if w]
+    if not ids and workspace_id:
+        ids = [str(workspace_id)]
+    return ids
+
+
+def get_cached_experiments(workspace_id: Optional[str] = None, limit: int = 10000,
+                           workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Read experiments from the Lakebase cache, optionally filtered by one or more
+    workspaces (workspace_ids takes precedence; empty = all)."""
+    ids = _ws_id_list(workspace_id, workspace_ids)
+    if ids:
+        ph = ", ".join(["%s"] * len(ids))
         rows = execute_query(
-            "SELECT * FROM observability_experiments WHERE workspace_id = %s ORDER BY last_update_time DESC LIMIT %s",
-            (workspace_id, limit),
+            f"SELECT * FROM observability_experiments WHERE workspace_id IN ({ph}) "
+            "ORDER BY last_update_time DESC LIMIT %s",
+            (*ids, limit),
         )
     else:
         rows = execute_query(
@@ -1574,12 +1591,17 @@ def get_cached_experiments(workspace_id: Optional[str] = None, limit: int = 1000
     return rows
 
 
-def get_cached_runs(workspace_id: Optional[str] = None, limit: int = 10000) -> List[Dict[str, Any]]:
-    """Read runs from the Lakebase cache, optionally filtered by workspace."""
-    if workspace_id:
+def get_cached_runs(workspace_id: Optional[str] = None, limit: int = 10000,
+                    workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Read runs from the Lakebase cache, optionally filtered by one or more
+    workspaces (workspace_ids takes precedence; empty = all)."""
+    ids = _ws_id_list(workspace_id, workspace_ids)
+    if ids:
+        ph = ", ".join(["%s"] * len(ids))
         rows = execute_query(
-            "SELECT * FROM observability_runs WHERE workspace_id = %s ORDER BY start_time DESC LIMIT %s",
-            (workspace_id, limit),
+            f"SELECT * FROM observability_runs WHERE workspace_id IN ({ph}) "
+            "ORDER BY start_time DESC LIMIT %s",
+            (*ids, limit),
         )
     else:
         rows = execute_query(

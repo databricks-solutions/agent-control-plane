@@ -55,10 +55,14 @@ async def list_experiments(
     request: Request,
     max_results: int = Query(10000, le=100000),
     workspace_id: Optional[str] = Query(None, description="Workspace ID, 'all' for all workspaces"),
+    workspace_ids: Optional[str] = Query(None, description="Comma-separated workspace ids (multi-select); overrides workspace_id"),
 ):
     """List MLflow experiments, optionally cross-workspace."""
     try:
         token = _obo_token(request)
+        ids = [w for w in (workspace_ids.split(",") if workspace_ids else []) if w]
+        if ids:
+            return mlflow_service.get_cached_experiments(max_results=max_results, workspace_ids=ids)
         if workspace_id == "all":
             # Account-wide view — read from Lakebase cache only. The live
             # MLflow REST merge against the deploy workspace was adding
@@ -98,10 +102,14 @@ async def list_runs(
     filter_string: str = Query("", description="MLflow filter string"),
     max_results: int = Query(10000, le=100000),
     workspace_id: Optional[str] = Query(None, description="Workspace ID, 'all' for all workspaces"),
+    workspace_ids: Optional[str] = Query(None, description="Comma-separated workspace ids (multi-select); overrides workspace_id"),
 ):
     """Search MLflow runs, optionally cross-workspace."""
     try:
         token = _obo_token(request)
+        ids = [w for w in (workspace_ids.split(",") if workspace_ids else []) if w]
+        if ids:
+            return mlflow_service.get_cached_runs(max_results=max_results, workspace_ids=ids)
         if workspace_id == "all":
             # Read from Lakebase cache (populated by scheduled workflow)
             return mlflow_service.get_cached_runs(None, max_results)
@@ -125,12 +133,14 @@ async def list_traces(
     filter_string: str = Query(""),
     max_results: int = Query(10000, le=100000),
     workspace_id: Optional[str] = Query(None, description="Workspace ID, 'all' for all workspaces"),
+    workspace_ids: Optional[str] = Query(None, description="Comma-separated workspace ids (multi-select); overrides workspace_id"),
     window_days: Optional[int] = Query(None, ge=1, le=365, description="Time window in days (e.g. 7/14/30/90)"),
 ):
     """Search MLflow traces. All data comes from Lakebase cache (populated by scheduled workflow)."""
     try:
+        ids = [w for w in (workspace_ids.split(",") if workspace_ids else []) if w]
         ws = None if (workspace_id == "all" or not workspace_id) else workspace_id
-        return mlflow_service.get_cached_traces(ws, max_results, window_days=window_days)
+        return mlflow_service.get_cached_traces(ws, max_results, window_days=window_days, workspace_ids=(ids or None))
     except HTTPException:
         raise
     except Exception as e:

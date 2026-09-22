@@ -114,9 +114,16 @@ function resolveAgentType(agent: any): string {
 
 function OverviewTab() {
   const [workspaceId, setWorkspaceId] = usePersistedWorkspaceFilter('ws-filter:agents', ALL_WORKSPACES)
-  const wsParam = workspaceId === ALL_WORKSPACES ? undefined : workspaceId
+  // Multi-select workspace filter (comma-joined persisted value; ALL_WORKSPACES = all).
+  // Fetch ALL agents and filter client-side so the picker can list every workspace
+  // (its options are derived from the agent list) and several can be selected at once.
+  const workspaceIds = workspaceId && workspaceId !== ALL_WORKSPACES
+    ? workspaceId.split(',').filter(Boolean)
+    : []
+  const setWorkspaceIds = (ids: string[]) =>
+    setWorkspaceId(ids.length ? ids.join(',') : ALL_WORKSPACES)
 
-  const { data: agents, isLoading } = useAllAgentsMerged(wsParam)
+  const { data: agents, isLoading } = useAllAgentsMerged()
   const { data: discoveryStatus } = useDiscoveryStatus()
   const syncAgents = useSyncAgents()
   const { pinned, togglePin } = usePinnedAgents()
@@ -138,6 +145,10 @@ function OverviewTab() {
   const q = searchQuery.toLowerCase().trim()
   const filteredAgents = useMemo(() => {
     let filtered = agentList
+    if (workspaceIds.length) {
+      const wsSet = new Set(workspaceIds)
+      filtered = filtered.filter((a: any) => wsSet.has(String(a.workspace_id)))
+    }
     if (q) {
       filtered = filtered.filter((a: any) => {
         const haystack = [a.name, a.description, a.endpoint_name, a.type, a.creator, a.model_name, a.workspace_id]
@@ -165,7 +176,7 @@ function OverviewTab() {
       return 2
     }
     return [...filtered].sort((a: any, b: any) => tier(a) - tier(b))
-  }, [agentList, q, typeFilter, statusFilter, pinned])
+  }, [agentList, q, typeFilter, statusFilter, pinned, workspaceId])
 
   if (isLoading) {
     return <div className="flex items-center justify-center h-64 text-gray-400 dark:text-gray-500">Loading agents…</div>
@@ -341,8 +352,9 @@ function OverviewTab() {
           </select>
           {/* Workspace filter */}
           <WorkspaceSelect
-            value={workspaceId}
-            onChange={(v) => { setWorkspaceId(v); setPage(0) }}
+            multiple
+            values={workspaceIds}
+            onChangeMulti={(vals) => { setWorkspaceIds(vals); setPage(0) }}
             options={workspaces.map((ws) => workspaceOption(String(ws), wsDir))}
             allValue={ALL_WORKSPACES}
             showIcon={false}
