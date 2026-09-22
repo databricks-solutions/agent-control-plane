@@ -62,7 +62,7 @@ async def list_experiments(
         token = _obo_token(request)
         ids = [w for w in (workspace_ids.split(",") if workspace_ids else []) if w]
         if ids:
-            return mlflow_service.get_cached_experiments(max_results=max_results, workspace_ids=ids)
+            return mlflow_service.get_cached_experiments(limit=max_results, workspace_ids=ids)
         if workspace_id == "all":
             # Account-wide view — read from Lakebase cache only. The live
             # MLflow REST merge against the deploy workspace was adding
@@ -109,7 +109,7 @@ async def list_runs(
         token = _obo_token(request)
         ids = [w for w in (workspace_ids.split(",") if workspace_ids else []) if w]
         if ids:
-            return mlflow_service.get_cached_runs(max_results=max_results, workspace_ids=ids)
+            return mlflow_service.get_cached_runs(limit=max_results, workspace_ids=ids)
         if workspace_id == "all":
             # Read from Lakebase cache (populated by scheduled workflow)
             return mlflow_service.get_cached_runs(None, max_results)
