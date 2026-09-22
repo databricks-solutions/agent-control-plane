@@ -2651,7 +2651,7 @@ billing_conn.close()
 # COMMAND ----------
 
 print("\n" + "═" * 70)
-print("Phase 7: app-managed tables (tool_registry, request_logs)")
+print("Phase 7: app-managed tables (tool_registry, request_logs, agent_registry, model_registry, gateway_budgets)")
 print("═" * 70)
 
 _app_ddls = [
@@ -2688,6 +2688,65 @@ _app_ddls = [
     "CREATE INDEX IF NOT EXISTS idx_rl_agent ON request_logs (agent_id)",
     "CREATE INDEX IF NOT EXISTS idx_rl_ts    ON request_logs (timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_rl_user  ON request_logs (user_id)",
+    # ── agent_registry / model_registry / gateway_budgets ──────────────────
+    # App-managed registries. Canonical definition is backend/app_schema.py
+    # (APP_REGISTRY_DDL), shared by the app + setup_lakebase_tables.py. This
+    # notebook runs on a separate cluster and can't import that module, so these
+    # are kept intentionally identical — KEEP IN SYNC with backend/app_schema.py.
+    # Ensuring them here lets the smoke check assert them as EXPECTED even when the
+    # app hasn't started yet (a fresh, workflow-first deploy).
+    """CREATE TABLE IF NOT EXISTS agent_registry (
+        agent_id        VARCHAR(255) PRIMARY KEY,
+        name            VARCHAR(255) NOT NULL,
+        type            VARCHAR(50)  NOT NULL,
+        description     TEXT,
+        endpoint_name   VARCHAR(255),
+        endpoint_type   VARCHAR(50),
+        endpoint_status VARCHAR(50),
+        app_id          VARCHAR(255),
+        app_url         VARCHAR(500),
+        version         VARCHAR(50),
+        created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_by      VARCHAR(255),
+        tags            JSONB,
+        config          JSONB,
+        is_active       BOOLEAN DEFAULT TRUE
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_agent_registry_type   ON agent_registry(type)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_registry_status ON agent_registry(endpoint_status)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_registry_active ON agent_registry(is_active)",
+    """CREATE TABLE IF NOT EXISTS model_registry (
+        model_id      VARCHAR(255) PRIMARY KEY,
+        name          VARCHAR(255) NOT NULL,
+        version       VARCHAR(50)  NOT NULL,
+        model_uri     VARCHAR(500),
+        model_type    VARCHAR(50),
+        endpoint_name VARCHAR(255),
+        endpoint_type VARCHAR(50),
+        status        VARCHAR(50),
+        created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        metrics       JSONB,
+        tags          JSONB
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_model_registry_name ON model_registry(name)",
+    """CREATE TABLE IF NOT EXISTS gateway_budgets (
+        budget_id        VARCHAR(36) PRIMARY KEY,
+        principal        VARCHAR(255) NOT NULL,
+        principal_type   VARCHAR(32)  NOT NULL,
+        endpoint_name    VARCHAR(255),
+        workspace_id     VARCHAR(64),
+        budget_tokens    BIGINT NOT NULL,
+        period           VARCHAR(16) NOT NULL DEFAULT 'month',
+        alert_at_percent INTEGER NOT NULL DEFAULT 80,
+        is_active        BOOLEAN NOT NULL DEFAULT TRUE,
+        created_by       VARCHAR(255) NOT NULL,
+        created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_gateway_budgets_principal ON gateway_budgets(principal)",
+    "CREATE INDEX IF NOT EXISTS idx_gateway_budgets_endpoint  ON gateway_budgets(endpoint_name) WHERE endpoint_name IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_gateway_budgets_active    ON gateway_budgets(is_active) WHERE is_active = TRUE",
 ]
 
 app_conn = get_lakebase_connection()
