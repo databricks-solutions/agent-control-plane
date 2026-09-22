@@ -1,6 +1,6 @@
 """API routes for Vector Search monitoring."""
 from fastapi import APIRouter, Depends, Query
-from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.auth import get_current_user, require_admin, UserInfo
 from backend.utils.access_scope import get_allowed_workspace_ids
 from backend.services import vector_search_service
 
@@ -91,7 +91,7 @@ def cost_trend_by_workload(days: int = Query(30, ge=1, le=365), user: UserInfo =
 
 
 @router.post("/refresh")
-def refresh():
+def refresh(user: UserInfo = Depends(require_admin)):
     """Trigger manual discovery refresh."""
     counts = vector_search_service.discover_vector_search()
     return {"status": "ok", **counts}

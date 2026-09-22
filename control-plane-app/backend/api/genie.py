@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from backend.config import get_databricks_host, settings
-from backend.utils.auth import get_current_user
+from backend.utils.auth import get_current_user, require_user, UserInfo
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,7 @@ class StartConversationBody(BaseModel):
 
 
 @router.post("/conversations")
-def start_conversation(body: StartConversationBody, request: Request) -> dict:
+def start_conversation(body: StartConversationBody, request: Request, user: UserInfo = Depends(require_user)) -> dict:
     """Start a new Genie conversation with the user's question.
 
     Returns immediately with ``conversation_id`` and ``message_id`` —
@@ -145,7 +145,7 @@ class FollowUpBody(BaseModel):
 
 
 @router.post("/conversations/{conversation_id}/messages")
-def post_message(conversation_id: str, body: FollowUpBody, request: Request) -> dict:
+def post_message(conversation_id: str, body: FollowUpBody, request: Request, user: UserInfo = Depends(require_user)) -> dict:
     """Send a follow-up message in an existing conversation."""
     _require_genie_enabled()
     space_id = _space_id_or_503()

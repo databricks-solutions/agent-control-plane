@@ -12,7 +12,7 @@ from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from backend.config import settings, get_databricks_host
-from backend.api import agents, requests, kpis, analytics, health, websocket, gateway, mlflow, billing, tools, access, playground, workspaces, user_analytics, topology, operations, vector_search, admin, gateway_logs, genie
+from backend.api import agents, requests, kpis, analytics, health, websocket, gateway, mlflow, billing, tools, access, serving, workspaces, user_analytics, topology, operations, vector_search, gateway_logs, genie
 from backend.utils.auth import get_current_user
 
 
@@ -72,13 +72,6 @@ async def lifespan(app: FastAPI):
             tools_refresh()
         except Exception as exc:
             logger.warning("Tools startup init skipped: %s", exc)
-
-    def _init_playground():
-        try:
-            from backend.services.playground_service import ensure_playground_tables
-            ensure_playground_tables()
-        except Exception as exc:
-            logger.warning("Playground startup init skipped: %s", exc)
 
     def _init_request_logs():
         try:
@@ -166,10 +159,14 @@ async def lifespan(app: FastAPI):
     # Run all init in a background thread with a timeout so a hanging
     # DB connection doesn't prevent the server from starting.
     def _run_all_inits():
+        try:
+            from backend.config import log_lakebase_config
+            log_lakebase_config()
+        except Exception as exc:
+            logger.warning("Lakebase config diagnostic skipped: %s", exc)
         _init_billing()
         _init_discovery()
         _init_tools()
-        _init_playground()
         _init_request_logs()
         _init_app_registries()
         _init_gateway()
@@ -337,14 +334,13 @@ app.include_router(mlflow.router, prefix=settings.api_prefix)
 app.include_router(billing.router, prefix=settings.api_prefix)
 app.include_router(tools.router, prefix=settings.api_prefix)
 app.include_router(access.router, prefix=settings.api_prefix)
-app.include_router(playground.router, prefix=settings.api_prefix)
+app.include_router(serving.router, prefix=settings.api_prefix)
 app.include_router(workspaces.router, prefix=settings.api_prefix)
 app.include_router(user_analytics.router, prefix=settings.api_prefix)
 app.include_router(topology.router, prefix=settings.api_prefix)
 app.include_router(operations.router, prefix=settings.api_prefix)
 app.include_router(vector_search.router, prefix=settings.api_prefix)
 app.include_router(gateway_logs.router, prefix=settings.api_prefix)
-app.include_router(admin.router, prefix=settings.api_prefix)
 app.include_router(genie.router, prefix=settings.api_prefix)
 app.include_router(websocket.router)
 
@@ -373,6 +369,13 @@ if _os.path.isdir(_dist_dir):
     # SPA catch-all: any non-API path → index.html so React Router handles it
     @app.get("/{full_path:path}")
     async def _spa_fallback(full_path: str):
+        # An unknown /api or /ws path must NOT fall through to the SPA HTML with
+        # a 200 — that masks typos/removed routes as "working" and can confuse
+        # clients. Return a real JSON 404 for those namespaces instead. (Known
+        # routes are registered before this catch-all, so they never reach here.)
+        if full_path in ("api", "ws") or full_path.startswith(("api/", "ws/")):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
         # If the exact file exists in dist/ (e.g. favicon), serve it
         candidate = _os.path.join(_dist_dir, full_path)
         if full_path and _os.path.isfile(candidate):

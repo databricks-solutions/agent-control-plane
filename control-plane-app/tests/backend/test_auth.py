@@ -1,6 +1,6 @@
 """Tests for OBO authentication and authorization."""
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 from fastapi import Request
 from backend.utils.auth import (
     get_current_user,
@@ -122,23 +122,16 @@ class TestRequireAdmin:
 
     @pytest.mark.asyncio
     async def test_admin_passes(self, mock_user_info):
-        request = MagicMock(spec=Request)
-        request.headers = {"x-forwarded-access-token": "admin-token"}
-
-        with patch("backend.utils.auth.get_current_user", new_callable=AsyncMock, return_value=mock_user_info):
-            user = await require_admin(request)
-            assert user.is_admin is True
+        # require_admin receives the resolved user via Depends(get_current_user).
+        user = await require_admin(mock_user_info)
+        assert user.is_admin is True
 
     @pytest.mark.asyncio
     async def test_non_admin_raises_403(self, mock_sp_user):
-        request = MagicMock(spec=Request)
-        request.headers = {}
-
-        with patch("backend.utils.auth.get_current_user", new_callable=AsyncMock, return_value=mock_sp_user):
-            from fastapi import HTTPException
-            with pytest.raises(HTTPException) as exc_info:
-                await require_admin(request)
-            assert exc_info.value.status_code == 403
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc_info:
+            await require_admin(mock_sp_user)
+        assert exc_info.value.status_code == 403
 
 
 class TestLookupAccountAdmin:
@@ -204,9 +197,7 @@ class TestRequireAccountAdmin:
     @pytest.mark.asyncio
     async def test_non_account_admin_raises_403(self, mock_user_info):
         # mock_user_info has is_account_admin=False
-        request = MagicMock(spec=Request)
-        with patch("backend.utils.auth.get_current_user", new_callable=AsyncMock, return_value=mock_user_info):
-            from fastapi import HTTPException
-            with pytest.raises(HTTPException) as exc_info:
-                await require_account_admin(request)
-            assert exc_info.value.status_code == 403
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc_info:
+            await require_account_admin(mock_user_info)
+        assert exc_info.value.status_code == 403

@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# GitHub-hosted runners have public internet, so PyPI / npm are reachable here
+# even though the internal dev environment proxies them.
+
+jobs:
+  backend:
+    name: Backend — lint + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: control-plane-app
+    # Keep the SDK from attempting real Databricks auth during collection/tests.
+    env:
+      DATABRICKS_HOST: ""
+      DATABRICKS_TOKEN: ""
+      DATABRICKS_CONFIG_PROFILE: __ci_none__
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install (app + dev deps)
+        run: pip install -e ".[dev]"
+      - name: Ruff (advisory)
+        # Non-blocking for now: this repo had no CI, so there may be a
+        # pre-existing lint backlog. Keep it visible in every run; tighten to a
+        # hard gate in a follow-up once the backlog is triaged.
+        continue-on-error: true
+        run: ruff check backend/ --select E,F,W --ignore E501,E402
+      - name: Pytest
+        run: python -m pytest tests/backend/ -q
+
+  frontend:
+    name: Frontend — typecheck + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: control-plane-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install
+        run: npm ci
+      - name: Typecheck + build
+        run: npm run build

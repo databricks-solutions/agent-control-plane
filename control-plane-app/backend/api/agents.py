@@ -1,6 +1,6 @@
 """API routes for agents."""
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.auth import get_current_user, require_admin, UserInfo
 from backend.utils.access_scope import resolve_scope, get_allowed_workspace_ids, sees_deploy_workspace
 from typing import List, Optional, Dict, Any
 from backend.models.agent import AgentOut, AgentListOut, AgentUpdate
@@ -78,7 +78,7 @@ def discovery_status(request: Request, user: UserInfo = Depends(get_current_user
 
 
 @router.post("/sync")
-def sync_agents(request: Request):
+def sync_agents(request: Request, user: UserInfo = Depends(require_admin)):
     """Trigger a full discovery refresh.
 
     Extracts the ``x-forwarded-access-token`` header injected by Databricks Apps
@@ -138,7 +138,7 @@ def sync_agents(request: Request):
 def populate_workspace_registry(
     request: Request,
     body: Dict[str, Any] = {},
-    user: UserInfo = Depends(get_current_user),
+    user: UserInfo = Depends(require_admin),
 ):
     """Populate the workspace registry from an external source.
 
@@ -229,7 +229,7 @@ def get_agent(agent_id: str, user: UserInfo = Depends(get_current_user)):
 def update_agent(
     agent_id: str,
     update: AgentUpdate,
-    user: UserInfo = Depends(get_current_user),
+    user: UserInfo = Depends(require_admin),
 ):
     """Update an agent in the local (deploy-workspace) registry."""
     allowed = get_allowed_workspace_ids(user)

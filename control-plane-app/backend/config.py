@@ -327,8 +327,15 @@ def find_serverless_warehouse_id(force_refresh: bool = False) -> Optional[str]:
 
 
 # ── Startup diagnostics ─────────────────────────────────────────
-_user = _resolve_lakebase_user()
-logger.info(
-    "Lakebase config: host=%s, db=%s, user=%s",
-    settings.lakebase_dns, settings.lakebase_database, _user,
-)
+def log_lakebase_config() -> None:
+    """Log the resolved Lakebase connection identity.
+
+    Called from app startup (lifespan) — NOT at import time. Resolving the
+    Lakebase user makes a live Databricks identity call, and doing that at
+    import blocked/hung any environment without SDK credentials (notably
+    ``pytest`` collection offline).
+    """
+    logger.info(
+        "Lakebase config: host=%s, db=%s, user=%s",
+        settings.lakebase_dns, settings.lakebase_database, _resolve_lakebase_user(),
+    )

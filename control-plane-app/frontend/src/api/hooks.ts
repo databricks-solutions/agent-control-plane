@@ -1465,46 +1465,9 @@ export function useBillingProductCosts(days = 30, workspaceId?: string | null) {
   })
 }
 
-// ── Playground ──────────────────────────────────────────────────
+// ── Serving inventory ───────────────────────────────────────────
 
-export interface PlaygroundSession {
-  session_id: string
-  endpoint_name: string
-  agent_name: string | null
-  title: string | null
-  created_at: string
-  updated_at: string
-}
-
-export interface PlaygroundMessage {
-  message_id: string
-  session_id: string
-  role: 'user' | 'assistant' | 'error'
-  content: string
-  input_tokens: number | null
-  output_tokens: number | null
-  total_tokens: number | null
-  latency_ms: number | null
-  model: string | null
-  created_at: string
-}
-
-export interface PlaygroundSessionDetail extends PlaygroundSession {
-  messages: PlaygroundMessage[]
-}
-
-export interface ChatResponse {
-  session_id: string
-  response: string
-  input_tokens: number | null
-  output_tokens: number | null
-  total_tokens: number | null
-  latency_ms: number | null
-  model: string | null
-  error: string | null
-}
-
-export interface PlaygroundEndpoint {
+export interface QueryableEndpoint {
   endpoint_name: string
   agent_name: string
   type: string
@@ -1516,71 +1479,15 @@ export interface PlaygroundEndpoint {
   app_url?: string        // set for Databricks App agents
 }
 
-export function usePlaygroundEndpoints(options?: { enabled?: boolean }) {
+export function useQueryableEndpoints(options?: { enabled?: boolean }) {
   return useQuery({
-    queryKey: ['playground', 'endpoints'],
+    queryKey: ['serving', 'queryable-endpoints'],
     queryFn: async () => {
-      const { data } = await apiClient.get('/playground/endpoints')
-      return data as PlaygroundEndpoint[]
+      const { data } = await apiClient.get('/serving/queryable-endpoints')
+      return data as QueryableEndpoint[]
     },
     staleTime: 120_000, // matches backend 2-min cache
     enabled: options?.enabled ?? true,
-  })
-}
-
-export function usePlaygroundSessions() {
-  return useQuery({
-    queryKey: ['playground', 'sessions'],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/playground/sessions')
-      return data as PlaygroundSession[]
-    },
-  })
-}
-
-export function usePlaygroundMessages(sessionId: string | null) {
-  return useQuery({
-    queryKey: ['playground', 'session', sessionId],
-    queryFn: async () => {
-      const { data } = await apiClient.get(`/playground/sessions/${sessionId}`)
-      return data as PlaygroundSessionDetail
-    },
-    enabled: !!sessionId,
-  })
-}
-
-export function useSendPlaygroundMessage() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: async (body: {
-      endpoint_name: string
-      agent_name?: string | null
-      session_id?: string | null
-      message: string
-      max_tokens?: number
-      temperature?: number
-      app_url?: string | null
-    }) => {
-      const { data } = await apiClient.post('/playground/chat', body)
-      return data as ChatResponse
-    },
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['playground', 'sessions'] })
-      queryClient.invalidateQueries({ queryKey: ['playground', 'session', data.session_id] })
-    },
-  })
-}
-
-export function useDeletePlaygroundSession() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: async (sessionId: string) => {
-      const { data } = await apiClient.delete(`/playground/sessions/${sessionId}`)
-      return data
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['playground'] })
-    },
   })
 }
 

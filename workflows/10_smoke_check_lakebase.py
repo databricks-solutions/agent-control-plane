@@ -121,8 +121,6 @@ EXPECTED = [
 
 OPTIONAL = [
     # Created lazily by the app on first user action. Don't assert existence.
-    "playground_sessions",
-    "playground_messages",
     "workspace_registry",
     "agent_permissions_cache",
 ]

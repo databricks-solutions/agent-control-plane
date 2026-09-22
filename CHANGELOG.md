@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Removed caller-controlled credential-forwarding paths.** Deleted the
+  `/admin/probe-cross-workspace` diagnostic route, which read the discovery SP
+  secrets and forwarded them to an arbitrary caller-supplied `target_host`.
+  (If a build with this route was ever deployed, rotate the `acp-discovery` SP
+  client secret.)
+- **Removed the dead Agent Playground surface** (chat + session persistence),
+  which forwarded the app SP bearer token to a caller-supplied `app_url` and
+  stored conversations with no per-user ownership boundary. The one live piece
+  (queryable serving-endpoint list) moved to `GET /serving/queryable-endpoints`.
+- **Strict authentication + write-gating.** Added `require_user` (401 for the
+  service-principal fallback when OBO is enabled) and gated every mutation
+  (discovery/cache refreshes, agent updates, workspace-registry writes, tool &
+  vector-search sync, MLflow cache refresh, Genie chat) behind `require_user` /
+  `require_admin` instead of the permissive `get_current_user`.
+- **No-OBO deployments no longer blank out.** The SP fallback is treated as
+  unrestricted only when `OBO_ENABLED=false`; with OBO on, a token-less request
+  fails closed. Account-console host is now derived per-cloud (AWS/Azure/GCP)
+  instead of hardcoding the AWS host.
+- **Unknown `/api` and `/ws` paths return a real JSON 404** instead of the SPA
+  HTML with a 200 (which masked typos/removed routes).
+
+### Fixed
+- Config no longer performs a live Databricks identity call at import time
+  (it hung `pytest` collection offline); the diagnostic runs at app startup.
+- Removed the orphaned `test_budgets_service.py` (tested a module deleted in
+  #13); added a GitHub Actions CI workflow (backend lint+tests, frontend
+  typecheck+build) and declared `ruff` as a dev dependency.
+
 ## [0.1.3] - 2026-08-26
 
 This release grows the **Unity Gateway** (v3) story and moves the app's read

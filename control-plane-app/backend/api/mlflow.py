@@ -15,7 +15,7 @@ when the cache is empty.
 """
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from typing import Optional
-from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.auth import get_current_user, require_admin, UserInfo
 from backend.utils.access_scope import resolve_scope, get_allowed_workspace_ids, sees_deploy_workspace, workspace_is_allowed
 from backend.services import mlflow_service
 from backend.database import execute_update
@@ -318,7 +318,7 @@ async def list_workspace_directory():
 
 
 @router.post("/refresh-cache")
-async def refresh_cache(request: Request):
+async def refresh_cache(request: Request, user: UserInfo = Depends(require_admin)):
     """Trigger a cross-workspace observability cache refresh via system tables.
 
     This is the only path that queries system.mlflow.* from the app.

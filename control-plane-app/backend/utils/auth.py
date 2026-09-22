@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 import httpx
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
 from backend.config import get_databricks_host
 
@@ -284,9 +284,25 @@ async def get_current_user(request: Request) -> UserInfo:
     return user
 
 
-async def require_admin(request: Request) -> UserInfo:
+async def require_user(user: UserInfo = Depends(get_current_user)) -> UserInfo:
+    """Require a *real* authenticated user.
+
+    Unlike ``get_current_user`` (which falls back to the SP identity so
+    read paths stay functional), this raises 401 when the request carries no
+    OBO token and OBO is enabled — the SP fallback is not a real user. When
+    OBO is disabled (``settings.obo_enabled`` is False) the app runs as a
+    single SP identity, so the fallback is accepted, matching the read-path
+    rule in ``backend.utils.access_scope``.
+    """
+    if not user.username or user.username == "service-principal":
+        from backend.config import settings
+        if settings.obo_enabled:
+            raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
+
+async def require_admin(user: UserInfo = Depends(get_current_user)) -> UserInfo:
     """Same as ``get_current_user`` but raises 403 if not a workspace admin."""
-    user = await get_current_user(request)
     if not user.is_admin:
         raise HTTPException(
             status_code=403,
@@ -295,12 +311,11 @@ async def require_admin(request: Request) -> UserInfo:
     return user
 
 
-async def require_account_admin(request: Request) -> UserInfo:
+async def require_account_admin(user: UserInfo = Depends(get_current_user)) -> UserInfo:
     """Same as ``get_current_user`` but raises 403 if not an account admin.
 
     Cross-workspace permission management requires account-level privileges.
     """
-    user = await get_current_user(request)
     if not user.is_account_admin:
         raise HTTPException(
             status_code=403,
