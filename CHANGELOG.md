@@ -23,9 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vector-search sync, MLflow cache refresh, Genie chat) behind `require_user` /
   `require_admin` instead of the permissive `get_current_user`.
 - **No-OBO deployments no longer blank out.** The SP fallback is treated as
-  unrestricted only when `OBO_ENABLED=false`; with OBO on, a token-less request
-  fails closed. Account-console host is now derived per-cloud (AWS/Azure/GCP)
-  instead of hardcoding the AWS host.
+  unrestricted only when `OBO_ENABLED=false` — consistently across reads
+  (`access_scope`), `require_user`, and the `require_admin` /
+  `require_account_admin` gates, so admin mutations stay reachable in a
+  single-SP deployment. With OBO on, a token-less request fails closed.
+  Account-console host is now derived per-cloud (AWS/Azure/GCP) instead of
+  hardcoding the AWS host.
 - **Unknown `/api` and `/ws` paths return a real JSON 404** instead of the SPA
   HTML with a 200 (which masked typos/removed routes).
 

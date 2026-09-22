@@ -32,6 +32,31 @@ class TestRequireUser:
         assert await require_user(mock_user_info) is mock_user_info
 
 
+class TestNoOboAdminBypass:
+    """No-OBO single-SP deployments must keep admin mutations reachable:
+    the SP fallback is treated as unrestricted when OBO is disabled."""
+
+    async def test_require_admin_allows_sp_when_obo_disabled(self, mock_sp_user, monkeypatch):
+        from backend.config import settings
+        from backend.utils.auth import require_admin
+        monkeypatch.setattr(settings, "obo_enabled", False)
+        assert await require_admin(mock_sp_user) is mock_sp_user
+
+    async def test_require_account_admin_allows_sp_when_obo_disabled(self, mock_sp_user, monkeypatch):
+        from backend.config import settings
+        from backend.utils.auth import require_account_admin
+        monkeypatch.setattr(settings, "obo_enabled", False)
+        assert await require_account_admin(mock_sp_user) is mock_sp_user
+
+    async def test_require_admin_403_for_sp_when_obo_enabled(self, mock_sp_user, monkeypatch):
+        from backend.config import settings
+        from backend.utils.auth import require_admin
+        monkeypatch.setattr(settings, "obo_enabled", True)
+        with pytest.raises(HTTPException) as ei:
+            await require_admin(mock_sp_user)
+        assert ei.value.status_code == 403
+
+
 class TestWriteGating:
     def test_serving_requires_auth(self, unauth_client, monkeypatch):
         from backend.config import settings
