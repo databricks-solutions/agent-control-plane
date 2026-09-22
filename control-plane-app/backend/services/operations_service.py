@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 from backend.config import get_databricks_host, get_databricks_headers
 from backend.database import execute_query
 from backend.services.gateway_service import _execute_system_sql
+from backend.utils.access_scope import sees_deploy_workspace
 
 import logging
 
@@ -163,7 +164,7 @@ def _fetch_usage_metrics(hours: int = 1) -> Dict[str, Dict[str, Any]]:
 # PUBLIC API
 # =====================================================================
 
-def get_realtime_status() -> Dict[str, Any]:
+def get_realtime_status(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Fetch real-time status of ALL discovered agents.
 
     Joins discovered agents from Lakebase with live API data:
@@ -171,18 +172,20 @@ def get_realtime_status() -> Dict[str, Any]:
     - Databricks Apps: compute & deployment status
     - Genie Spaces: basic active/inactive from discovery
 
-    Cached for 30 seconds.
+    Cached for 30 seconds. The cache is always the full (unscoped) payload;
+    scoping is applied on the way out so a workspace admin cannot poison
+    the shared cache for an account admin.
     """
     cached = _cache_get("rt_status")
     if cached is not None:
-        return cached
+        return _filter_rt_status(cached, allowed_workspace_ids)
 
     # 1. Load discovered agents from Lakebase
     discovered = []
     try:
         rows = execute_query(
             "SELECT agent_id, name, type, endpoint_name, endpoint_status, "
-            "model_name, creator, description, config, source "
+            "model_name, creator, description, config, source, workspace_id "
             "FROM discovered_agents"
         )
         discovered = [dict(r) for r in rows]
@@ -231,6 +234,7 @@ def get_realtime_status() -> Dict[str, Any]:
             "creator": agent.get("creator", "") or "",
             "description": agent.get("description", "") or "",
             "source": agent.get("source", "") or "",
+            "workspace_id": str(agent.get("workspace_id") or ""),
             # defaults — overridden per type below
             "state": "",
             "health": "unknown",
@@ -410,7 +414,34 @@ def get_realtime_status() -> Dict[str, Any]:
         },
         "last_refreshed": datetime.now(timezone.utc).isoformat(),
     }
-    return _cache_set("rt_status", result)
+    return _filter_rt_status(_cache_set("rt_status", result), allowed_workspace_ids)
+
+
+def _filter_rt_status(
+    data: Dict[str, Any],
+    allowed_workspace_ids: Optional[List[str]],
+) -> Dict[str, Any]:
+    """Apply workspace scope on the way out of the shared cache."""
+    if allowed_workspace_ids is None:
+        return data
+    allowed_set = {str(x) for x in allowed_workspace_ids}
+    include_unscoped = sees_deploy_workspace(allowed_workspace_ids)
+    agents = [
+        a for a in (data.get("agents") or [])
+        if str(a.get("workspace_id") or "") in allowed_set
+        or (include_unscoped and not a.get("workspace_id"))
+    ]
+    return {
+        "agents": agents,
+        "summary": {
+            "total": len(agents),
+            "healthy": sum(1 for a in agents if a["health"] == "healthy"),
+            "degraded": sum(1 for a in agents if a["health"] == "degraded"),
+            "down": sum(1 for a in agents if a["health"] == "down"),
+            "pending": sum(1 for a in agents if a["health"] == "pending"),
+        },
+        "last_refreshed": data.get("last_refreshed"),
+    }
 
 
 def get_endpoint_detail(endpoint_name: str) -> Dict[str, Any]:

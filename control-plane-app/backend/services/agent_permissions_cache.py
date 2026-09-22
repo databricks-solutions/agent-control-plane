@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from backend.database import execute_query, execute_update, execute_one
+from backend.utils.access_scope import sees_deploy_workspace
 
 import logging
 
@@ -110,7 +111,9 @@ def maybe_refresh_in_background():
 
 # ── Read (fast path) ────────────────────────────────────────────
 
-def get_cached_agent_permissions() -> List[Dict[str, Any]]:
+def get_cached_agent_permissions(
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Read all agent permissions from Lakebase cache.
 
     If the cache is stale (>30 min), a background thread is spawned
@@ -118,8 +121,20 @@ def get_cached_agent_permissions() -> List[Dict[str, Any]]:
     """
     maybe_refresh_in_background()
     try:
+        if allowed_workspace_ids is not None and not allowed_workspace_ids:
+            return []
+        if allowed_workspace_ids is None:
+            ws_filter, params = "", ()
+        elif sees_deploy_workspace(allowed_workspace_ids):
+            # Local registry rows are stored with empty workspace_id.
+            ws_filter = "WHERE workspace_id = ANY(%s) OR workspace_id = '' OR workspace_id IS NULL"
+            params = (allowed_workspace_ids,)
+        else:
+            ws_filter = "WHERE workspace_id = ANY(%s)"
+            params = (allowed_workspace_ids,)
         rows = execute_query(
-            "SELECT * FROM agent_permissions_cache ORDER BY name"
+            f"SELECT * FROM agent_permissions_cache {ws_filter} ORDER BY name",
+            params,
         )
         results = []
         for r in rows:

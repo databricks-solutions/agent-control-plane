@@ -15,7 +15,8 @@ when the cache is empty.
 """
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from typing import Optional
-from backend.utils.auth import get_current_user
+from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.access_scope import resolve_scope, get_allowed_workspace_ids, sees_deploy_workspace, workspace_is_allowed
 from backend.services import mlflow_service
 from backend.database import execute_update
 
@@ -30,24 +31,27 @@ def _obo_token(request: Request) -> Optional[str]:
 # ── Experiments ─────────────────────────────────────────────────
 
 @router.get("/agent-tool-usage")
-async def agent_tool_usage():
+async def agent_tool_usage(user: UserInfo = Depends(get_current_user)):
     """TOOL/RETRIEVER span usage per experiment — which UC functions and vector
     indexes an agent's traces touch."""
-    return mlflow_service.get_agent_tool_usage()
+    allowed = get_allowed_workspace_ids(user)
+    return mlflow_service.get_agent_tool_usage(allowed_workspace_ids=allowed)
 
 
 @router.get("/agent-eval-scores")
-async def agent_eval_scores():
+async def agent_eval_scores(user: UserInfo = Depends(get_current_user)):
     """MLflow-3 eval / assessment scores per experiment — how each agent's traces
     score on LLM-judge and human assessments (safety, relevance, groundedness, …)."""
-    return mlflow_service.get_agent_eval_scores()
+    allowed = get_allowed_workspace_ids(user)
+    return mlflow_service.get_agent_eval_scores(allowed_workspace_ids=allowed)
 
 
 @router.get("/ai-audit")
-async def ai_audit():
+async def ai_audit(user: UserInfo = Depends(get_current_user)):
     """Governed AI audit trail from system.access.audit (AI services only) —
     per-(service, action) activity summary + a recent-event feed."""
-    return mlflow_service.get_ai_audit()
+    allowed = get_allowed_workspace_ids(user)
+    return mlflow_service.get_ai_audit(allowed_workspace_ids=allowed)
 
 
 @router.get("/experiments")
@@ -56,22 +60,34 @@ async def list_experiments(
     max_results: int = Query(10000, le=100000),
     workspace_id: Optional[str] = Query(None, description="Workspace ID, 'all' for all workspaces"),
     workspace_ids: Optional[str] = Query(None, description="Comma-separated workspace ids (multi-select); overrides workspace_id"),
+    user: UserInfo = Depends(get_current_user),
 ):
     """List MLflow experiments, optionally cross-workspace."""
     try:
         token = _obo_token(request)
         ids = [w for w in (workspace_ids.split(",") if workspace_ids else []) if w]
         if ids:
-            return mlflow_service.get_cached_experiments(limit=max_results, workspace_ids=ids)
+            # Multi-select: intersect the requested workspaces with the caller's
+            # access scope (resolve_scope(user, None) = the full allow-list).
+            allowed = resolve_scope(user, None)
+            return mlflow_service.get_cached_experiments(ids, max_results, allowed_workspace_ids=allowed)
         if workspace_id == "all":
             # Account-wide view — read from Lakebase cache only. The live
             # MLflow REST merge against the deploy workspace was adding
             # 1-2s of unnecessary latency (and a single point of failure)
             # while not surfacing anything the cache doesn't already have.
-            return mlflow_service.get_cached_experiments(None, max_results)
+            allowed = resolve_scope(user, None)
+            return mlflow_service.get_cached_experiments(None, max_results, allowed_workspace_ids=allowed)
         elif workspace_id:
-            return mlflow_service.get_cached_experiments(workspace_id, max_results)
+            allowed = resolve_scope(user, workspace_id)
+            return mlflow_service.get_cached_experiments(workspace_id, max_results, allowed_workspace_ids=allowed)
         else:
+            # No workspace_id — this workspace's own MLflow. Live data is
+            # deploy-workspace-only: a workspace admin of somewhere else
+            # must not inherit the app SP's view of this workspace.
+            allowed = get_allowed_workspace_ids(user)
+            if allowed is not None and not sees_deploy_workspace(allowed):
+                return []
             return mlflow_service.search_experiments(max_results, user_token=token)
     except HTTPException:
         raise
@@ -80,10 +96,14 @@ async def list_experiments(
 
 
 @router.get("/experiments/{experiment_id}")
-async def get_experiment(experiment_id: str):
+async def get_experiment(
+    experiment_id: str,
+    user: UserInfo = Depends(get_current_user),
+):
     """Get a single experiment."""
     try:
-        exp = mlflow_service.get_experiment(experiment_id)
+        allowed = get_allowed_workspace_ids(user)
+        exp = mlflow_service.get_experiment(experiment_id, allowed_workspace_ids=allowed)
         if not exp:
             raise HTTPException(status_code=404, detail="Experiment not found")
         return exp
@@ -103,21 +123,33 @@ async def list_runs(
     max_results: int = Query(10000, le=100000),
     workspace_id: Optional[str] = Query(None, description="Workspace ID, 'all' for all workspaces"),
     workspace_ids: Optional[str] = Query(None, description="Comma-separated workspace ids (multi-select); overrides workspace_id"),
+    user: UserInfo = Depends(get_current_user),
 ):
     """Search MLflow runs, optionally cross-workspace."""
     try:
         token = _obo_token(request)
         ids = [w for w in (workspace_ids.split(",") if workspace_ids else []) if w]
         if ids:
-            return mlflow_service.get_cached_runs(limit=max_results, workspace_ids=ids)
+            # Multi-select: intersect requested workspaces with the caller's scope.
+            allowed = resolve_scope(user, None)
+            return mlflow_service.get_cached_runs(ids, max_results, allowed_workspace_ids=allowed)
         if workspace_id == "all":
             # Read from Lakebase cache (populated by scheduled workflow)
-            return mlflow_service.get_cached_runs(None, max_results)
+            allowed = resolve_scope(user, None)
+            return mlflow_service.get_cached_runs(None, max_results, allowed_workspace_ids=allowed)
         elif workspace_id:
-            return mlflow_service.get_cached_runs(workspace_id, max_results)
+            allowed = resolve_scope(user, workspace_id)
+            return mlflow_service.get_cached_runs(workspace_id, max_results, allowed_workspace_ids=allowed)
         else:
+            # Same-workspace live search — deploy-workspace only. Pass the
+            # caller's OBO token when present so we don't fall through to the SP.
+            allowed = get_allowed_workspace_ids(user)
+            if allowed is not None and not sees_deploy_workspace(allowed):
+                return []
             exp_list = experiment_ids.split(",") if experiment_ids else None
-            return mlflow_service.search_runs(exp_list, filter_string, max_results)
+            return mlflow_service.search_runs(
+                exp_list, filter_string, max_results, user_token=token,
+            )
     except HTTPException:
         raise
     except Exception as e:
@@ -135,12 +167,20 @@ async def list_traces(
     workspace_id: Optional[str] = Query(None, description="Workspace ID, 'all' for all workspaces"),
     workspace_ids: Optional[str] = Query(None, description="Comma-separated workspace ids (multi-select); overrides workspace_id"),
     window_days: Optional[int] = Query(None, ge=1, le=365, description="Time window in days (e.g. 7/14/30/90)"),
+    user: UserInfo = Depends(get_current_user),
 ):
-    """Search MLflow traces. All data comes from Lakebase cache (populated by scheduled workflow)."""
+    """Search MLflow traces. All data comes from Lakebase cache (populated by
+    scheduled workflow) — this route ALWAYS reads cross-workspace data (there's
+    no "current workspace only" fallback like /experiments and /runs have), so
+    scope is always resolved, not just when workspace_id is set."""
     try:
         ids = [w for w in (workspace_ids.split(",") if workspace_ids else []) if w]
         ws = None if (workspace_id == "all" or not workspace_id) else workspace_id
-        return mlflow_service.get_cached_traces(ws, max_results, window_days=window_days, workspace_ids=(ids or None))
+        # Multi-select ids take precedence over the single ws; either is then
+        # intersected with the caller's access scope inside get_cached_traces.
+        selection = ids or ws
+        allowed = resolve_scope(user, None)
+        return mlflow_service.get_cached_traces(selection, max_results, window_days=window_days, allowed_workspace_ids=allowed)
     except HTTPException:
         raise
     except Exception as e:
@@ -152,17 +192,21 @@ async def get_trace_detail(
     request_id: str,
     request: Request,
     workspace_id: Optional[str] = Query(None, description="Workspace ID for cross-workspace trace lookup"),
+    user: UserInfo = Depends(get_current_user),
 ):
     """Get full trace detail with parsed metadata."""
     try:
         token = _obo_token(request)
+        allowed = get_allowed_workspace_ids(user)
         if workspace_id and token:
             detail = mlflow_service.get_trace_detail_for_workspace(
                 request_id, workspace_id, user_token=token,
+                allowed_workspace_ids=allowed,
             )
         else:
             detail = mlflow_service.get_trace_detail(
                 request_id, user_token=token,
+                allowed_workspace_ids=allowed,
             )
         if not detail:
             raise HTTPException(status_code=404, detail="Trace not found")
@@ -180,17 +224,21 @@ async def list_models(
     request: Request,
     max_results: int = Query(500, le=10000),
     workspace_id: Optional[str] = Query(None, description="Workspace ID, 'all' for all workspaces"),
+    user: UserInfo = Depends(get_current_user),
 ):
     """UC registered models from the Lakebase cache (populated by the discovery
     workflow). Reads the cache instead of a live REST search on every load; the
     live search now only runs in the discovery workflow. Same row shape as before."""
     try:
-        cached = mlflow_service.get_cached_models(max_results)
+        allowed = get_allowed_workspace_ids(user)
+        cached = mlflow_service.get_cached_models(max_results, allowed_workspace_ids=allowed)
         # None = cache table absent (never synced) → one-off live fallback so the
         # tab isn't empty before the first discovery run. A real empty list (0
-        # models in the workspace) is returned as-is, so we don't hit the live API
-        # on every load.
+        # models in the workspace, OR a restricted caller with none in scope) is
+        # returned as-is, so we don't hit the live API on every load.
         if cached is None:
+            if allowed is not None and not sees_deploy_workspace(allowed):
+                return []
             return mlflow_service.search_registered_models(max_results)
         return cached
     except HTTPException:
@@ -200,7 +248,11 @@ async def list_models(
 
 
 @router.get("/models/{name:path}/versions")
-async def list_model_versions(name: str, max_results: int = Query(20, le=100)):
+async def list_model_versions(
+    name: str,
+    max_results: int = Query(20, le=100),
+    user: UserInfo = Depends(get_current_user),
+):
     """Versions for a registered model, from the Lakebase cache (populated by the
     discovery workflow). Reads the cache instead of a live REST search on every
     model expand; the live search now only runs in the discovery workflow.
@@ -209,8 +261,11 @@ async def list_model_versions(name: str, max_results: int = Query(20, le=100)):
     (never synced) — a real empty list (a model with no cached versions) is
     returned as-is, so we don't hit the live API on every expand."""
     try:
-        cached = mlflow_service.get_cached_model_versions(name, max_results)
+        allowed = get_allowed_workspace_ids(user)
+        cached = mlflow_service.get_cached_model_versions(name, max_results, allowed_workspace_ids=allowed)
         if cached is None:
+            if allowed is not None and not sees_deploy_workspace(allowed):
+                return []
             return mlflow_service.search_model_versions(name, max_results)
         return cached
     except Exception as e:
@@ -220,24 +275,31 @@ async def list_model_versions(name: str, max_results: int = Query(20, le=100)):
 # ── Cross-workspace: metadata & cache ───────────────────────────
 
 @router.get("/workspaces")
-async def list_observability_workspaces():
-    """Return workspaces that have cached MLflow observability data."""
+async def list_observability_workspaces(user: UserInfo = Depends(get_current_user)):
+    """Return workspaces that have cached MLflow observability data, scoped to
+    the caller's workspace access (feeds this page's workspace picker)."""
     try:
-        return mlflow_service.get_observability_workspaces()
+        allowed = get_allowed_workspace_ids(user)
+        return mlflow_service.get_observability_workspaces(allowed_workspace_ids=allowed)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"MLflow API error: {e}")
 
 
 @router.get("/workspace-hosts")
-async def list_workspace_hosts():
-    """Return the workspace_id → host URL map from the registry.
+async def list_workspace_hosts(user: UserInfo = Depends(get_current_user)):
+    """Return the workspace_id → host URL map from the registry, scoped to the
+    caller's workspace access.
 
     Used by the frontend to build "Open in MLflow" links that route to the
     correct workspace, not the deploy workspace.
     """
     try:
         from backend.services.workspace_registry import get_all_workspace_hosts
-        return get_all_workspace_hosts()
+        hosts = get_all_workspace_hosts()
+        allowed = get_allowed_workspace_ids(user)
+        if allowed is None:
+            return hosts
+        return {ws_id: host for ws_id, host in hosts.items() if ws_id in allowed}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Workspace registry error: {e}")
 

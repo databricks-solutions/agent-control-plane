@@ -1,6 +1,8 @@
 """API routes for system health."""
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from backend.database import execute_one
+from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.access_scope import get_allowed_workspace_ids, sees_deploy_workspace
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -24,8 +26,10 @@ async def get_status():
 
 
 @router.get("/errors")
-async def get_errors(limit: int = 50):
+async def get_errors(limit: int = 50, user: UserInfo = Depends(get_current_user)):
     """Get recent errors."""
+    if not sees_deploy_workspace(get_allowed_workspace_ids(user)):
+        return {"data": [], "meta": {"count": 0}}
     query = """
         SELECT request_id, agent_id, timestamp, status_code, error_message
         FROM request_logs

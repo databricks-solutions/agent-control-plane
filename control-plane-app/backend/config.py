@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     # Feature flags — default OFF, flip via env var to dark-launch into prod.
     feature_genie_enabled: bool = False
 
+    # OBO (On-Behalf-Of user auth). Default ON: the app expects Databricks Apps
+    # to forward each caller's ``x-forwarded-access-token`` and enforces per-user
+    # workspace access scope (backend/utils/access_scope.py). A deployment that
+    # does NOT configure OBO — where every request runs as the app service
+    # principal with no per-user identity — must set OBO_ENABLED=false, which
+    # makes the app unrestricted (its historical single-identity behaviour)
+    # instead of fail-closing every scoped endpoint to empty.
+    obo_enabled: bool = True
+
     # Genie Ask tab — space id minted by setup_genie_space.py and pinned via env.
     genie_space_id: str = ""
 
@@ -153,6 +162,29 @@ def get_databricks_host() -> str:
     if raw and not raw.startswith(("https://", "http://")):
         raw = f"https://{raw}"
     return raw
+
+
+def get_databricks_account_host() -> str:
+    """Return the Databricks *account console* host URL (with https://).
+
+    Account-level APIs (SCIM /Users, workspaces, permissionassignments) live on
+    a different host than the workspace, and it differs per cloud. Hardcoding
+    the AWS host (``accounts.cloud.databricks.com``) broke every account call on
+    Azure/GCP. Resolve it from an explicit override, else derive it from the
+    workspace host domain, else default to AWS commercial.
+    """
+    override = os.environ.get("DATABRICKS_ACCOUNT_HOST", "").strip()
+    if override:
+        if not override.startswith(("https://", "http://")):
+            override = f"https://{override}"
+        return override.rstrip("/")
+    host = get_databricks_host().lower()
+    if "azuredatabricks.net" in host:
+        return "https://accounts.azuredatabricks.net"
+    if "gcp.databricks.com" in host:
+        return "https://accounts.gcp.databricks.com"
+    # Default: AWS commercial (accounts.cloud.databricks.com)
+    return "https://accounts.cloud.databricks.com"
 
 
 def get_databricks_headers() -> dict:

@@ -126,7 +126,7 @@ export default function VectorSearchPage() {
             onRefresh={handleRefresh}
             isRefreshing={isFetching}
             lastSynced={lastSynced}
-            title="Refresh Knowledge Bases data"
+            title="Updates the shared cache, not only the selected workspace"
           />
         </div>
       </div>

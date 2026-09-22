@@ -365,7 +365,7 @@ function OverviewTab() {
             isPending={syncAgents.isPending}
             isRefreshing={discoveryStatus?.is_refreshing}
             lastSynced={discoveryStatus?.last_synced}
-            title="Sync agents from Databricks workspace"
+            title="Updates the shared cache, not only the selected workspace"
           />
         </div>
       </div>

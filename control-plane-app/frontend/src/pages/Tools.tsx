@@ -21,6 +21,7 @@ import {
   Zap,
   Search,
   LayoutDashboard,
+  Info,
 } from 'lucide-react'
 
 type TabKey = 'overview' | 'mcp' | 'functions' | 'usage'
@@ -115,7 +116,7 @@ export default function ToolsPage() {
             isPending={syncTools.isPending}
             isRefreshing={overview?.is_refreshing}
             lastSynced={overview?.last_refreshed ?? null}
-            title="Refresh tools from UC connections and catalogs"
+            title="Updates the shared cache, not only the selected workspace"
           />
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
@@ -134,6 +135,11 @@ export default function ToolsPage() {
             />
           </div>
         </div>
+      </div>
+
+      <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg text-xs text-amber-700 dark:text-amber-400">
+        <Info className="w-3.5 h-3.5 flex-shrink-0" />
+        Shared workspace — live data from the app home workspace.
       </div>
 
       {/* Tabs */}

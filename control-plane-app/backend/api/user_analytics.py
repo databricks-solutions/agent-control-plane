@@ -5,7 +5,8 @@ system.serving.endpoint_usage). No live system table queries.
 """
 import logging
 from fastapi import APIRouter, Depends, Query
-from backend.utils.auth import get_current_user
+from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.access_scope import get_allowed_workspace_ids
 from typing import Dict, Any, List
 from backend.database import execute_query
 from backend.services.access_service import get_all_principals
@@ -162,11 +163,38 @@ def _get_requests_per_user_distribution(days: int) -> List[Dict[str, Any]]:
     return [{"bucket": r.get("bucket", ""), "user_count": int(r.get("user_count") or 0)} for r in rows]
 
 
+_EMPTY_PAGE_DATA: Dict[str, Any] = {
+    "kpis": {"active_users_24h": 0, "active_users_7d": 0, "active_users_period": 0,
+             "total_requests": 0, "unique_agents": 0, "total_tokens": 0, "total_cost": 0},
+    "top_users": [],
+    "heatmap": [],
+    "daily_active_users": [],
+    "user_agent_matrix": [],
+    "distribution": [],
+    "principals": [],
+}
+
+
 @router.get("/page-data")
 def user_analytics_page_data(
     days: int = Query(default=30, ge=1, le=365),
+    user: UserInfo = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """Composite endpoint returning all data for the User Analytics page (from cache)."""
+    """Composite endpoint returning all data for the User Analytics page (from cache).
+
+    ``user_analytics_daily`` / ``user_analytics_heatmap`` have no workspace_id
+    column — they're account-wide rollups of `system.serving.endpoint_usage`
+    by design — and ``get_all_principals`` is explicitly account-wide too (see
+    its docstring). None of this can be safely filtered down to "the
+    workspaces one workspace admin administers", so — same rule as the
+    account-wide billing/mlflow/vector-search reads — it's suppressed
+    entirely for anyone who isn't a real account admin, rather than leaking
+    cross-workspace user activity to a scoped caller.
+    """
+    allowed = get_allowed_workspace_ids(user)
+    if allowed is not None:
+        return _EMPTY_PAGE_DATA
+
     principals = []
     try:
         principals = get_all_principals(days=days)

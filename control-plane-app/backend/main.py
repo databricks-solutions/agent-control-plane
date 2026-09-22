@@ -55,6 +55,15 @@ async def lifespan(app: FastAPI):
             ensure_agent_permissions_table()
         except Exception as exc:
             logger.warning("Agent permissions cache init skipped: %s", exc)
+        try:
+            # Access-control source of truth for non-account-admins — see
+            # backend/utils/access_scope.py. Ensures the table exists and
+            # warms the in-memory cache from Lakebase; the Account API
+            # refresh itself runs from POST /agents/sync (needs a token).
+            from backend.services.workspace_admins_service import ensure_workspace_admins_table
+            ensure_workspace_admins_table()
+        except Exception as exc:
+            logger.warning("Workspace admins cache init skipped: %s", exc)
 
     def _init_tools():
         try:
@@ -271,9 +280,24 @@ async def get_config():
 
 @app.get("/api/v1/me")
 async def get_me(request: Request):
-    """Return the authenticated user's identity and role."""
+    """Return the authenticated user's identity, role, and workspace access
+    scope. ``has_workspace_access`` / ``allowed_workspace_count`` /
+    ``sees_deploy_workspace`` reflect the SAME rule every data endpoint
+    enforces server-side (see backend/utils/access_scope.py) — the frontend
+    uses them only to decide whether to render a "no access" state or the
+    Shared workspace live-resources section; the real enforcement is on the
+    API, not here.
+    """
     try:
         user = await get_current_user(request)
+        from backend.utils.access_scope import get_allowed_workspace_ids, sees_deploy_workspace
+        allowed = get_allowed_workspace_ids(user)
+        current_ws = None
+        try:
+            from backend.services.billing_service import get_current_workspace_id
+            current_ws = get_current_workspace_id()
+        except Exception:
+            current_ws = None
         return {
             "username": user.username,
             "display_name": user.display_name,
@@ -281,6 +305,10 @@ async def get_me(request: Request):
             "is_admin": user.is_admin,
             "is_account_admin": user.is_account_admin,
             "groups": user.groups,
+            "has_workspace_access": allowed is None or len(allowed) > 0,
+            "allowed_workspace_count": None if allowed is None else len(allowed),
+            "sees_deploy_workspace": sees_deploy_workspace(allowed),
+            "current_workspace_id": current_ws,
         }
     except Exception as exc:
         logger.warning("/api/v1/me failed: %s", exc)
@@ -291,6 +319,10 @@ async def get_me(request: Request):
             "is_admin": False,
             "is_account_admin": False,
             "groups": [],
+            "has_workspace_access": False,
+            "allowed_workspace_count": 0,
+            "sees_deploy_workspace": False,
+            "current_workspace_id": None,
         }
 
 

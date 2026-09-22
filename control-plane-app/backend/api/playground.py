@@ -1,6 +1,7 @@
 """API routes for the Agent Playground – chat with serving endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, Query
-from backend.utils.auth import get_current_user
+from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.access_scope import get_allowed_workspace_ids, sees_deploy_workspace
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
@@ -34,18 +35,26 @@ class ChatResponse(BaseModel):
 
 # ── Endpoints ────────────────────────────────────────────────────
 
+def _sees_deploy(user: UserInfo) -> bool:
+    return sees_deploy_workspace(get_allowed_workspace_ids(user))
+
+
 @router.get("/endpoints")
-def list_queryable_endpoints():
+def list_queryable_endpoints(user: UserInfo = Depends(get_current_user)):
     """Return serving endpoints the app can query (READY + CAN_QUERY permission)."""
+    if not _sees_deploy(user):
+        return []
     return playground_service.list_queryable_endpoints()
 
 
 @router.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+def chat(req: ChatRequest, user: UserInfo = Depends(get_current_user)):
     """Send a message to a serving endpoint and persist the conversation.
 
     If session_id is omitted a new session is created automatically.
     """
+    if not _sees_deploy(user):
+        raise HTTPException(status_code=404, detail="Endpoint not found")
     # 1. Resolve or create session
     if req.session_id:
         session = playground_service.get_session(req.session_id)
@@ -117,14 +126,21 @@ def chat(req: ChatRequest):
 
 
 @router.get("/sessions")
-def list_sessions(limit: int = Query(default=50, ge=1, le=200)):
+def list_sessions(
+    limit: int = Query(default=50, ge=1, le=200),
+    user: UserInfo = Depends(get_current_user),
+):
     """List recent playground sessions."""
+    if not _sees_deploy(user):
+        return []
     return playground_service.list_sessions(limit)
 
 
 @router.get("/sessions/{session_id}")
-def get_session(session_id: str):
+def get_session(session_id: str, user: UserInfo = Depends(get_current_user)):
     """Get a session with all its messages."""
+    if not _sees_deploy(user):
+        raise HTTPException(status_code=404, detail="Session not found")
     session = playground_service.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -133,8 +149,10 @@ def get_session(session_id: str):
 
 
 @router.delete("/sessions/{session_id}")
-def delete_session(session_id: str):
+def delete_session(session_id: str, user: UserInfo = Depends(get_current_user)):
     """Delete a session and all its messages."""
+    if not _sees_deploy(user):
+        raise HTTPException(status_code=404, detail="Session not found")
     deleted = playground_service.delete_session(session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")

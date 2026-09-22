@@ -1,10 +1,14 @@
 """Admin probe endpoints — for ad-hoc diagnostics, not for steady-state use."""
-from typing import Optional
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 import httpx
 from databricks.sdk import WorkspaceClient
+from backend.utils.auth import require_account_admin
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+router = APIRouter(
+    prefix="/admin",
+    tags=["admin"],
+    dependencies=[Depends(require_account_admin)],
+)
 
 
 @router.get("/probe-cross-workspace")

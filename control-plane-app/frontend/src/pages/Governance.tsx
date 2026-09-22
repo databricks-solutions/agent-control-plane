@@ -185,7 +185,7 @@ export default function GovernancePage() {
               onClick={() => refreshMutation.mutate(90)}
               disabled={refreshMutation.isPending || cacheStatus?.is_refreshing}
               className="p-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 transition-colors"
-              title="Refresh billing data from system tables"
+              title="Updates the shared cache, not only the selected workspace"
             >
               <RefreshCw className={`w-4 h-4 ${refreshMutation.isPending ? 'animate-spin text-blue-500' : 'text-gray-500 dark:text-gray-400'}`} />
             </button>

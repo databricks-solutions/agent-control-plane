@@ -1543,16 +1543,30 @@ def maybe_refresh_async():
     pass
 
 
-def get_discovered_agents(workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_discovered_agents(
+    workspace_id: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Return all discovered agents, optionally filtered by workspace.
 
     Reads directly from Lakebase (populated by the Workflow job).
+
+    ``allowed_workspace_ids`` is the caller's access scope (see
+    ``backend.utils.access_scope``): None = no restriction (account admin);
+    [] = no access at all → returns []; [ids...] = restrict to those
+    workspaces, combined with an explicit ``workspace_id`` if given.
     """
+    from backend.utils.access_scope import NoAccess, resolve_ws_ids
+    try:
+        ws_ids = resolve_ws_ids(workspace_id, allowed_workspace_ids)
+    except NoAccess:
+        return []
+
     clauses = []
     params: list = []
-    if workspace_id:
-        clauses.append("workspace_id = %s")
-        params.append(workspace_id)
+    if ws_ids is not None:
+        clauses.append("workspace_id = ANY(%s)")
+        params.append(ws_ids)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = execute_query(f"SELECT * FROM discovered_agents {where} ORDER BY name", tuple(params) if params else None)
     result = []
@@ -1569,41 +1583,64 @@ def get_discovered_agents(workspace_id: Optional[str] = None) -> List[Dict[str, 
     return result
 
 
-def get_all_agents_merged(workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_all_agents_merged(
+    workspace_id: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Return discovered agents only (registered agents are excluded)."""
-    discovered = get_discovered_agents(workspace_id)
+    discovered = get_discovered_agents(workspace_id, allowed_workspace_ids)
     for d in discovered:
         d["_source"] = "discovered"
     return discovered
 
 
-def get_discovery_status() -> Dict[str, Any]:
+def get_discovery_status(
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Return the current discovery cache status.
 
     Data is populated by the scheduled Workflow job (every 30 min).
     Manual refresh via POST /api/agents/sync is still available.
+    Counts are scoped to the caller's workspaces.
     """
+    from backend.utils.access_scope import NoAccess, resolve_ws_ids
+    try:
+        ws_ids = resolve_ws_ids(None, allowed_workspace_ids)
+    except NoAccess:
+        return {
+            "total_discovered": 0,
+            "last_synced": None,
+            "is_refreshing": _refresh_in_progress,
+            "obo_enabled": _last_sync_had_obo,
+            "by_type": {},
+            "by_source": {},
+        }
+
+    ws_filter = "WHERE workspace_id = ANY(%s)" if ws_ids is not None else ""
+    params: tuple = (ws_ids,) if ws_ids is not None else ()
+
     row = execute_one(
-        "SELECT COUNT(*) AS total, MAX(last_synced) AS last_synced FROM discovered_agents"
+        f"SELECT COUNT(*) AS total, MAX(last_synced) AS last_synced FROM discovered_agents {ws_filter}",
+        params if params else None,
     )
     total = int(row["total"]) if row and row.get("total") else 0
     last = row["last_synced"] if row else None
 
-    # Check type breakdown for richer status
     type_counts = {}
     try:
         rows = execute_query(
-            "SELECT type, COUNT(*) AS cnt FROM discovered_agents GROUP BY type ORDER BY cnt DESC"
+            f"SELECT type, COUNT(*) AS cnt FROM discovered_agents {ws_filter} GROUP BY type ORDER BY cnt DESC",
+            params if params else None,
         )
         type_counts = {r["type"]: int(r["cnt"]) for r in rows}
     except Exception:
         pass
 
-    # Check source breakdown (api vs system_table vs audit_log)
     source_counts = {}
     try:
         rows = execute_query(
-            "SELECT source, COUNT(*) AS cnt FROM discovered_agents GROUP BY source ORDER BY cnt DESC"
+            f"SELECT source, COUNT(*) AS cnt FROM discovered_agents {ws_filter} GROUP BY source ORDER BY cnt DESC",
+            params if params else None,
         )
         source_counts = {r["source"]: int(r["cnt"]) for r in rows}
     except Exception:

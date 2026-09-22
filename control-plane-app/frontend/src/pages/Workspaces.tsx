@@ -1,10 +1,22 @@
 import { useState, useMemo, useCallback } from 'react'
+import { Link } from 'react-router-dom'
 import { useQueryClient, useIsFetching } from '@tanstack/react-query'
 import { SortableHeader, useSort, sortRows } from '@/components/SortableTable'
 import {
   useWorkspacesPageData,
   useBillingRefresh,
   useBillingCacheStatus,
+  useCurrentUser,
+  useToolsOverview,
+  useGatewayPageData,
+  usePlaygroundEndpoints,
+  useDiscoveryStatus,
+  useSyncAgents,
+  useSyncTools,
+  useRefreshGateway,
+  useRefreshOperations,
+  useRefreshVectorSearch,
+  useRefreshMlflowCache,
   type WorkspaceSummary,
   type WorkspacePageData,
 } from '@/api/hooks'
@@ -29,6 +41,11 @@ import {
   TrendingDown,
   Minus,
   Search,
+  Share2,
+  Info,
+  Wrench,
+  MessageSquare,
+  RefreshCw,
 } from 'lucide-react'
 import {
   LineChart as RechartsLineChart,
@@ -77,6 +94,7 @@ const TABS = [
   { key: 'costs', label: 'Cost Breakdown', icon: DollarSign },
   { key: 'agents', label: 'Agent Inventory', icon: Bot },
   { key: 'endpoints', label: 'Top Endpoints', icon: Server },
+  { key: 'shared', label: 'Shared workspace', icon: Share2 },
 ] as const
 
 type TabKey = (typeof TABS)[number]['key']
@@ -220,7 +238,7 @@ export default function WorkspacesPage() {
             }}
             isPending={billingRefresh.isPending || isFetchingWorkspaces}
             lastSynced={billingLastRefreshed}
-            title="Refresh workspace billing data from system tables"
+            title="Updates the shared cache, not only the selected workspace"
           />
           <select
             value={days}
@@ -254,8 +272,8 @@ export default function WorkspacesPage() {
         ))}
       </div>
 
-      {/* KPI cards */}
-      {kpis && (
+      {/* KPI cards — scoped federation totals; hide on the Shared tab */}
+      {kpis && tab !== 'shared' && (
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
           <KpiCard title="Workspaces" value={kpis.total_workspaces} />
           <KpiCard
@@ -430,7 +448,211 @@ export default function WorkspacesPage() {
       {tab === 'costs' && <CostBreakdownTab data={pageData} />}
       {tab === 'agents' && <AgentInventoryTab data={pageData} />}
       {tab === 'endpoints' && <TopEndpointsTab data={pageData} />}
+      {tab === 'shared' && (
+        <SharedWorkspaceTab currentWsId={pageData?.current_workspace_id ?? null} />
+      )}
     </div>
+  )
+}
+
+/* ── Shared workspace tab ────────────────────────────────────── */
+
+function cacheNewest(caches: Record<string, { last_refreshed: string | null }> | undefined): string | null {
+  if (!caches) return null
+  return Object.values(caches).reduce<string | null>((newest, c) => {
+    if (!c.last_refreshed) return newest
+    if (!newest) return c.last_refreshed
+    return c.last_refreshed > newest ? c.last_refreshed : newest
+  }, null)
+}
+
+function SharedWorkspaceTab({ currentWsId }: { currentWsId: string | null }) {
+  const { data: user } = useCurrentUser()
+  const seesDeploy = user?.sees_deploy_workspace === true
+  const queryClient = useQueryClient()
+
+  const { data: toolsOverview } = useToolsOverview({ enabled: seesDeploy })
+  const { data: gatewayPage } = useGatewayPageData({ enabled: seesDeploy })
+  const { data: playgroundEndpoints } = usePlaygroundEndpoints({ enabled: seesDeploy })
+  const { data: discoveryStatus } = useDiscoveryStatus()
+  const { data: billingCacheStatus } = useBillingCacheStatus()
+
+  const syncAgents = useSyncAgents()
+  const billingRefresh = useBillingRefresh()
+  const refreshVs = useRefreshVectorSearch()
+  const refreshMlflow = useRefreshMlflowCache()
+  const syncTools = useSyncTools()
+  const refreshGateway = useRefreshGateway()
+  const refreshOps = useRefreshOperations()
+
+  const gwOverview = gatewayPage?.overview || {}
+  const queryable = playgroundEndpoints || []
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start gap-2 px-3 py-2.5 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg text-sm text-amber-800 dark:text-amber-300">
+        <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
+        <div>
+          <p>
+            This is the workspace the control plane app runs in
+            {currentWsId ? <> (<span className="font-mono text-xs">{currentWsId}</span>)</> : null}.
+            Live serving, tools, and playground live here. Cache jobs refill the shared
+            Lakebase tables; other pages still only show workspaces you administer.
+          </p>
+        </div>
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-3">Live resources</h3>
+        {seesDeploy ? (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium dark:text-gray-300">Tools</CardTitle>
+                <Wrench className="w-4 h-4 text-gray-400" />
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <p className="text-2xl font-semibold dark:text-gray-100">{toolsOverview?.total_tools ?? 0}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  {toolsOverview?.mcp_servers ?? 0} MCP · {toolsOverview?.uc_functions ?? 0} UC functions
+                </p>
+                <Link to="/tools" className="inline-flex items-center gap-1 text-xs text-db-red hover:underline">
+                  Open Tools <ChevronRight className="w-3 h-3" />
+                </Link>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium dark:text-gray-300">Live Gateway</CardTitle>
+                <Server className="w-4 h-4 text-gray-400" />
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <p className="text-2xl font-semibold dark:text-gray-100">{gwOverview.total_endpoints ?? 0}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  {gwOverview.ready_endpoints ?? 0} ready · {gwOverview.gateway_enabled ?? 0} with AI Gateway
+                </p>
+                <Link to="/ai-gateway" className="inline-flex items-center gap-1 text-xs text-db-red hover:underline">
+                  Open AI Gateway <ChevronRight className="w-3 h-3" />
+                </Link>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium dark:text-gray-300">Playground</CardTitle>
+                <MessageSquare className="w-4 h-4 text-gray-400" />
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <p className="text-2xl font-semibold dark:text-gray-100">{queryable.length}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">Queryable serving endpoints</p>
+                {queryable.length > 0 && (
+                  <ul className="text-xs text-gray-600 dark:text-gray-300 space-y-0.5">
+                    {queryable.slice(0, 5).map((ep) => (
+                      <li key={ep.endpoint_name} className="truncate font-mono">{ep.endpoint_name}</li>
+                    ))}
+                    {queryable.length > 5 && (
+                      <li className="text-gray-400">+{queryable.length - 5} more</li>
+                    )}
+                  </ul>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        ) : (
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            Live serving, tools, and playground live on the app&apos;s home workspace.
+            You don&apos;t administer that workspace, so those resources aren&apos;t listed here.
+          </p>
+        )}
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">Shared cache jobs</h3>
+        <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+          These refill shared caches. Running a job does not unhide other workspaces.
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <SharedJobCard
+            title="Agent discovery"
+            description="Re-scan serving endpoints, apps, and Genie spaces into the shared agent cache."
+            lastSynced={discoveryStatus?.last_synced}
+            isPending={syncAgents.isPending || !!discoveryStatus?.is_refreshing}
+            onRun={() => syncAgents.mutate()}
+          />
+          <SharedJobCard
+            title="Billing"
+            description="Reload serving and product cost from system tables into the shared billing cache."
+            lastSynced={cacheNewest(billingCacheStatus?.caches)}
+            isPending={billingRefresh.isPending || !!billingCacheStatus?.is_refreshing}
+            onRun={() => billingRefresh.mutate(90)}
+          />
+          <SharedJobCard
+            title="Knowledge Bases"
+            description="Rediscover Vector Search endpoints and indexes into the shared cache."
+            isPending={refreshVs.isPending}
+            onRun={() => refreshVs.mutate()}
+          />
+          <SharedJobCard
+            title="Observability"
+            description="Refresh MLflow experiments and runs from system tables into Lakebase."
+            isPending={refreshMlflow.isPending}
+            onRun={() => refreshMlflow.mutate()}
+          />
+          <SharedJobCard
+            title="Tools"
+            description="Rediscover MCP servers and UC functions on the home workspace."
+            lastSynced={toolsOverview?.last_refreshed ?? null}
+            isPending={syncTools.isPending || !!toolsOverview?.is_refreshing}
+            onRun={() => syncTools.mutate()}
+          />
+          <SharedJobCard
+            title="Gateway / Operations cache"
+            description="Clear in-memory live caches so the next request fetches fresh home-workspace status."
+            lastSynced={gatewayPage?.last_refreshed ?? null}
+            isPending={refreshGateway.isPending || refreshOps.isPending}
+            onRun={() => {
+              refreshGateway.mutate()
+              refreshOps.mutate()
+              queryClient.invalidateQueries({ queryKey: ['gateway'] })
+              queryClient.invalidateQueries({ queryKey: ['operations'] })
+            }}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SharedJobCard({
+  title,
+  description,
+  lastSynced,
+  isPending,
+  onRun,
+}: {
+  title: string
+  description: string
+  lastSynced?: string | null
+  isPending: boolean
+  onRun: () => void
+}) {
+  return (
+    <Card>
+      <CardContent className="pt-4 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <RefreshCw className={`w-3.5 h-3.5 text-gray-400 ${isPending ? 'animate-spin text-blue-500' : ''}`} />
+            <p className="text-sm font-medium dark:text-gray-100">{title}</p>
+          </div>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{description}</p>
+        </div>
+        <RefreshButton
+          onRefresh={onRun}
+          isPending={isPending}
+          lastSynced={lastSynced}
+          title={`Run ${title} — updates the shared cache, not only the selected workspace`}
+        />
+      </CardContent>
+    </Card>
   )
 }
 

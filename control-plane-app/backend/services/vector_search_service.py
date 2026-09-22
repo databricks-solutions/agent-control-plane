@@ -272,47 +272,92 @@ def discover_vector_search() -> Dict[str, int]:
 
 # ── Cache reads ───────────────────────────────────────────────
 
-def get_endpoints() -> List[Dict[str, Any]]:
-    """Return all vector search endpoints from cache."""
-    return execute_query("SELECT * FROM vector_search_endpoints ORDER BY endpoint_name")
-
-
-def get_indexes(endpoint_name: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Return vector search indexes, optionally filtered by endpoint."""
-    if endpoint_name:
-        return execute_query(
-            "SELECT * FROM vector_search_indexes WHERE endpoint_name = %s ORDER BY index_name",
-            (endpoint_name,),
-        )
-    return execute_query("SELECT * FROM vector_search_indexes ORDER BY endpoint_name, index_name")
-
-
-def get_index_details() -> List[Dict[str, Any]]:
-    """Return all indexes with detailed sync status."""
-    return execute_query("""
-        SELECT i.*, e.status AS endpoint_status
-        FROM vector_search_indexes i
-        LEFT JOIN vector_search_endpoints e ON i.endpoint_name = e.endpoint_name
-        ORDER BY i.endpoint_name, i.index_name
-    """)
-
-
-def get_health_history(days: int = 7) -> List[Dict[str, Any]]:
-    """Return endpoint health snapshots for the last N days."""
+def get_endpoints(allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Return all vector search endpoints from cache, scoped to the caller's
+    workspace access (see backend.utils.access_scope)."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws_filter = "WHERE workspace_id = ANY(%(ws)s)" if allowed_workspace_ids is not None else ""
     return execute_query(
-        """SELECT endpoint_name, status, num_indexes, recorded_at
-           FROM vector_search_health_history
-           WHERE recorded_at >= NOW() - INTERVAL '%s days'
-           ORDER BY recorded_at DESC""",
-        (days,),
+        f"SELECT * FROM vector_search_endpoints {ws_filter} ORDER BY endpoint_name",
+        {"ws": allowed_workspace_ids},
     )
 
 
-def get_overview() -> Dict[str, Any]:
-    """Return KPI overview for vector search."""
+def get_indexes(
+    endpoint_name: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Return vector search indexes, optionally filtered by endpoint and scoped
+    to the caller's workspace access."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    clauses = []
+    params: Dict[str, Any] = {}
+    if endpoint_name:
+        clauses.append("endpoint_name = %(ep)s")
+        params["ep"] = endpoint_name
+    if allowed_workspace_ids is not None:
+        clauses.append("workspace_id = ANY(%(ws)s)")
+        params["ws"] = allowed_workspace_ids
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    return execute_query(
+        f"SELECT * FROM vector_search_indexes {where} ORDER BY endpoint_name, index_name",
+        params,
+    )
+
+
+def get_index_details(allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Return all indexes with detailed sync status, scoped to the caller's
+    workspace access."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws_filter = "WHERE i.workspace_id = ANY(%(ws)s)" if allowed_workspace_ids is not None else ""
+    return execute_query(f"""
+        SELECT i.*, e.status AS endpoint_status
+        FROM vector_search_indexes i
+        LEFT JOIN vector_search_endpoints e ON i.endpoint_name = e.endpoint_name
+        {ws_filter}
+        ORDER BY i.endpoint_name, i.index_name
+    """, {"ws": allowed_workspace_ids})
+
+
+def get_health_history(days: int = 7, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Return endpoint health snapshots for the last N days, scoped to the
+    caller's workspace access.
+
+    ``vector_search_health_history`` has no workspace_id column of its own —
+    joins to ``vector_search_endpoints`` (which does) to filter.
+    """
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws_join = (
+        "JOIN vector_search_endpoints e ON e.endpoint_name = h.endpoint_name AND e.workspace_id = ANY(%(ws)s)"
+        if allowed_workspace_ids is not None else ""
+    )
+    return execute_query(
+        f"""SELECT h.endpoint_name, h.status, h.num_indexes, h.recorded_at
+           FROM vector_search_health_history h
+           {ws_join}
+           WHERE h.recorded_at >= NOW() - INTERVAL '1 day' * %(days)s
+           ORDER BY h.recorded_at DESC""",
+        {"days": days, "ws": allowed_workspace_ids},
+    )
+
+
+def get_overview(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Return KPI overview for vector search, scoped to the caller's
+    workspace access."""
+    empty = {"total_endpoints": 0, "online_endpoints": 0, "offline_endpoints": 0,
+              "total_indexes": 0, "by_status": {}, "by_index_type": {}}
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return empty
+    ws_filter_e = "WHERE workspace_id = ANY(%(ws)s)" if allowed_workspace_ids is not None else ""
+    ws_filter_i = "WHERE workspace_id = ANY(%(ws)s)" if allowed_workspace_ids is not None else ""
+    params = {"ws": allowed_workspace_ids}
     try:
-        endpoints = execute_query("SELECT status, COUNT(*) as cnt FROM vector_search_endpoints GROUP BY status")
-        indexes = execute_query("SELECT index_type, COUNT(*) as cnt FROM vector_search_indexes GROUP BY index_type")
+        endpoints = execute_query(f"SELECT status, COUNT(*) as cnt FROM vector_search_endpoints {ws_filter_e} GROUP BY status", params)
+        indexes = execute_query(f"SELECT index_type, COUNT(*) as cnt FROM vector_search_indexes {ws_filter_i} GROUP BY index_type", params)
 
         total_endpoints = sum(r["cnt"] for r in endpoints)
         online = sum(r["cnt"] for r in endpoints if r["status"] == "ONLINE")
@@ -328,8 +373,7 @@ def get_overview() -> Dict[str, Any]:
         }
     except Exception as exc:
         logger.warning("Vector search overview failed: %s", exc)
-        return {"total_endpoints": 0, "online_endpoints": 0, "offline_endpoints": 0,
-                "total_indexes": 0, "by_status": {}, "by_index_type": {}}
+        return empty
 
 
 # ── Billing queries (system.billing.usage) ────────────────────
@@ -406,17 +450,31 @@ def _execute_billing_sql(sql: str) -> List[Dict[str, Any]]:
     return [dict(zip(columns, row)) for row in resp_json.get("result", {}).get("data_array", [])]
 
 
-def get_cost_summary(days: int = 30) -> Dict[str, Any]:
+def _kb_ws_clause(allowed_workspace_ids: Optional[List[str]], alias: str = "") -> str:
+    """Shared ``AND workspace_id = ANY(%(ws)s)`` fragment for kb_billing_daily
+    queries below — named param so it composes safely across CTEs that also
+    bind %(days)s / %(limit)s."""
+    if allowed_workspace_ids is None:
+        return ""
+    col = f"{alias}.workspace_id" if alias else "workspace_id"
+    return f"AND {col} = ANY(%(ws)s)"
+
+
+def get_cost_summary(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Total vector search cost for the last N days (from Lakebase cache)."""
+    empty = {"total_dbus": 0, "total_cost_usd": 0, "endpoint_count": 0, "workspace_count": 0, "days": days}
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return empty
+    ws = _kb_ws_clause(allowed_workspace_ids)
     rows = execute_query(
-        """SELECT COALESCE(SUM(total_dbus), 0) AS total_dbus,
+        f"""SELECT COALESCE(SUM(total_dbus), 0) AS total_dbus,
                   COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd,
                   COUNT(DISTINCT NULLIF(endpoint_name, '')) AS endpoint_count,
                   COUNT(DISTINCT workspace_id) AS workspace_count
            FROM kb_billing_daily
            WHERE product = 'VECTOR_SEARCH'
-             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'""",
-        (days,),
+             AND usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}""",
+        {"days": days, "ws": allowed_workspace_ids},
     )
     if rows:
         r = rows[0]
@@ -427,85 +485,106 @@ def get_cost_summary(days: int = 30) -> Dict[str, Any]:
             "workspace_count": int(r.get("workspace_count") or 0),
             "days": days,
         }
-    return {"total_dbus": 0, "total_cost_usd": 0, "endpoint_count": 0, "workspace_count": 0, "days": days}
+    return empty
 
 
-def get_cost_trend(days: int = 30) -> List[Dict[str, Any]]:
+def get_cost_trend(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Daily cost trend for vector search (from Lakebase cache)."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws = _kb_ws_clause(allowed_workspace_ids)
     return execute_query(
-        """SELECT CAST(usage_date AS TEXT) AS usage_date,
+        f"""SELECT CAST(usage_date AS TEXT) AS usage_date,
                   SUM(total_dbus) AS total_dbus, SUM(total_cost_usd) AS total_cost_usd
            FROM kb_billing_daily WHERE product = 'VECTOR_SEARCH'
-             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+             AND usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}
            GROUP BY usage_date ORDER BY usage_date""",
-        (days,),
+        {"days": days, "ws": allowed_workspace_ids},
     )
 
 
-def get_cost_by_endpoint(days: int = 30) -> List[Dict[str, Any]]:
+def get_cost_by_endpoint(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Cost breakdown per vector search endpoint (from cache)."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws = _kb_ws_clause(allowed_workspace_ids)
     return execute_query(
-        """SELECT endpoint_name, workspace_id,
+        f"""SELECT endpoint_name, workspace_id,
                   SUM(total_dbus) AS total_dbus, SUM(total_cost_usd) AS total_cost_usd
            FROM kb_billing_daily WHERE product = 'VECTOR_SEARCH'
-             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+             AND usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}
              AND endpoint_name != ''
            GROUP BY endpoint_name, workspace_id ORDER BY total_cost_usd DESC""",
-        (days,),
+        {"days": days, "ws": allowed_workspace_ids},
     )
 
 
-def get_cost_by_workspace(days: int = 30) -> List[Dict[str, Any]]:
+def get_cost_by_workspace(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Cost breakdown per workspace (from cache)."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws = _kb_ws_clause(allowed_workspace_ids)
     return execute_query(
-        """SELECT workspace_id, SUM(total_dbus) AS total_dbus,
+        f"""SELECT workspace_id, SUM(total_dbus) AS total_dbus,
                   SUM(total_cost_usd) AS total_cost_usd,
                   COUNT(DISTINCT NULLIF(endpoint_name, '')) AS endpoint_count
            FROM kb_billing_daily WHERE product = 'VECTOR_SEARCH'
-             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+             AND usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}
            GROUP BY workspace_id ORDER BY total_cost_usd DESC""",
-        (days,),
+        {"days": days, "ws": allowed_workspace_ids},
     )
 
 
-def get_cost_trend_by_workload(days: int = 30) -> List[Dict[str, Any]]:
+def get_cost_trend_by_workload(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Daily cost trend broken down by workload type (from cache)."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws = _kb_ws_clause(allowed_workspace_ids)
     return execute_query(
-        """SELECT CAST(usage_date AS TEXT) AS usage_date, workload_type,
+        f"""SELECT CAST(usage_date AS TEXT) AS usage_date, workload_type,
                   SUM(total_dbus) AS total_units, SUM(total_cost_usd) AS total_cost_usd
            FROM kb_billing_daily WHERE product = 'VECTOR_SEARCH'
-             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+             AND usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}
            GROUP BY usage_date, workload_type ORDER BY usage_date, workload_type""",
-        (days,),
+        {"days": days, "ws": allowed_workspace_ids},
     )
 
 
-def get_vs_top_workspaces_daily(days: int = 30, limit: int = 5) -> List[Dict[str, Any]]:
+def get_vs_top_workspaces_daily(
+    days: int = 30, limit: int = 5, allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Daily VS cost for top N workspaces."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws = _kb_ws_clause(allowed_workspace_ids)
+    ws_b = _kb_ws_clause(allowed_workspace_ids, alias="b")
     return execute_query(
-        """WITH top_ws AS (
+        f"""WITH top_ws AS (
               SELECT workspace_id FROM kb_billing_daily
-              WHERE product = 'VECTOR_SEARCH' AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
-              GROUP BY workspace_id ORDER BY SUM(total_cost_usd) DESC LIMIT %s
+              WHERE product = 'VECTOR_SEARCH' AND usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}
+              GROUP BY workspace_id ORDER BY SUM(total_cost_usd) DESC LIMIT %(limit)s
            )
            SELECT CAST(b.usage_date AS TEXT) AS usage_date, b.workspace_id,
                   SUM(b.total_cost_usd) AS total_cost_usd
            FROM kb_billing_daily b JOIN top_ws ON b.workspace_id = top_ws.workspace_id
-           WHERE b.product = 'VECTOR_SEARCH' AND b.usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           WHERE b.product = 'VECTOR_SEARCH' AND b.usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws_b}
            GROUP BY b.usage_date, b.workspace_id ORDER BY b.usage_date""",
-        (days, limit, days),
+        {"days": days, "limit": limit, "ws": allowed_workspace_ids},
     )
 
 
-def get_cost_by_workload_type(days: int = 30) -> List[Dict[str, Any]]:
+def get_cost_by_workload_type(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Cost split by workload type (from cache)."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws = _kb_ws_clause(allowed_workspace_ids)
     return execute_query(
-        """SELECT workload_type, SUM(total_dbus) AS total_units,
+        f"""SELECT workload_type, SUM(total_dbus) AS total_units,
                   SUM(total_cost_usd) AS total_cost_usd
            FROM kb_billing_daily WHERE product = 'VECTOR_SEARCH'
-             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+             AND usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}
            GROUP BY workload_type ORDER BY total_cost_usd DESC""",
-        (days,),
+        {"days": days, "ws": allowed_workspace_ids},
     )
 
 
@@ -513,8 +592,15 @@ def get_cost_by_workload_type(days: int = 30) -> List[Dict[str, Any]]:
 # Lakebase Monitoring
 # ══════════════════════════════════════════════════════════════
 
-def get_lakebase_instances() -> List[Dict[str, Any]]:
-    """Return Lakebase instances from cache (populated by workflow)."""
+def get_lakebase_instances(allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Return Lakebase instances from cache (populated by workflow).
+
+    ``lakebase_instances`` has no workspace_id column (account-wide instance
+    inventory) — suppressed entirely for a scoped (non-account-admin) caller,
+    same reasoning as billing_service's cost_by_tag / external_model_spend.
+    """
+    if allowed_workspace_ids is not None:
+        return []
     try:
         return execute_query("SELECT * FROM lakebase_instances ORDER BY instance_name")
     except Exception as exc:
@@ -541,16 +627,20 @@ def discover_lakebase_instances() -> List[Dict[str, Any]]:
         return []
 
 
-def get_lakebase_cost_summary(days: int = 30) -> Dict[str, Any]:
+def get_lakebase_cost_summary(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Total Lakebase cost (from cache)."""
+    empty = {"total_dbus": 0, "total_cost_usd": 0, "workspace_count": 0, "days": days}
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return empty
+    ws = _kb_ws_clause(allowed_workspace_ids)
     rows = execute_query(
-        """SELECT COALESCE(SUM(total_dbus), 0) AS total_dbus,
+        f"""SELECT COALESCE(SUM(total_dbus), 0) AS total_dbus,
                   COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd,
                   COUNT(DISTINCT workspace_id) AS workspace_count
            FROM kb_billing_daily
            WHERE product IN ('LAKEBASE', 'DATABASE')
-             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'""",
-        (days,),
+             AND usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}""",
+        {"days": days, "ws": allowed_workspace_ids},
     )
     if rows:
         r = rows[0]
@@ -560,112 +650,141 @@ def get_lakebase_cost_summary(days: int = 30) -> Dict[str, Any]:
             "workspace_count": int(r.get("workspace_count") or 0),
             "days": days,
         }
-    return {"total_dbus": 0, "total_cost_usd": 0, "workspace_count": 0, "days": days}
+    return empty
 
 
-def get_lakebase_cost_trend(days: int = 30) -> List[Dict[str, Any]]:
+def get_lakebase_cost_trend(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Daily Lakebase cost trend (from cache)."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws = _kb_ws_clause(allowed_workspace_ids)
     return execute_query(
-        """SELECT CAST(usage_date AS TEXT) AS usage_date,
+        f"""SELECT CAST(usage_date AS TEXT) AS usage_date,
                   SUM(total_dbus) AS total_dbus, SUM(total_cost_usd) AS total_cost_usd
            FROM kb_billing_daily WHERE product IN ('LAKEBASE', 'DATABASE')
-             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+             AND usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}
            GROUP BY usage_date ORDER BY usage_date""",
-        (days,),
+        {"days": days, "ws": allowed_workspace_ids},
     )
 
 
-def get_lakebase_cost_by_workspace(days: int = 30) -> List[Dict[str, Any]]:
+def get_lakebase_cost_by_workspace(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Lakebase cost per workspace (from cache)."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws = _kb_ws_clause(allowed_workspace_ids)
     return execute_query(
-        """SELECT workspace_id, SUM(total_dbus) AS total_dbus,
+        f"""SELECT workspace_id, SUM(total_dbus) AS total_dbus,
                   SUM(total_cost_usd) AS total_cost_usd
            FROM kb_billing_daily WHERE product IN ('LAKEBASE', 'DATABASE')
-             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+             AND usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}
            GROUP BY workspace_id ORDER BY total_cost_usd DESC""",
-        (days,),
+        {"days": days, "ws": allowed_workspace_ids},
     )
 
 
-def get_lb_top_workspaces_daily(days: int = 30, limit: int = 5) -> List[Dict[str, Any]]:
+def get_lb_top_workspaces_daily(
+    days: int = 30, limit: int = 5, allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Daily Lakebase cost for top N workspaces."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws = _kb_ws_clause(allowed_workspace_ids)
+    ws_b = _kb_ws_clause(allowed_workspace_ids, alias="b")
     return execute_query(
-        """WITH top_ws AS (
+        f"""WITH top_ws AS (
               SELECT workspace_id FROM kb_billing_daily
-              WHERE product IN ('LAKEBASE', 'DATABASE') AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
-              GROUP BY workspace_id ORDER BY SUM(total_cost_usd) DESC LIMIT %s
+              WHERE product IN ('LAKEBASE', 'DATABASE') AND usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}
+              GROUP BY workspace_id ORDER BY SUM(total_cost_usd) DESC LIMIT %(limit)s
            )
            SELECT CAST(b.usage_date AS TEXT) AS usage_date, b.workspace_id,
                   SUM(b.total_cost_usd) AS total_cost_usd
            FROM kb_billing_daily b JOIN top_ws ON b.workspace_id = top_ws.workspace_id
-           WHERE b.product IN ('LAKEBASE', 'DATABASE') AND b.usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           WHERE b.product IN ('LAKEBASE', 'DATABASE') AND b.usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws_b}
            GROUP BY b.usage_date, b.workspace_id ORDER BY b.usage_date""",
-        (days, limit, days),
+        {"days": days, "limit": limit, "ws": allowed_workspace_ids},
     )
 
 
-def get_lakebase_cost_by_type(days: int = 30) -> List[Dict[str, Any]]:
+def get_lakebase_cost_by_type(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Lakebase cost split: compute vs storage (from cache)."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws = _kb_ws_clause(allowed_workspace_ids)
     return execute_query(
-        """SELECT workload_type AS cost_type, SUM(total_dbus) AS total_units,
+        f"""SELECT workload_type AS cost_type, SUM(total_dbus) AS total_units,
                   SUM(total_cost_usd) AS total_cost_usd
            FROM kb_billing_daily WHERE product IN ('LAKEBASE', 'DATABASE')
-             AND usage_date >= CURRENT_DATE - INTERVAL '%s days'
+             AND usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}
            GROUP BY workload_type ORDER BY total_cost_usd DESC""",
-        (days,),
+        {"days": days, "ws": allowed_workspace_ids},
     )
 
 
-def get_combined_overview(days: int = 30) -> Dict[str, Any]:
+def get_combined_overview(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Combined overview for the Knowledge Bases page."""
     return {
-        "vector_search": get_cost_summary(days),
-        "lakebase": get_lakebase_cost_summary(days),
-        "top_workspaces": get_combined_top_workspaces(days),
+        "vector_search": get_cost_summary(days, allowed_workspace_ids),
+        "lakebase": get_lakebase_cost_summary(days, allowed_workspace_ids),
+        "top_workspaces": get_combined_top_workspaces(days, allowed_workspace_ids=allowed_workspace_ids),
     }
 
 
-def get_combined_top_workspaces(days: int = 30, limit: int = 20) -> List[Dict[str, Any]]:
+def get_combined_top_workspaces(
+    days: int = 30, limit: int = 20, allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Top workspaces by combined VS + Lakebase spend."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws = _kb_ws_clause(allowed_workspace_ids)
     return execute_query(
-        """SELECT workspace_id,
+        f"""SELECT workspace_id,
                   SUM(CASE WHEN product = 'VECTOR_SEARCH' THEN total_cost_usd ELSE 0 END) AS vs_cost,
                   SUM(CASE WHEN product IN ('LAKEBASE', 'DATABASE') THEN total_cost_usd ELSE 0 END) AS lb_cost,
                   SUM(total_cost_usd) AS total_cost
            FROM kb_billing_daily
-           WHERE usage_date >= CURRENT_DATE - INTERVAL '%s days'
-           GROUP BY workspace_id ORDER BY total_cost DESC LIMIT %s""",
-        (days, limit),
+           WHERE usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}
+           GROUP BY workspace_id ORDER BY total_cost DESC LIMIT %(limit)s""",
+        {"days": days, "limit": limit, "ws": allowed_workspace_ids},
     )
 
 
-def get_top_workspaces_daily_trend(days: int = 30, limit: int = 5) -> List[Dict[str, Any]]:
+def get_top_workspaces_daily_trend(
+    days: int = 30, limit: int = 5, allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Daily cost trend for the top N workspaces (for line chart)."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws = _kb_ws_clause(allowed_workspace_ids)
+    ws_b = _kb_ws_clause(allowed_workspace_ids, alias="b")
     return execute_query(
-        """WITH top_ws AS (
+        f"""WITH top_ws AS (
               SELECT workspace_id FROM kb_billing_daily
-              WHERE usage_date >= CURRENT_DATE - INTERVAL '%s days'
-              GROUP BY workspace_id ORDER BY SUM(total_cost_usd) DESC LIMIT %s
+              WHERE usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}
+              GROUP BY workspace_id ORDER BY SUM(total_cost_usd) DESC LIMIT %(limit)s
            )
            SELECT CAST(b.usage_date AS TEXT) AS usage_date,
                   b.workspace_id,
                   SUM(b.total_cost_usd) AS total_cost_usd
            FROM kb_billing_daily b
            JOIN top_ws ON b.workspace_id = top_ws.workspace_id
-           WHERE b.usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           WHERE b.usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws_b}
            GROUP BY b.usage_date, b.workspace_id
            ORDER BY b.usage_date""",
-        (days, limit, days),
+        {"days": days, "limit": limit, "ws": allowed_workspace_ids},
     )
 
 
-def get_combined_cost_trend(days: int = 30) -> List[Dict[str, Any]]:
+def get_combined_cost_trend(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Daily cost trend for both products (from cache)."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws = _kb_ws_clause(allowed_workspace_ids)
     return execute_query(
-        """SELECT CAST(usage_date AS TEXT) AS usage_date, product,
+        f"""SELECT CAST(usage_date AS TEXT) AS usage_date, product,
                   SUM(total_cost_usd) AS total_cost_usd
            FROM kb_billing_daily
-           WHERE usage_date >= CURRENT_DATE - INTERVAL '%s days'
+           WHERE usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s {ws}
            GROUP BY usage_date, product ORDER BY usage_date""",
-        (days,),
+        {"days": days, "ws": allowed_workspace_ids},
     )

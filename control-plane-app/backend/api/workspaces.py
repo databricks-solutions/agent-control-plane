@@ -5,7 +5,8 @@ automatically runs them in a thread-pool.  This prevents synchronous
 psycopg2 calls from blocking the event loop.
 """
 from fastapi import APIRouter, Depends, Query
-from backend.utils.auth import get_current_user
+from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.access_scope import resolve_scope
 from backend.services.workspace_service import get_workspaces_page_data
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"], dependencies=[Depends(get_current_user)])
@@ -14,6 +15,10 @@ router = APIRouter(prefix="/workspaces", tags=["workspaces"], dependencies=[Depe
 @router.get("/page-data")
 def page_data(
     days: int = Query(default=30, ge=1, le=365),
+    user: UserInfo = Depends(get_current_user),
 ):
-    """Return ALL workspace-federation data the Workspaces page needs."""
-    return get_workspaces_page_data(days)
+    """Return ALL workspace-federation data the Workspaces page needs,
+    scoped to the caller's workspace access (account admin = all, workspace
+    admin = their workspaces, everyone else = empty)."""
+    allowed = resolve_scope(user, None)
+    return get_workspaces_page_data(days, allowed_workspace_ids=allowed)

@@ -2,11 +2,17 @@
 from typing import List, Optional, Dict, Any
 from backend.database import execute_query, execute_one, execute_update
 from backend.models.agent import AgentOut, AgentListOut, AgentUpdate
+from backend.utils.access_scope import sees_deploy_workspace, workspace_is_allowed
 import json
 
 
-def get_all_agents(active_only: bool = False) -> List[AgentListOut]:
-    """Get all agents."""
+def get_all_agents(
+    active_only: bool = False,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[AgentListOut]:
+    """Get all agents from the local registry (deploy workspace)."""
+    if allowed_workspace_ids is not None and not sees_deploy_workspace(allowed_workspace_ids):
+        return []
     query = "SELECT agent_id, name, type, endpoint_type, endpoint_status, app_url, is_active FROM agent_registry"
     if active_only:
         query += " WHERE is_active = TRUE"
@@ -16,8 +22,13 @@ def get_all_agents(active_only: bool = False) -> List[AgentListOut]:
     return [AgentListOut(**dict(row)) for row in results]
 
 
-def get_all_agents_full(active_only: bool = False) -> List[Dict[str, Any]]:
+def get_all_agents_full(
+    active_only: bool = False,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Get all agents with full detail (tags, config, description, etc.)."""
+    if allowed_workspace_ids is not None and not sees_deploy_workspace(allowed_workspace_ids):
+        return []
     query = """
         SELECT agent_id, name, type, description, endpoint_name, endpoint_type,
                endpoint_status, app_id, app_url, version, created_at, updated_at,
@@ -40,7 +51,10 @@ def get_all_agents_full(active_only: bool = False) -> List[Dict[str, Any]]:
     return agents
 
 
-def get_agent_by_id(agent_id: str) -> Optional[AgentOut]:
+def get_agent_by_id(
+    agent_id: str,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> Optional[AgentOut]:
     """Get a single agent by ID — checks agent_registry first, then discovered_agents."""
     query = """
         SELECT agent_id, name, type, description, endpoint_name, endpoint_type,
@@ -51,6 +65,8 @@ def get_agent_by_id(agent_id: str) -> Optional[AgentOut]:
     """
     result = execute_one(query, (agent_id,))
     if result:
+        if allowed_workspace_ids is not None and not sees_deploy_workspace(allowed_workspace_ids):
+            return None
         agent_dict = dict(result)
         if agent_dict.get('tags') and isinstance(agent_dict['tags'], str):
             agent_dict['tags'] = json.loads(agent_dict['tags'])
@@ -64,6 +80,8 @@ def get_agent_by_id(agent_id: str) -> Optional[AgentOut]:
     )
     if discovered:
         d = dict(discovered)
+        if not workspace_is_allowed(d.get("workspace_id"), allowed_workspace_ids):
+            return None
         if d.get('config') and isinstance(d['config'], str):
             d['config'] = json.loads(d['config'])
         return AgentOut(
@@ -127,8 +145,14 @@ def update_agent(agent_id: str, update_data: AgentUpdate) -> bool:
     return rowcount > 0
 
 
-def get_agent_metrics(agent_id: str, hours: int = 24) -> Dict[str, Any]:
+def get_agent_metrics(
+    agent_id: str,
+    hours: int = 24,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Get performance metrics for an agent."""
+    if not get_agent_by_id(agent_id, allowed_workspace_ids=allowed_workspace_ids):
+        return {}
     query = """
         SELECT 
             COUNT(*) as request_count,

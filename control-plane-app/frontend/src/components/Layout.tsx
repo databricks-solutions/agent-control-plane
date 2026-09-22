@@ -13,6 +13,7 @@ import {
   Sun,
   Moon,
   Globe,
+  ShieldAlert,
 } from 'lucide-react'
 import DatabricksLogo from './DatabricksLogo'
 import { useTheme } from '@/context/ThemeContext'
@@ -182,13 +183,43 @@ export default function Layout() {
 
         {/* Page Content */}
         <main className="flex-1 overflow-y-auto p-6 bg-db-gray-50 dark:bg-gray-900">
-          <Outlet />
+          {/* Every data endpoint already enforces this server-side (see
+              backend/utils/access_scope.py) — this is just the matching UI
+              state so a caller with no workspace access sees an explicit
+              message instead of a dashboard full of empty charts/tables. */}
+          {user && user.username !== 'anonymous' && user.has_workspace_access === false ? (
+            <NoWorkspaceAccess displayName={user.display_name} />
+          ) : (
+            <Outlet />
+          )}
         </main>
       </div>
 
       {/* Floating chatbot — Ask Genie. Gated on FEATURE_GENIE_ENABLED;
           renders nothing when the flag is off so the bundle stays clean. */}
       <AskGenieOverlay />
+    </div>
+  )
+}
+
+function NoWorkspaceAccess({ displayName }: { displayName: string }) {
+  return (
+    <div className="h-full flex items-center justify-center">
+      <div className="max-w-md text-center">
+        <div className="mx-auto mb-4 w-12 h-12 rounded-full bg-amber-100 dark:bg-amber-900/40 flex items-center justify-center">
+          <ShieldAlert className="w-6 h-6 text-amber-600 dark:text-amber-400" />
+        </div>
+        <h2 className="text-lg font-semibold text-db-navy-900 dark:text-gray-100 mb-1.5">
+          No workspace access
+        </h2>
+        <p className="text-sm text-db-navy-900/60 dark:text-gray-400">
+          Hi {displayName}, this dashboard only shows data for workspaces you
+          administer. You aren't currently an admin of any workspace and
+          aren't an account admin, so there's nothing to show. Ask an account
+          admin to grant you workspace-admin access if you need to view this
+          data.
+        </p>
+      </div>
     </div>
   )
 }

@@ -1,6 +1,7 @@
 """API routes for request logs."""
 from fastapi import APIRouter, Depends, HTTPException, Query
-from backend.utils.auth import get_current_user
+from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.access_scope import get_allowed_workspace_ids, sees_deploy_workspace
 from typing import List, Optional
 from datetime import datetime
 from backend.models.request import RequestOut, RequestListOut, RequestFilters
@@ -8,6 +9,10 @@ from backend.services.query_service import get_recent_requests, get_requests_wit
 from backend.database import execute_one
 
 router = APIRouter(prefix="/requests", tags=["requests"], dependencies=[Depends(get_current_user)])
+
+
+def _deny_deploy(user: UserInfo) -> bool:
+    return not sees_deploy_workspace(get_allowed_workspace_ids(user))
 
 
 @router.get("")
@@ -18,9 +23,12 @@ async def list_requests(
     end_time: Optional[datetime] = Query(None),
     status_code: Optional[int] = Query(None),
     limit: int = Query(default=100, le=1000),
-    offset: int = Query(default=0, ge=0)
+    offset: int = Query(default=0, ge=0),
+    user: UserInfo = Depends(get_current_user),
 ):
     """List requests with optional filters."""
+    if _deny_deploy(user):
+        return []
     filters = RequestFilters(
         agent_id=agent_id,
         user_id=user_id,
@@ -35,14 +43,21 @@ async def list_requests(
 
 
 @router.get("/recent")
-async def get_recent(limit: int = Query(default=20, le=100)):
+async def get_recent(
+    limit: int = Query(default=20, le=100),
+    user: UserInfo = Depends(get_current_user),
+):
     """Get recent requests."""
+    if _deny_deploy(user):
+        return {"data": [], "meta": {"count": 0}}
     return {"data": get_recent_requests(limit), "meta": {"count": limit}}
 
 
 @router.get("/{request_id}", response_model=RequestOut)
-async def get_request(request_id: str):
+async def get_request(request_id: str, user: UserInfo = Depends(get_current_user)):
     """Get request details."""
+    if _deny_deploy(user):
+        raise HTTPException(status_code=404, detail="Request not found")
     query = """
         SELECT request_id, agent_id, model_id, user_id, timestamp,
                query_text, response_text, latency_ms, status_code,

@@ -3,7 +3,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.services import gateway_logs_service
-from backend.utils.auth import get_current_user
+from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.access_scope import get_allowed_workspace_ids
 
 router = APIRouter(
     prefix="/gateway-logs",
@@ -17,8 +18,11 @@ async def list_logs(
     source_table: Optional[str] = Query(None, description="Filter to a single source table"),
     window_days: Optional[int] = Query(None, ge=1, le=365),
     limit: int = Query(500, le=10000),
+    user: UserInfo = Depends(get_current_user),
 ):
     """List gateway inference-log rows (lightweight — payload sizes only)."""
+    if get_allowed_workspace_ids(user) is not None:
+        return []
     try:
         return gateway_logs_service.list_gateway_logs(
             source_table=source_table,
@@ -31,8 +35,10 @@ async def list_logs(
 
 
 @router.get("/sources")
-async def list_sources():
+async def list_sources(user: UserInfo = Depends(get_current_user)):
     """List distinct source tables with row counts + recency."""
+    if get_allowed_workspace_ids(user) is not None:
+        return []
     try:
         return gateway_logs_service.list_source_tables()
     except Exception as e:
@@ -44,8 +50,11 @@ async def gateway_timeseries(
     source_table: Optional[str] = Query(None),
     window_days: int = Query(7, ge=1, le=365),
     bucket: str = Query("hour", pattern="^(hour|day)$"),
+    user: UserInfo = Depends(get_current_user),
 ):
     """Return per-bucket aggregates for the Gateway Requests time-series chart."""
+    if get_allowed_workspace_ids(user) is not None:
+        return []
     try:
         return gateway_logs_service.gateway_timeseries(
             source_table=source_table,
@@ -57,8 +66,10 @@ async def gateway_timeseries(
 
 
 @router.get("/{source_table:path}/{request_id}")
-async def get_log(source_table: str, request_id: str):
+async def get_log(source_table: str, request_id: str, user: UserInfo = Depends(get_current_user)):
     """Get a single inference-log row including the full request and response payloads."""
+    if get_allowed_workspace_ids(user) is not None:
+        raise HTTPException(status_code=404, detail="Log row not found")
     try:
         row = gateway_logs_service.get_gateway_log(source_table, request_id)
         if not row:

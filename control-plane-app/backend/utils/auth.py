@@ -67,16 +67,77 @@ def _put_cache(token: str, user: UserInfo):
 
 # ── Resolve user from OBO token ─────────────────────────────────
 
-def _probe_account_admin(_host: str, _token: str) -> bool:
-    """Check whether the token holder has account-level access.
+# ── Real account-admin lookup (decoupled from local workspace admin) ─────
+#
+# Workspace SCIM /Me often omits account-level roles entirely, so a
+# workspace admin and an account admin can look identical from that one
+# call. We used to "solve" this by assuming every workspace admin was also
+# an account admin (a stub that always returned True) — that is exactly the
+# bug this replaces: it collapsed "admin of this workspace" into "admin of
+# the whole account". Account-admin status is now resolved independently,
+# for every user (not only local workspace admins), via the account-level
+# SCIM Users search using the app's service principal (already used the
+# same way in workspace_registry.py to list account workspaces).
 
-    OBO tokens are workspace-scoped and cannot call account-level APIs,
-    so there is no reliable probe.  Workspace admins are granted
-    ``is_account_admin`` optimistically — the real security gate for
-    cross-workspace operations is the OBO token itself: API calls to
-    remote workspaces will fail with 403 if the user lacks access.
+_ACCOUNT_ADMIN_CACHE: Dict[str, tuple[bool, float]] = {}
+_ACCOUNT_ADMIN_CACHE_TTL = 600  # 10 minutes
+
+
+def _lookup_account_admin(username: str) -> bool:
+    """Return True iff ``username`` is a real Databricks *account* admin.
+
+    Resolved via the account SCIM Users API with the app service principal's
+    token — never inferred from local workspace-admin status. Fails closed
+    (False) on any error: an account-admin check that can't be verified must
+    not silently grant "see everything".
     """
-    return True
+    if not username:
+        return False
+
+    key = username.lower()
+    cached = _ACCOUNT_ADMIN_CACHE.get(key)
+    if cached and (time.time() - cached[1]) < _ACCOUNT_ADMIN_CACHE_TTL:
+        return cached[0]
+
+    result = False
+    try:
+        # Lazy import — avoids a hard dependency / import cycle at module load.
+        from backend.services.workspace_registry import _get_account_id
+        from backend.config import get_databricks_headers, get_databricks_account_host
+
+        account_id = _get_account_id()
+        if not account_id:
+            logger.info("Account-admin lookup skipped: DATABRICKS_ACCOUNT_ID not resolvable")
+            return False
+
+        sp_headers = get_databricks_headers()
+        url = f"{get_databricks_account_host()}/api/2.0/accounts/{account_id}/scim/v2/Users"
+        resp = httpx.get(
+            url,
+            headers=sp_headers,
+            params={"filter": f'userName eq "{username}"'},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            resources = resp.json().get("Resources", [])
+            if resources:
+                u = resources[0]
+                groups = [g.get("display", "").lower() for g in u.get("groups", [])]
+                entitlements = [e.get("value", "") for e in u.get("entitlements", [])]
+                roles = [r.get("value", "") for r in u.get("roles", [])]
+                result = (
+                    "account admins" in groups
+                    or "account_admin" in entitlements
+                    or "account_admin" in roles
+                )
+        else:
+            logger.info("Account-admin lookup: account SCIM returned HTTP %s for %s", resp.status_code, username)
+    except Exception as exc:
+        logger.info("Account-admin lookup failed for %s (treating as non-admin): %s", username, exc)
+        result = False
+
+    _ACCOUNT_ADMIN_CACHE[key] = (result, time.time())
+    return result
 
 
 def _decode_jwt_payload(token: str) -> Dict[str, object]:
@@ -124,12 +185,16 @@ def _resolve_user(token: str) -> UserInfo:
             "OBO: SCIM 403 for %s — falling back to JWT claims (non-workspace member, read-only)",
             username,
         )
+        # Not a member of this workspace, so is_admin (workspace-local) is
+        # always False here — but account-admin status is account-wide and
+        # does not depend on workspace membership, so it is still resolved.
+        is_account_admin = _lookup_account_admin(str(username))
         user = UserInfo(
             username=str(username),
             display_name=str(display_name),
             user_id=user_id,
             is_admin=False,
-            is_account_admin=False,
+            is_account_admin=is_account_admin,
             groups=[],
             token=token,
         )
@@ -146,7 +211,8 @@ def _resolve_user(token: str) -> UserInfo:
     groups = [g.get("display", "") for g in me.get("groups", [])]
     is_admin = "admins" in groups or "workspace-admins" in groups
 
-    # 3. Check for account admin via entitlements, roles, groups, AND probe
+    # 3. Check for account admin via entitlements/roles/groups on this
+    # workspace's SCIM record first (cheap, no extra call when present).
     entitlements = [e.get("value", "") for e in me.get("entitlements", [])]
     roles = [r.get("value", "") for r in me.get("roles", [])]
     is_account_admin = (
@@ -154,12 +220,12 @@ def _resolve_user(token: str) -> UserInfo:
         or "account_admin" in roles
         or "account admins" in [g.lower() for g in groups]
     )
-    # Workspace-level SCIM often omits account admin signals entirely.
-    # For workspace admins, probe the Accounts API as a fallback.
-    if not is_account_admin and is_admin:
-        probe_result = _probe_account_admin(host, token)
-        logger.info("OBO: account admin probe result=%s", probe_result)
-        is_account_admin = probe_result
+    # Workspace-level SCIM often omits account-admin signals entirely, and —
+    # crucially — this must be resolved for EVERY user, not only local
+    # workspace admins: account-admin status is independent of whether this
+    # person happens to also be an admin of the workspace the app lives in.
+    if not is_account_admin:
+        is_account_admin = _lookup_account_admin(username)
     logger.info("OBO: user=%s, is_admin=%s, is_account_admin=%s, entitlements=%s, roles=%s, groups=%s", username, is_admin, is_account_admin, entitlements, roles, groups)
 
     user = UserInfo(

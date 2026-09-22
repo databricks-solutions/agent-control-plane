@@ -43,6 +43,12 @@ logger = logging.getLogger(__name__)
 # keep returning the expected shape.
 _refresh_in_progress = False
 
+
+# Shared with mlflow_service.py / vector_search_service.py — see
+# backend/utils/access_scope.py. Local aliases keep every call site below
+# unchanged.
+from backend.utils.access_scope import NoAccess as _NoAccess, resolve_ws_ids as _resolve_ws_ids
+
 # SQL warehouse helper constants — used by ``_execute_system_sql`` which is
 # now a general-purpose utility (called by ``discovery_service`` and others
 # beyond just billing).
@@ -399,28 +405,53 @@ def get_current_workspace_id() -> Optional[str]:
     return None
 
 
-def get_available_workspaces(days: int = 90) -> List[Dict[str, Any]]:
-    """List workspaces from the Lakebase cache (fast)."""
+def get_available_workspaces(
+    days: int = 90,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """List workspaces from the Lakebase cache (fast).
+
+    ``allowed_workspace_ids``: None = no restriction (account admin);
+    [] = no access, returns []; [ids...] = restrict to those workspaces.
+    This is the list the workspace picker is built from, so it must be
+    scoped the same way as the page-data it filters — otherwise the picker
+    would leak workspace ids the caller isn't allowed to see data for.
+    """
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+
     maybe_refresh_async()
+    ws_filter = "AND workspace_id = ANY(%s)" if allowed_workspace_ids is not None else ""
+    params: tuple = (days, allowed_workspace_ids) if allowed_workspace_ids is not None else (days,)
     return execute_query(
-        """SELECT workspace_id,
+        f"""SELECT workspace_id,
                   SUM(total_dbus)::NUMERIC(18,2)           AS total_dbus,
                   COUNT(DISTINCT endpoint_name)::INT       AS endpoint_count
            FROM billing_serving_daily
-           WHERE usage_date >= CURRENT_DATE - %s
+           WHERE usage_date >= CURRENT_DATE - %s {ws_filter}
            GROUP BY workspace_id
            ORDER BY SUM(total_dbus) DESC""",
-        (days,),
+        params,
     )
 
 
 # ── serving cost ─────────────────────────────────────────────────
 
-def get_serving_cost_summary(days: int = 30, workspace_id: Optional[str] = None) -> Dict[str, Any]:
+def get_serving_cost_summary(
+    days: int = 30,
+    workspace_id: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     maybe_refresh_async()
 
-    ws = "AND s.workspace_id = %s" if workspace_id else ""
-    params: tuple = (days, workspace_id) if workspace_id else (days,)
+    try:
+        ws_ids = _resolve_ws_ids(workspace_id, allowed_workspace_ids)
+    except _NoAccess:
+        return {"total_cost_usd": 0.0, "total_dbus": 0.0, "endpoint_count": 0,
+                "cost_by_endpoint": {}, "dbus_by_endpoint": {}}
+
+    ws = "AND s.workspace_id = ANY(%s)" if ws_ids is not None else ""
+    params: tuple = (days, ws_ids) if ws_ids is not None else (days,)
 
     rows = execute_query(
         f"""SELECT endpoint_name,
@@ -448,11 +479,20 @@ def get_serving_cost_summary(days: int = 30, workspace_id: Optional[str] = None)
     }
 
 
-def get_serving_cost_trend(days: int = 30, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_serving_cost_trend(
+    days: int = 30,
+    workspace_id: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     maybe_refresh_async()
 
-    ws = "AND s.workspace_id = %s" if workspace_id else ""
-    params: tuple = (days, workspace_id) if workspace_id else (days,)
+    try:
+        ws_ids = _resolve_ws_ids(workspace_id, allowed_workspace_ids)
+    except _NoAccess:
+        return []
+
+    ws = "AND s.workspace_id = ANY(%s)" if ws_ids is not None else ""
+    params: tuple = (days, ws_ids) if ws_ids is not None else (days,)
 
     return execute_query(
         f"""SELECT usage_date::TEXT                         AS day,
@@ -467,11 +507,20 @@ def get_serving_cost_trend(days: int = 30, workspace_id: Optional[str] = None) -
     )
 
 
-def get_serving_cost_by_sku(days: int = 30, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_serving_cost_by_sku(
+    days: int = 30,
+    workspace_id: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     maybe_refresh_async()
 
-    ws = "AND s.workspace_id = %s" if workspace_id else ""
-    params: tuple = (days, workspace_id) if workspace_id else (days,)
+    try:
+        ws_ids = _resolve_ws_ids(workspace_id, allowed_workspace_ids)
+    except _NoAccess:
+        return []
+
+    ws = "AND s.workspace_id = ANY(%s)" if ws_ids is not None else ""
+    params: tuple = (days, ws_ids) if ws_ids is not None else (days,)
 
     return execute_query(
         f"""SELECT sku_name,
@@ -488,11 +537,20 @@ def get_serving_cost_by_sku(days: int = 30, workspace_id: Optional[str] = None) 
 
 # ── token usage ──────────────────────────────────────────────────
 
-def get_serving_token_usage(days: int = 30, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_serving_token_usage(
+    days: int = 30,
+    workspace_id: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     maybe_refresh_async()
 
-    ws = "AND t.workspace_id = %s" if workspace_id else ""
-    params: tuple = (days, workspace_id) if workspace_id else (days,)
+    try:
+        ws_ids = _resolve_ws_ids(workspace_id, allowed_workspace_ids)
+    except _NoAccess:
+        return []
+
+    ws = "AND t.workspace_id = ANY(%s)" if ws_ids is not None else ""
+    params: tuple = (days, ws_ids) if ws_ids is not None else (days,)
 
     return execute_query(
         f"""SELECT endpoint_name,
@@ -512,11 +570,20 @@ def get_serving_token_usage(days: int = 30, workspace_id: Optional[str] = None) 
     )
 
 
-def get_serving_daily_tokens(days: int = 30, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_serving_daily_tokens(
+    days: int = 30,
+    workspace_id: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     maybe_refresh_async()
 
-    ws = "AND t.workspace_id = %s" if workspace_id else ""
-    params: tuple = (days, workspace_id) if workspace_id else (days,)
+    try:
+        ws_ids = _resolve_ws_ids(workspace_id, allowed_workspace_ids)
+    except _NoAccess:
+        return []
+
+    ws = "AND t.workspace_id = ANY(%s)" if ws_ids is not None else ""
+    params: tuple = (days, ws_ids) if ws_ids is not None else (days,)
 
     return execute_query(
         f"""SELECT usage_date::TEXT                         AS day,
@@ -536,7 +603,11 @@ def get_serving_daily_tokens(days: int = 30, workspace_id: Optional[str] = None)
 
 # ── cost by user (precise per-endpoint attribution) ──────────────
 
-def get_serving_cost_by_user(days: int = 30, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_serving_cost_by_user(
+    days: int = 30,
+    workspace_id: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Top users by model-serving cost.
 
     Joins billing_user_endpoint_daily (per-user, per-endpoint token counts
@@ -546,8 +617,13 @@ def get_serving_cost_by_user(days: int = 30, workspace_id: Optional[str] = None)
     """
     maybe_refresh_async()
 
-    ws = "AND workspace_id = %s" if workspace_id else ""
-    single_p: tuple = (days, workspace_id) if workspace_id else (days,)
+    try:
+        ws_ids = _resolve_ws_ids(workspace_id, allowed_workspace_ids)
+    except _NoAccess:
+        return []
+
+    ws = "AND workspace_id = ANY(%s)" if ws_ids is not None else ""
+    single_p: tuple = (days, ws_ids) if ws_ids is not None else (days,)
     params = single_p * 3
 
     return execute_query(
@@ -593,7 +669,11 @@ def get_serving_cost_by_user(days: int = 30, workspace_id: Optional[str] = None)
     )
 
 
-def get_actual_cost_by_user(days: int = 30, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_actual_cost_by_user(
+    days: int = 30,
+    workspace_id: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Top users by ACTUAL model-serving cost.
 
     Reads billing_user_cost_daily — real per-user dollar cost attributed by the
@@ -602,8 +682,13 @@ def get_actual_cost_by_user(days: int = 30, workspace_id: Optional[str] = None) 
     empty list on workspaces where v2 attribution is not yet populated; callers
     should fall back to the estimate in that case.
     """
-    ws = "AND workspace_id = %s" if workspace_id else ""
-    params: tuple = (days, workspace_id) if workspace_id else (days,)
+    try:
+        ws_ids = _resolve_ws_ids(workspace_id, allowed_workspace_ids)
+    except _NoAccess:
+        return []
+
+    ws = "AND workspace_id = ANY(%s)" if ws_ids is not None else ""
+    params: tuple = (days, ws_ids) if ws_ids is not None else (days,)
 
     return execute_query(
         f"""SELECT
@@ -619,26 +704,39 @@ def get_actual_cost_by_user(days: int = 30, workspace_id: Optional[str] = None) 
     )
 
 
-def get_cost_by_user(days: int = 30, workspace_id: Optional[str] = None) -> Dict[str, Any]:
+def get_cost_by_user(
+    days: int = 30,
+    workspace_id: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Per-user cost preferring ACTUAL attribution, falling back to the estimate.
 
     Returns {"source": "actual"|"estimate", "users": [...]} so the UI can label
     whether numbers are platform-attributed or token-share estimates.
     """
-    actual = get_actual_cost_by_user(days, workspace_id)
+    actual = get_actual_cost_by_user(days, workspace_id, allowed_workspace_ids)
     if actual:
         return {"source": "actual", "users": actual}
-    return {"source": "estimate", "users": get_serving_cost_by_user(days, workspace_id)}
+    return {"source": "estimate", "users": get_serving_cost_by_user(days, workspace_id, allowed_workspace_ids)}
 
 
 # ── token usage by user ─────────────────────────────────────────
 
-def get_token_usage_by_user(days: int = 30, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_token_usage_by_user(
+    days: int = 30,
+    workspace_id: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Top users by token consumption, from Lakebase cache."""
     maybe_refresh_async()
 
-    ws = "AND u.workspace_id = %s" if workspace_id else ""
-    params: tuple = (days, workspace_id) if workspace_id else (days,)
+    try:
+        ws_ids = _resolve_ws_ids(workspace_id, allowed_workspace_ids)
+    except _NoAccess:
+        return []
+
+    ws = "AND u.workspace_id = ANY(%s)" if ws_ids is not None else ""
+    params: tuple = (days, ws_ids) if ws_ids is not None else (days,)
 
     return execute_query(
         f"""SELECT user_identity,
@@ -658,11 +756,20 @@ def get_token_usage_by_user(days: int = 30, workspace_id: Optional[str] = None) 
 
 # ── product costs ────────────────────────────────────────────────
 
-def get_all_product_costs(days: int = 30, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_all_product_costs(
+    days: int = 30,
+    workspace_id: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     maybe_refresh_async()
 
-    ws = "AND p.workspace_id = %s" if workspace_id else ""
-    params: tuple = (days, workspace_id) if workspace_id else (days,)
+    try:
+        ws_ids = _resolve_ws_ids(workspace_id, allowed_workspace_ids)
+    except _NoAccess:
+        return []
+
+    ws = "AND p.workspace_id = ANY(%s)" if ws_ids is not None else ""
+    params: tuple = (days, ws_ids) if ws_ids is not None else (days,)
 
     return execute_query(
         f"""SELECT billing_origin_product,
@@ -706,41 +813,88 @@ def get_cache_status() -> Dict[str, Any]:
 # COMPOSITE: single-request endpoint for the Governance page
 # =====================================================================
 
-def get_all_page_data(days: int = 30, workspace_id: "str | list[str] | None" = None) -> Dict[str, Any]:
+def _empty_page_data() -> Dict[str, Any]:
+    """Shape-compatible empty response for a caller with no workspace access.
+
+    Returned instead of querying Lakebase at all when the access-scope
+    resolves to "nothing" — see ``backend.utils.access_scope``.
+    """
+    return {
+        "current_workspace_id": get_current_workspace_id(),
+        "cache_status": {"is_refreshing": _refresh_in_progress, "caches": {}},
+        "workspaces": [],
+        "summary": {
+            "total_cost_usd": 0.0,
+            "total_dbus": 0.0,
+            "endpoint_count": 0,
+            "cost_by_endpoint": {},
+            "dbus_by_endpoint": {},
+        },
+        "trend": [],
+        "by_sku": [],
+        "tokens": [],
+        "daily_tokens": [],
+        "products": [],
+        "cost_by_user": [],
+        "cost_by_user_source": "estimate",
+        "tokens_by_user": [],
+        "cost_by_tag": [],
+        "external_model_spend": [],
+    }
+
+
+def get_all_page_data(
+    days: int = 30,
+    workspace_id: "str | list[str] | None" = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Return ALL billing data the Governance page needs in a single DB connection.
 
     Instead of 7+ parallel HTTP requests each opening a connection (~1 s SSL
     handshake each from local dev), we run 8 small queries sequentially on ONE
     connection.  Total time: ~0.8 s instead of 12–17 s.
+
+    ``allowed_workspace_ids`` is the caller's access scope (see
+    ``backend.utils.access_scope.resolve_scope``):
+      • None      — no restriction (real account admin) — unchanged behaviour.
+      • [ids...]  — restrict every query below to these workspaces.
+      • []        — caller has no workspace access at all; short-circuit to
+        an empty response WITHOUT touching Lakebase.
     """
     from psycopg2.extras import RealDictCursor
 
     maybe_refresh_async()
 
-    # Build workspace filter fragment + params. workspace_id may be a single id
-    # (str) or a list of ids (multi-select); [] / None / "" means all workspaces.
-    if isinstance(workspace_id, (list, tuple)):
-        ws_ids = [str(w) for w in workspace_id if w]
-    elif workspace_id:
-        ws_ids = [str(workspace_id)]
-    else:
-        ws_ids = []
-    ws_filter = f"AND workspace_id IN ({', '.join(['%s'] * len(ws_ids))})" if ws_ids else ""
-    _p = lambda extra_days=True: ((days, *ws_ids) if extra_days else tuple(ws_ids))  # noqa: E731
+    try:
+        # Combines the (single- or multi-select) workspace_id request with the
+        # caller's access scope; `= ANY(%s)` handles both a single id and a list.
+        ws_ids = _resolve_ws_ids(workspace_id, allowed_workspace_ids)
+    except _NoAccess:
+        return _empty_page_data()
+
+    ws_filter = "AND workspace_id = ANY(%s)" if ws_ids is not None else ""
+    _p = lambda extra_days=True: (  # noqa: E731
+        (days, ws_ids) if (ws_ids is not None and extra_days)
+        else (days,) if extra_days
+        else (ws_ids,) if ws_ids is not None
+        else ()
+    )
 
     with DatabasePool.get_connection() as conn:
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # 1. workspaces (cache_meta moved to end so timestamps match data)
+        # 1. workspaces — same ws_filter as every other query. This list feeds
+        # the Governance picker; leaving it unfiltered leaked every workspace
+        # id + DBU total to a workspace-scoped admin.
         cur.execute(
             f"""SELECT workspace_id,
                        SUM(total_dbus)::NUMERIC(18,2) AS total_dbus,
                        COUNT(DISTINCT endpoint_name)::INT AS endpoint_count
                 FROM billing_serving_daily
-                WHERE usage_date >= CURRENT_DATE - %s
+                WHERE usage_date >= CURRENT_DATE - %s {ws_filter}
                 GROUP BY workspace_id
                 ORDER BY SUM(total_dbus) DESC""",
-            (days,),
+            _p(),
         )
         workspaces = [dict(r) for r in cur.fetchall()]
         # 3. serving summary (by endpoint)
@@ -824,10 +978,8 @@ def get_all_page_data(days: int = 30, workspace_id: "str | list[str] | None" = N
         # 9. serving cost by user (precise per-endpoint attribution)
         # The outer query JOINs 3 sources that all have workspace_id,
         # so we must qualify with the table alias to avoid ambiguity.
-        # Aliased twin of ws_filter for the JOIN query below (u.workspace_id). Must
-        # use the same IN(...) shape / placeholder count as ws_filter so the _p()
-        # params line up (the cost-by-user query reuses _p() * 3).
-        ws_filter_u = f"AND u.workspace_id IN ({', '.join(['%s'] * len(ws_ids))})" if ws_ids else ""
+        # Aliased twin of ws_filter for the JOIN query below (u.workspace_id).
+        ws_filter_u = "AND u.workspace_id = ANY(%s)" if ws_ids is not None else ""
         cur.execute(
             f"""WITH ep_costs AS (
                     SELECT usage_date, workspace_id, endpoint_name,
@@ -904,23 +1056,32 @@ def get_all_page_data(days: int = 30, workspace_id: "str | list[str] | None" = N
         tokens_by_user = [dict(r) for r in cur.fetchall()]
 
         # 11. cost by custom_tag (workspace-agnostic, no date grain — the
-        # retention window is owned by workflow 09).
-        cur.execute(
-            """SELECT tag_key, tag_value, total_cost_usd::NUMERIC(18,2) AS total_cost_usd
-               FROM billing_cost_by_tag
-               ORDER BY tag_key, total_cost_usd DESC"""
-        )
-        cost_by_tag = [dict(r) for r in cur.fetchall()]
+        # retention window is owned by workflow 09). These two tables have no
+        # workspace_id column at all, so a scoped (non-account-admin) caller
+        # cannot be safely filtered — suppress rather than leak account-wide
+        # totals to someone restricted to specific workspaces.
+        if ws_ids is not None:
+            cost_by_tag: List[Dict[str, Any]] = []
+        else:
+            cur.execute(
+                """SELECT tag_key, tag_value, total_cost_usd::NUMERIC(18,2) AS total_cost_usd
+                   FROM billing_cost_by_tag
+                   ORDER BY tag_key, total_cost_usd DESC"""
+            )
+            cost_by_tag = [dict(r) for r in cur.fetchall()]
 
         # 12. external-model spend (workspace-agnostic; actual $ for external LLMs
         # routed through the AI Gateway — real billed cost, not estimated).
-        cur.execute(
-            """SELECT provider, model, endpoint_name, call_count,
-                      total_cost_usd::NUMERIC(18,6) AS total_cost_usd, last_seen
-               FROM billing_external_model_spend
-               ORDER BY total_cost_usd DESC"""
-        )
-        external_model_spend = [dict(r) for r in cur.fetchall()]
+        if ws_ids is not None:
+            external_model_spend: List[Dict[str, Any]] = []
+        else:
+            cur.execute(
+                """SELECT provider, model, endpoint_name, call_count,
+                          total_cost_usd::NUMERIC(18,6) AS total_cost_usd, last_seen
+                   FROM billing_external_model_spend
+                   ORDER BY total_cost_usd DESC"""
+            )
+            external_model_spend = [dict(r) for r in cur.fetchall()]
 
         # Read cache_meta LAST so timestamps reflect the same state as the data
         cur.execute("SELECT * FROM billing_cache_meta ORDER BY cache_key")
@@ -935,7 +1096,8 @@ def get_all_page_data(days: int = 30, workspace_id: "str | list[str] | None" = N
             continue
         cache_entries[r["cache_key"]] = {
             "last_refreshed": r["last_refreshed"].isoformat() if r["last_refreshed"] else None,
-            "rows_loaded": r["rows_loaded"],
+            # rows_loaded is an account-wide count; omit it for scoped callers.
+            **({"rows_loaded": r["rows_loaded"]} if allowed_workspace_ids is None else {}),
         }
 
     # Assemble summary

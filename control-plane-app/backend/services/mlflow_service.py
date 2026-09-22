@@ -19,6 +19,7 @@ from backend.config import (
     find_serverless_warehouse_id,
 )
 from backend.database import execute_query, execute_update, execute_many
+from backend.utils.access_scope import NoAccess, resolve_ws_ids, sees_deploy_workspace, workspace_is_allowed
 
 import logging
 
@@ -243,7 +244,7 @@ def _experiment_names(exp_ids) -> Dict[str, str]:
     return names
 
 
-def get_agent_tool_usage() -> Dict[str, Any]:
+def get_agent_tool_usage(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """TOOL/RETRIEVER span usage rolled up per experiment (from `agent_tool_usage`,
     produced by 07_discover_uc_otel_traces). Answers what UC functions and vector
     indexes an agent's traces touch.
@@ -251,8 +252,15 @@ def get_agent_tool_usage() -> Dict[str, Any]:
     Grain is EXPERIMENT — agent traces live under MLflow experiments and the app
     has no experiment→discovered-agent mapping yet. Degrades to empty when the
     table is unsynced or no traced agents exist.
+
+    ``agent_tool_usage`` has no workspace_id column (account-wide rollup), so a
+    scoped (non-account-admin) caller cannot be safely filtered — suppress
+    rather than leak cross-workspace tool usage to someone restricted to
+    specific workspaces.
     """
     empty: Dict[str, Any] = {"totals": {}, "rows": []}
+    if allowed_workspace_ids is not None:
+        return empty
     try:
         rows = execute_query(
             """SELECT experiment_id, tool_name, span_type, call_count, trace_count, last_seen
@@ -303,7 +311,7 @@ def get_agent_tool_usage() -> Dict[str, Any]:
     }
 
 
-def get_agent_eval_scores() -> Dict[str, Any]:
+def get_agent_eval_scores(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """MLflow-3 online-eval / labeled assessments rolled up per experiment (from
     `agent_eval_scores`, produced by 07_discover_uc_otel_traces). Answers how each
     agent's traces score on judges/human labels (safety, relevance, groundedness, …).
@@ -311,8 +319,13 @@ def get_agent_eval_scores() -> Dict[str, Any]:
     Grain is EXPERIMENT — same caveat as get_agent_tool_usage (no experiment→agent
     mapping yet). Degrades to empty when the table is unsynced or no eval'd traces
     exist.
+
+    No workspace_id column here either — suppressed for scoped callers, same
+    reasoning as get_agent_tool_usage.
     """
     empty: Dict[str, Any] = {"totals": {}, "rows": []}
+    if allowed_workspace_ids is not None:
+        return empty
     try:
         rows = execute_query(
             """SELECT experiment_id, scorer_name, source_type, assessment_count,
@@ -373,14 +386,20 @@ def get_agent_eval_scores() -> Dict[str, Any]:
     return {"totals": totals, "rows": out}
 
 
-def get_ai_audit() -> Dict[str, Any]:
+def get_ai_audit(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Governed AI audit trail from `ai_audit_summary` + `ai_audit_recent`
     (produced by 07_discover_uc_otel_traces from system.access.audit, restricted
     to AI service_names). Returns a per-(service, action) summary + a recent-event
     feed. Account-wide (audit is account-level). Degrades to empty when the tables
     are unsynced or audit wasn't readable at the discovery principal's scope.
+
+    ``ai_audit_summary`` (the KPI/summary rollup) has no workspace_id column —
+    it's aggregated account-wide by design — so it can't be safely filtered
+    for a scoped caller. Suppressed entirely rather than partially filtered.
     """
     empty: Dict[str, Any] = {"totals": {}, "summary": [], "recent": []}
+    if allowed_workspace_ids is not None:
+        return empty
     try:
         summary = execute_query(
             """SELECT service_name, action_name, event_count, actor_count,
@@ -655,8 +674,23 @@ def search_experiments(max_results: int = 50, *, user_token: Optional[str] = Non
     return data.get("experiments", [])
 
 
-def get_experiment(experiment_id: str) -> Optional[Dict[str, Any]]:
+def get_experiment(
+    experiment_id: str,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
     """Get a single experiment by ID."""
+    try:
+        rows = execute_query(
+            "SELECT workspace_id FROM observability_experiments WHERE experiment_id = %s LIMIT 1",
+            (experiment_id,),
+        )
+    except Exception:
+        rows = []
+    if rows:
+        if not workspace_is_allowed(rows[0].get("workspace_id"), allowed_workspace_ids):
+            return None
+    elif allowed_workspace_ids is not None and not sees_deploy_workspace(allowed_workspace_ids):
+        return None
     data = _get("/api/2.0/mlflow/experiments/get", {"experiment_id": experiment_id})
     return data.get("experiment")
 
@@ -668,14 +702,15 @@ def search_runs(
     filter_string: str = "",
     max_results: int = 50,
     order_by: Optional[List[str]] = None,
+    user_token: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Search MLflow runs across experiments."""
     body: Dict[str, Any] = {"max_results": max_results}
-    body["experiment_ids"] = experiment_ids or _all_experiment_ids()
+    body["experiment_ids"] = experiment_ids or _all_experiment_ids(user_token=user_token)
     if filter_string:
         body["filter"] = filter_string
     body["order_by"] = order_by or ["start_time DESC"]
-    data = _post("/api/2.0/mlflow/runs/search", body)
+    data = _post("/api/2.0/mlflow/runs/search", body, user_token=user_token)
     return data.get("runs", [])
 
 
@@ -761,7 +796,12 @@ def get_trace_spans(request_id: str) -> List[Dict[str, Any]]:
     return data.get("data", {}).get("spans", [])
 
 
-def get_trace_detail(request_id: str, *, user_token: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def get_trace_detail(
+    request_id: str,
+    *,
+    user_token: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
     """Get full trace info with parsed metadata for a single trace.
 
     Cache-first: UC-stored traces (request_id starts with `trace:/`) and any
@@ -773,7 +813,16 @@ def get_trace_detail(request_id: str, *, user_token: Optional[str] = None) -> Op
     # — workspace_id is empty for them. Look up by request_id alone first.
     cached = _get_trace_detail_from_cache_any(request_id)
     if cached is not None:
+        ws = cached.get("workspace_id") or ""
+        if allowed_workspace_ids is not None:
+            # Empty workspace_id is an account-wide UC URI — cannot prove it
+            # belongs to this caller, so suppress for scoped users.
+            if not ws or not workspace_is_allowed(ws, allowed_workspace_ids):
+                return None
         return cached
+
+    if allowed_workspace_ids is not None and not sees_deploy_workspace(allowed_workspace_ids):
+        return None
 
     data = _get(f"/api/2.0/mlflow/traces/{request_id}", user_token=user_token)
     trace = data.get("trace", {})
@@ -1238,6 +1287,7 @@ def get_trace_detail_for_workspace(
     workspace_id: str,
     *,
     user_token: str,
+    allowed_workspace_ids: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Get full trace detail for a specific workspace.
 
@@ -1245,6 +1295,8 @@ def get_trace_detail_for_workspace(
     `04_discover_observability` workflow). Falls back to a live OBO REST call
     if the cache doesn't have it yet.
     """
+    if not workspace_is_allowed(workspace_id, allowed_workspace_ids):
+        return None
     cached = _get_trace_detail_from_cache(workspace_id, request_id)
     if cached is not None:
         return cached
@@ -1479,24 +1531,34 @@ def refresh_observability_cache(*, user_token: str) -> Dict[str, int]:
 # ── Lakebase cache: read ───────────────────────────────────────
 
 def get_cached_traces(
-    workspace_id: Optional[str] = None,
+    workspace_id: "Optional[str | List[str]]" = None,
     limit: int = 10000,
     window_days: Optional[int] = None,
-    workspace_ids: Optional[List[str]] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Read traces from the Lakebase cache, optionally filtered by one or more
-    workspaces and a time window (workspace_ids takes precedence; empty = all).
+    workspaces and a time window. ``workspace_id`` may be a single id or a list
+    (the multi-select picker); combined with the caller's scope below.
 
     `window_days` filters by `request_time` (TEXT epoch-ms). Rows with non-numeric
     or missing timestamps are excluded when a window is specified.
+
+    ``allowed_workspace_ids`` is the caller's access scope (see
+    ``backend.utils.access_scope``): this is the ONLY route (``/mlflow/traces``)
+    that reads cross-workspace data with no explicit workspace_id required, so
+    it's the easiest one to leak from — always resolved here, never skipped.
     """
+    try:
+        ws_ids = resolve_ws_ids(workspace_id, allowed_workspace_ids)
+    except NoAccess:
+        return []
+
     import time as _time
     where_clauses = []
     params: List[Any] = []
-    _ws = _ws_id_list(workspace_id, workspace_ids)
-    if _ws:
-        where_clauses.append(f"workspace_id IN ({', '.join(['%s'] * len(_ws))})")
-        params.extend(_ws)
+    if ws_ids is not None:
+        where_clauses.append("workspace_id = ANY(%s)")
+        params.append(ws_ids)
     if window_days:
         cutoff_ms = int((_time.time() - window_days * 86400) * 1000)
         where_clauses.append("request_time ~ '^[0-9]+$' AND CAST(request_time AS BIGINT) >= %s")
@@ -1509,7 +1571,10 @@ def get_cached_traces(
     )
 
 
-def get_cached_models(limit: int = 1000) -> Optional[List[Dict[str, Any]]]:
+def get_cached_models(
+    limit: int = 1000,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> Optional[List[Dict[str, Any]]]:
     """Read UC registered models from the Lakebase cache (populated by
     04_discover_observability). Returns the same row shape the live
     search_registered_models produced (name, workspace_id, user_id,
@@ -1520,13 +1585,21 @@ def get_cached_models(limit: int = 1000) -> Optional[List[Dict[str, Any]]]:
     fall back to a live search; returns [] when the table exists but is empty
     (a workspace with no registered models) — the caller should NOT keep hitting
     the live API in that case.
+
+    ``allowed_workspace_ids``: None = no restriction; [] = caller has no
+    workspace access → returns []; [ids...] = restrict to those workspaces.
     """
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws_filter = "WHERE workspace_id = ANY(%s)" if allowed_workspace_ids is not None else ""
+    params: tuple = (allowed_workspace_ids, limit) if allowed_workspace_ids is not None else (limit,)
     try:
         rows = execute_query(
-            """SELECT name, workspace_id, user_id, last_updated_timestamp,
+            f"""SELECT name, workspace_id, user_id, last_updated_timestamp,
                       creation_timestamp, description, aliases, latest_versions
-               FROM mlflow_registered_models ORDER BY last_updated_timestamp DESC NULLS LAST LIMIT %s""",
-            (limit,),
+               FROM mlflow_registered_models {ws_filter}
+               ORDER BY last_updated_timestamp DESC NULLS LAST LIMIT %s""",
+            params,
         )
     except Exception as exc:
         # Table missing / not yet created by the discovery sync → signal "unknown".
@@ -1536,7 +1609,11 @@ def get_cached_models(limit: int = 1000) -> Optional[List[Dict[str, Any]]]:
     return rows
 
 
-def get_cached_model_versions(name: str, limit: int = 100) -> Optional[List[Dict[str, Any]]]:
+def get_cached_model_versions(
+    name: str,
+    limit: int = 100,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> Optional[List[Dict[str, Any]]]:
     """Read a registered model's versions from the Lakebase cache (populated by
     04_discover_observability). Returns the same field shape the live
     search_model_versions produced (version, status, user_id, creation_timestamp,
@@ -1545,15 +1622,23 @@ def get_cached_model_versions(name: str, limit: int = 100) -> Optional[List[Dict
     Returns None when the cache table is ABSENT (never synced) so the caller can
     fall back to a live search; returns [] when the table exists but the model has
     no cached versions — the caller should NOT keep hitting the live API in that case.
+
+    ``allowed_workspace_ids``: same contract as get_cached_models().
     """
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws_filter = "AND workspace_id = ANY(%s)" if allowed_workspace_ids is not None else ""
+    params: tuple = (
+        (name, allowed_workspace_ids, limit) if allowed_workspace_ids is not None else (name, limit)
+    )
     try:
         rows = execute_query(
-            """SELECT name, version, workspace_id, user_id, creation_timestamp,
+            f"""SELECT name, version, workspace_id, user_id, creation_timestamp,
                       last_updated_timestamp, status, description, source, run_id, aliases
-               FROM mlflow_model_versions WHERE name = %s
+               FROM mlflow_model_versions WHERE name = %s {ws_filter}
                ORDER BY CASE WHEN version ~ '^[0-9]+$' THEN CAST(version AS BIGINT) END DESC NULLS LAST,
                         version DESC LIMIT %s""",
-            (name, limit),
+            params,
         )
     except Exception as exc:
         # Table missing / not yet created by the discovery sync → signal "unknown".
@@ -1562,26 +1647,27 @@ def get_cached_model_versions(name: str, limit: int = 100) -> Optional[List[Dict
     return rows
 
 
-def _ws_id_list(workspace_id: Optional[str], workspace_ids: Optional[List[str]]) -> List[str]:
-    """Normalize a single workspace_id and/or a list into one de-duped id list
-    (empty = no workspace filter / all)."""
-    ids = [str(w) for w in (workspace_ids or []) if w]
-    if not ids and workspace_id:
-        ids = [str(workspace_id)]
-    return ids
+def get_cached_experiments(
+    workspace_id: "Optional[str | List[str]]" = None,
+    limit: int = 10000,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Read experiments from the Lakebase cache, optionally filtered by one or
+    more workspaces.
 
-
-def get_cached_experiments(workspace_id: Optional[str] = None, limit: int = 10000,
-                           workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    """Read experiments from the Lakebase cache, optionally filtered by one or more
-    workspaces (workspace_ids takes precedence; empty = all)."""
-    ids = _ws_id_list(workspace_id, workspace_ids)
-    if ids:
-        ph = ", ".join(["%s"] * len(ids))
+    ``workspace_id`` may be a single id or a list (the multi-select picker);
+    ``allowed_workspace_ids`` is the caller's access scope (see
+    ``backend.utils.access_scope``) — the two are combined (selection ∩
+    allow-list) the same way as the billing/workspace read paths.
+    """
+    try:
+        ws_ids = resolve_ws_ids(workspace_id, allowed_workspace_ids)
+    except NoAccess:
+        return []
+    if ws_ids is not None:
         rows = execute_query(
-            f"SELECT * FROM observability_experiments WHERE workspace_id IN ({ph}) "
-            "ORDER BY last_update_time DESC LIMIT %s",
-            (*ids, limit),
+            "SELECT * FROM observability_experiments WHERE workspace_id = ANY(%s) ORDER BY last_update_time DESC LIMIT %s",
+            (ws_ids, limit),
         )
     else:
         rows = execute_query(
@@ -1591,17 +1677,22 @@ def get_cached_experiments(workspace_id: Optional[str] = None, limit: int = 1000
     return rows
 
 
-def get_cached_runs(workspace_id: Optional[str] = None, limit: int = 10000,
-                    workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+def get_cached_runs(
+    workspace_id: "Optional[str | List[str]]" = None,
+    limit: int = 10000,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Read runs from the Lakebase cache, optionally filtered by one or more
-    workspaces (workspace_ids takes precedence; empty = all)."""
-    ids = _ws_id_list(workspace_id, workspace_ids)
-    if ids:
-        ph = ", ".join(["%s"] * len(ids))
+    workspaces. ``workspace_id`` may be a single id or a list (multi-select);
+    combined with ``allowed_workspace_ids`` (selection ∩ allow-list)."""
+    try:
+        ws_ids = resolve_ws_ids(workspace_id, allowed_workspace_ids)
+    except NoAccess:
+        return []
+    if ws_ids is not None:
         rows = execute_query(
-            f"SELECT * FROM observability_runs WHERE workspace_id IN ({ph}) "
-            "ORDER BY start_time DESC LIMIT %s",
-            (*ids, limit),
+            "SELECT * FROM observability_runs WHERE workspace_id = ANY(%s) ORDER BY start_time DESC LIMIT %s",
+            (ws_ids, limit),
         )
     else:
         rows = execute_query(
@@ -1611,16 +1702,27 @@ def get_cached_runs(workspace_id: Optional[str] = None, limit: int = 10000,
     return rows
 
 
-def get_observability_workspaces() -> List[Dict[str, Any]]:
-    """Return workspace IDs that have cached observability data, with counts."""
+def get_observability_workspaces(allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Return workspace IDs that have cached observability data, with counts.
+
+    Feeds the workspace picker for this page — must be scoped the same way
+    as the data it filters, or it would leak workspace ids the caller can't
+    otherwise see data for.
+    """
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws_filter = "WHERE workspace_id = ANY(%s)" if allowed_workspace_ids is not None else ""
+    params: tuple = (allowed_workspace_ids,) if allowed_workspace_ids is not None else ()
     try:
         rows = execute_query(
-            """SELECT workspace_id,
+            f"""SELECT workspace_id,
                       COUNT(*) AS trace_count,
                       MAX(last_synced) AS last_synced
                FROM observability_traces
+               {ws_filter}
                GROUP BY workspace_id
-               ORDER BY trace_count DESC"""
+               ORDER BY trace_count DESC""",
+            params,
         )
         return rows
     except Exception:

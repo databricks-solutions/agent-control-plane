@@ -24,6 +24,7 @@ from backend.config import (
     get_databricks_headers,
     find_serverless_warehouse_id,
 )
+from backend.utils.access_scope import sees_deploy_workspace
 
 import logging
 
@@ -387,132 +388,173 @@ def _get_fmapi_uc_model_name(endpoint_name: str, endpoints: Optional[List[Dict]]
 # PUBLIC API — called by the FastAPI routes
 # =====================================================================
 
-def get_all_endpoints() -> List[Dict[str, Any]]:
-    """List all serving endpoints with their configurations (cached)."""
+def get_all_endpoints(allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """List all serving endpoints with their configurations (cached).
+
+    The cache always holds the full deploy-workspace list (never per-user).
+    Scoped callers only receive it when they administer the deploy workspace.
+    """
     cached = _cache_get("endpoints")
-    if cached is not None:
-        return cached
-    return _cache_set("endpoints", _list_serving_endpoints())
+    if cached is None:
+        cached = _cache_set("endpoints", _list_serving_endpoints())
+    if allowed_workspace_ids is not None and not sees_deploy_workspace(allowed_workspace_ids):
+        return []
+    return cached
 
 
-def get_endpoint(name: str) -> Optional[Dict[str, Any]]:
+def get_endpoint(name: str, allowed_workspace_ids: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
     """Get a single endpoint by name."""
-    eps = get_all_endpoints()
+    eps = get_all_endpoints(allowed_workspace_ids=allowed_workspace_ids)
     for ep in eps:
         if ep["name"] == name or ep["endpoint_id"] == name:
             return ep
     return None
 
 
-def get_overview() -> Dict[str, Any]:
-    """KPI overview for the AI Gateway page (cached)."""
+def get_overview(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    """KPI overview for the AI Gateway page (cached).
+
+    Endpoint counts come from the deploy-workspace live list. System-table
+    usage stats are account-wide (no workspace_id) — suppressed for scoped
+    callers so a workspace admin doesn't inherit fleet-wide request totals.
+    """
     cached = _cache_get("overview")
-    if cached is not None:
+    if cached is None:
+        eps = get_all_endpoints()  # unscoped fill of the shared cache
+        total = len(eps)
+        ready = sum(1 for e in eps if e["state"] == "READY")
+        not_ready = total - ready
+        has_gateway = sum(1 for e in eps if e.get("ai_gateway"))
+
+        tasks: Dict[str, int] = {}
+        for e in eps:
+            t = e.get("task") or "unknown"
+            tasks[t] = tasks.get(t, 0) + 1
+
+        usage_stats = _get_usage_overview_stats(days=1)
+        cached = _cache_set("overview", {
+            "total_endpoints": total,
+            "ready_endpoints": ready,
+            "not_ready_endpoints": not_ready,
+            "gateway_enabled": has_gateway,
+            "total_requests_24h": usage_stats.get("total_requests", 0),
+            "total_input_tokens_24h": usage_stats.get("total_input_tokens", 0),
+            "total_output_tokens_24h": usage_stats.get("total_output_tokens", 0),
+            "error_count_24h": usage_stats.get("error_count", 0),
+            "error_rate_24h": usage_stats.get("error_rate", 0),
+            "unique_users_24h": usage_stats.get("unique_users", 0),
+            "tasks": tasks,
+        })
+
+    if allowed_workspace_ids is None:
         return cached
-
-    eps = get_all_endpoints()
-
-    total = len(eps)
-    ready = sum(1 for e in eps if e["state"] == "READY")
-    not_ready = total - ready
-    has_gateway = sum(1 for e in eps if e.get("ai_gateway"))
-
-    # Task distribution
-    tasks: Dict[str, int] = {}
-    for e in eps:
-        t = e.get("task") or "unknown"
-        tasks[t] = tasks.get(t, 0) + 1
-
-    # Try to get recent usage stats from system tables
-    usage_stats = _get_usage_overview_stats(days=1)
-
-    result = {
-        "total_endpoints": total,
-        "ready_endpoints": ready,
-        "not_ready_endpoints": not_ready,
-        "gateway_enabled": has_gateway,
-        "total_requests_24h": usage_stats.get("total_requests", 0),
-        "total_input_tokens_24h": usage_stats.get("total_input_tokens", 0),
-        "total_output_tokens_24h": usage_stats.get("total_output_tokens", 0),
-        "error_count_24h": usage_stats.get("error_count", 0),
-        "error_rate_24h": usage_stats.get("error_rate", 0),
-        "unique_users_24h": usage_stats.get("unique_users", 0),
-        "tasks": tasks,
-    }
-    return _cache_set("overview", result)
+    if not sees_deploy_workspace(allowed_workspace_ids):
+        return {
+            "total_endpoints": 0, "ready_endpoints": 0, "not_ready_endpoints": 0,
+            "gateway_enabled": 0, "total_requests_24h": 0, "total_input_tokens_24h": 0,
+            "total_output_tokens_24h": 0, "error_count_24h": 0, "error_rate_24h": 0,
+            "unique_users_24h": 0, "tasks": {},
+        }
+    # Workspace admin of the deploy workspace: endpoint counts are local and
+    # OK; the 24h usage totals are account-wide — zero those.
+    scoped = dict(cached)
+    scoped["total_requests_24h"] = 0
+    scoped["total_input_tokens_24h"] = 0
+    scoped["total_output_tokens_24h"] = 0
+    scoped["error_count_24h"] = 0
+    scoped["error_rate_24h"] = 0
+    scoped["unique_users_24h"] = 0
+    return scoped
 
 
-def get_permissions(endpoint_name: Optional[str] = None) -> List[Dict[str, Any]]:
+def _deny_live(allowed_workspace_ids: Optional[List[str]]) -> bool:
+    """True when the caller must not see deploy-workspace-only live data."""
+    return allowed_workspace_ids is not None and not sees_deploy_workspace(allowed_workspace_ids)
+
+
+def get_permissions(
+    endpoint_name: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Get permissions across endpoints or for a specific one (cached)."""
     ck = f"permissions:{endpoint_name or '__all__'}"
     cached = _cache_get(ck)
-    if cached is not None:
-        return cached
+    if cached is None:
+        eps = get_all_endpoints()
+        if endpoint_name:
+            eps = [e for e in eps if e["name"] == endpoint_name]
 
-    eps = get_all_endpoints()
-    if endpoint_name:
-        eps = [e for e in eps if e["name"] == endpoint_name]
+        results = []
+        for ep in eps:
+            eid = ep["endpoint_id"]
+            if not eid:
+                continue  # FMAPI / system endpoints have no ID — skip
+            perms = _get_endpoint_permissions(eid)
+            for p in perms:
+                p["endpoint_name"] = ep["name"]
+                p["endpoint_id"] = eid
+            results.extend(perms)
+        cached = _cache_set(ck, results)
+    if _deny_live(allowed_workspace_ids):
+        return []
+    return cached
 
-    results = []
-    for ep in eps:
-        eid = ep["endpoint_id"]
-        if not eid:
-            continue  # FMAPI / system endpoints have no ID — skip
-        perms = _get_endpoint_permissions(eid)
-        for p in perms:
-            p["endpoint_name"] = ep["name"]
-            p["endpoint_id"] = eid
-        results.extend(perms)
-    return _cache_set(ck, results)
 
-
-def get_rate_limits(endpoint_name: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_rate_limits(
+    endpoint_name: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Get rate limits from AI Gateway config on endpoints (cached)."""
     ck = f"rate_limits:{endpoint_name or '__all__'}"
     cached = _cache_get(ck)
-    if cached is not None:
-        return cached
+    if cached is None:
+        eps = get_all_endpoints()
+        if endpoint_name:
+            eps = [e for e in eps if e["name"] == endpoint_name]
 
-    eps = get_all_endpoints()
-    if endpoint_name:
-        eps = [e for e in eps if e["name"] == endpoint_name]
+        results = []
+        for ep in eps:
+            gw = ep.get("ai_gateway")
+            if gw and gw.get("rate_limits"):
+                for rl in gw["rate_limits"]:
+                    results.append({
+                        "endpoint_name": ep["name"],
+                        "endpoint_id": ep["endpoint_id"],
+                        "calls": rl.get("calls"),
+                        "renewal_period": rl.get("renewal_period"),
+                        "key": rl.get("key"),
+                    })
+        cached = _cache_set(ck, results)
+    if _deny_live(allowed_workspace_ids):
+        return []
+    return cached
 
-    results = []
-    for ep in eps:
-        gw = ep.get("ai_gateway")
-        if gw and gw.get("rate_limits"):
-            for rl in gw["rate_limits"]:
-                results.append({
-                    "endpoint_name": ep["name"],
-                    "endpoint_id": ep["endpoint_id"],
-                    "calls": rl.get("calls"),
-                    "renewal_period": rl.get("renewal_period"),
-                    "key": rl.get("key"),
-                })
-    return _cache_set(ck, results)
 
-
-def get_guardrails(endpoint_name: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_guardrails(
+    endpoint_name: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Get guardrails config from AI Gateway on endpoints (cached)."""
     ck = f"guardrails:{endpoint_name or '__all__'}"
     cached = _cache_get(ck)
-    if cached is not None:
-        return cached
+    if cached is None:
+        eps = get_all_endpoints()
+        if endpoint_name:
+            eps = [e for e in eps if e["name"] == endpoint_name]
 
-    eps = get_all_endpoints()
-    if endpoint_name:
-        eps = [e for e in eps if e["name"] == endpoint_name]
-
-    results = []
-    for ep in eps:
-        gw = ep.get("ai_gateway")
-        if gw and gw.get("guardrails"):
-            results.append({
-                "endpoint_name": ep["name"],
-                "endpoint_id": ep["endpoint_id"],
-                "guardrails": gw["guardrails"],
-            })
-    return _cache_set(ck, results)
+        results = []
+        for ep in eps:
+            gw = ep.get("ai_gateway")
+            if gw and gw.get("guardrails"):
+                results.append({
+                    "endpoint_name": ep["name"],
+                    "endpoint_id": ep["endpoint_id"],
+                    "guardrails": gw["guardrails"],
+                })
+        cached = _cache_set(ck, results)
+    if _deny_live(allowed_workspace_ids):
+        return []
+    return cached
 
 
 def get_inference_table_config(endpoint_name: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -598,15 +640,19 @@ def _max_as_of(rows: List[Dict[str, Any]]) -> Optional[str]:
     return max((r.get("max_event_time") for r in rows if r.get("max_event_time")), default=None)
 
 
-def get_uag_v2_usage() -> Dict[str, Any]:
+def get_uag_v2_usage(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Unity AI Gateway (v2) usage summary from `uag_usage_summary` (sourced from
     system.ai_gateway.usage — v2-routed endpoints only, ~20-min fresh).
 
     Returns {as_of, totals, endpoints}. Degrades to empty if the table isn't
     synced yet or the workflow couldn't read the (account-scoped) system table.
+
+    No workspace_id column — suppressed for scoped (non-account-admin) callers.
     """
+    empty: Dict[str, Any] = {"as_of": None, "totals": {}, "endpoints": [], "breakdowns": {}}
+    if allowed_workspace_ids is not None:
+        return empty
     from backend.database import execute_query
-    empty = {"as_of": None, "totals": {}, "endpoints": [], "breakdowns": {}}
     try:
         rows = execute_query(
             """SELECT endpoint_name, request_count, input_tokens, output_tokens,
@@ -684,7 +730,7 @@ def get_uag_v2_usage() -> Dict[str, Any]:
     }
 
 
-def get_uag_budget_status() -> Dict[str, Any]:
+def get_uag_budget_status(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Budget configuration inventory from `uag_budget_status` (sourced from the
     account Budgets API, /api/2.1/accounts/{id}/budgets).
 
@@ -704,6 +750,8 @@ def get_uag_budget_status() -> Dict[str, Any]:
     """
     from backend.database import execute_query
     empty = {"as_of": None, "totals": {}, "budgets": []}
+    if allowed_workspace_ids is not None:
+        return empty
     try:
         # Totals aggregate the FULL table (not the limited list below), so KPIs
         # stay correct on accounts with more budgets than the display cap.
@@ -763,7 +811,7 @@ def get_uag_budget_status() -> Dict[str, Any]:
     }
 
 
-def get_endpoint_inventory() -> Dict[str, Any]:
+def get_endpoint_inventory(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Account-wide served-entity inventory from `serving_endpoints_inventory`
     (system.serving.served_entities). Read-only fleet view across ALL workspaces in
     the metastore — the per-workspace serving API only sees the deploy workspace.
@@ -772,22 +820,29 @@ def get_endpoint_inventory() -> Dict[str, Any]:
     """
     from backend.database import execute_query
     empty = {"as_of": None, "totals": {}, "endpoints": []}
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return empty
+    ws_filter = "WHERE workspace_id = ANY(%s)" if allowed_workspace_ids is not None else ""
+    params: tuple = (allowed_workspace_ids,) if allowed_workspace_ids is not None else ()
     try:
         agg = execute_query(
-            """SELECT count(*) AS served_entity_count,
+            f"""SELECT count(*) AS served_entity_count,
                       count(DISTINCT endpoint_id) AS endpoint_count,
                       count(DISTINCT workspace_id) AS workspace_count,
                       count(*) FILTER (WHERE entity_type = 'FOUNDATION_MODEL') AS foundation_count,
                       count(*) FILTER (WHERE entity_type = 'CUSTOM_MODEL') AS custom_count,
                       count(*) FILTER (WHERE entity_type = 'EXTERNAL_MODEL') AS external_count,
                       max(discovered_at) AS max_discovered
-               FROM serving_endpoints_inventory"""
+               FROM serving_endpoints_inventory {ws_filter}""",
+            params,
         )
         rows = execute_query(
-            """SELECT endpoint_name, workspace_id, entity_type, entity_name,
+            f"""SELECT endpoint_name, workspace_id, entity_type, entity_name,
                       entity_version, provider, task, created_by, change_time
                FROM serving_endpoints_inventory
-               ORDER BY change_time DESC NULLS LAST LIMIT 2000"""
+               {ws_filter}
+               ORDER BY change_time DESC NULLS LAST LIMIT 2000""",
+            params,
         )
     except Exception as exc:
         logger.warning("serving_endpoints_inventory not available: %s", exc)
@@ -922,7 +977,7 @@ def set_model_service_grant(
     return {"ok": False, "error": last}
 
 
-def get_uag_mcp_tools() -> Dict[str, Any]:
+def get_uag_mcp_tools(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Per-tool MCP activity from `uag_mcp_tool_daily` (sourced from
     system.ai_gateway.usage rows where service_type = MCP_SERVICE).
 
@@ -931,6 +986,8 @@ def get_uag_mcp_tools() -> Dict[str, Any]:
     """
     from backend.database import execute_query
     empty = {"as_of": None, "totals": {}, "tools": []}
+    if allowed_workspace_ids is not None:
+        return empty
     # Account-wide totals from an unbounded aggregate — deriving them from the
     # capped list below would undercount services/tools/requests past the LIMIT.
     try:
@@ -976,7 +1033,7 @@ def get_uag_mcp_tools() -> Dict[str, Any]:
     }
 
 
-def get_guardrail_coverage() -> Dict[str, Any]:
+def get_guardrail_coverage(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Guardrail COVERAGE / activity from `uag_guardrail_daily` — which endpoints
     have Unity AI Gateway v2 guardrails running, how often, and by which judge
     model(s).
@@ -989,6 +1046,8 @@ def get_guardrail_coverage() -> Dict[str, Any]:
     """
     from backend.database import execute_query, execute_one
     empty: Dict[str, Any] = {"as_of": None, "totals": {}, "endpoints": []}
+    if allowed_workspace_ids is not None:
+        return empty
     # Totals from an unbounded aggregate (the row list below is capped for display).
     # No coverage ratio: a comparable "total guardable endpoints" denominator isn't
     # derivable here (uag_usage_summary counts MCP + judge endpoints too), so we
@@ -1030,7 +1089,7 @@ def get_guardrail_coverage() -> Dict[str, Any]:
     }
 
 
-def get_throttling() -> Dict[str, Any]:
+def get_throttling(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Throttling / reliability per endpoint from `uag_throttling_daily`: HTTP 429
     (rate-limited) and 5xx (server-error) counts vs total requests, over the
     discovery window. Answers "which endpoints are getting rate-limited/erroring".
@@ -1038,6 +1097,8 @@ def get_throttling() -> Dict[str, Any]:
     """
     from backend.database import execute_query, execute_one
     empty: Dict[str, Any] = {"as_of": None, "totals": {}, "endpoints": []}
+    if allowed_workspace_ids is not None:
+        return empty
     try:
         agg = execute_one(
             """SELECT COUNT(*) AS endpoints,
@@ -1088,7 +1149,7 @@ def get_throttling() -> Dict[str, Any]:
     }
 
 
-def get_fallback_routing() -> Dict[str, Any]:
+def get_fallback_routing(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Smart-routing fallback per endpoint from `uag_fallback_routing_daily`: how
     often the AI Gateway had to fall back to a backup model (>1 routing attempt),
     how many recovered (final attempt < 400), and which backup destinations were
@@ -1097,6 +1158,8 @@ def get_fallback_routing() -> Dict[str, Any]:
     """
     from backend.database import execute_query, execute_one
     empty: Dict[str, Any] = {"as_of": None, "totals": {}, "endpoints": []}
+    if allowed_workspace_ids is not None:
+        return empty
     try:
         agg = execute_one(
             """SELECT COUNT(*) AS endpoints,
@@ -1143,9 +1206,11 @@ def get_fallback_routing() -> Dict[str, Any]:
     }
 
 
-def get_uag_v2_timeseries() -> Dict[str, Any]:
+def get_uag_v2_timeseries(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Daily UAG v2 usage series (requests + tokens) from `uag_usage_timeseries_daily`
     for trend charts on the v2 tab. Degrades to empty when unsynced / no v2 traffic."""
+    if allowed_workspace_ids is not None:
+        return {"series": []}
     from backend.database import execute_query
     try:
         rows = execute_query(
@@ -1168,7 +1233,7 @@ def get_uag_v2_timeseries() -> Dict[str, Any]:
     }
 
 
-def get_uag_coding_agents() -> Dict[str, Any]:
+def get_uag_coding_agents(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Coding-agent activity from `uag_coding_agent_usage` (classified from
     user_agent in system.ai_gateway.usage): Claude Code / Codex / Cursor / Gemini
     CLI, with requests, users, active days, tokens.
@@ -1178,6 +1243,8 @@ def get_uag_coding_agents() -> Dict[str, Any]:
     """
     from backend.database import execute_query
     empty: Dict[str, Any] = {"as_of": None, "agents": []}
+    if allowed_workspace_ids is not None:
+        return empty
     try:
         rows = execute_query(
             """SELECT coding_agent, request_count, unique_users, active_days,
@@ -1204,8 +1271,10 @@ def get_uag_coding_agents() -> Dict[str, Any]:
     }
 
 
-def get_usage_summary(days: int = 7) -> List[Dict[str, Any]]:
+def get_usage_summary(days: int = 7, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Per-endpoint usage summary from Lakebase cache."""
+    if allowed_workspace_ids is not None:
+        return []
     from backend.database import execute_query
     rows = execute_query(
         """SELECT endpoint_name,
@@ -1234,8 +1303,14 @@ def get_usage_summary(days: int = 7) -> List[Dict[str, Any]]:
     ]
 
 
-def get_usage_timeseries(days: int = 7, endpoint_name: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_usage_timeseries(
+    days: int = 7,
+    endpoint_name: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Hourly usage time series from Lakebase cache."""
+    if allowed_workspace_ids is not None:
+        return []
     from backend.database import execute_query
     if endpoint_name:
         rows = execute_query(
@@ -1269,8 +1344,10 @@ def get_usage_timeseries(days: int = 7, endpoint_name: Optional[str] = None) -> 
     ]
 
 
-def get_usage_by_user(days: int = 7) -> List[Dict[str, Any]]:
+def get_usage_by_user(days: int = 7, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Per-user usage summary from Lakebase cache."""
+    if allowed_workspace_ids is not None:
+        return []
     from backend.database import execute_query
     rows = execute_query(
         """SELECT requester, SUM(request_count) AS total_requests,
@@ -1299,8 +1376,11 @@ def get_usage_by_user(days: int = 7) -> List[Dict[str, Any]]:
 def get_inference_logs(
     limit: int = 50,
     endpoint_name: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Recent individual request logs from system tables (cached)."""
+    if allowed_workspace_ids is not None:
+        return []
     ck = f"inference_logs:{limit}:{endpoint_name or '__all__'}"
     cached = _cache_get(ck)
     if cached is not None:
@@ -1344,8 +1424,10 @@ def get_inference_logs(
     return _cache_set(ck, result)
 
 
-def get_operational_metrics(hours: int = 24) -> Dict[str, Any]:
+def get_operational_metrics(hours: int = 24, allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Aggregate operational metrics from system tables (cached)."""
+    if allowed_workspace_ids is not None:
+        return {}
     ck = f"ops_metrics:{hours}"
     cached = _cache_get(ck)
     if cached is not None:
@@ -1409,7 +1491,9 @@ def get_operational_metrics(hours: int = 24) -> Dict[str, Any]:
 # Endpoint-level permissions — list / update / revoke
 # =====================================================================
 
-def get_endpoints_with_permissions() -> List[Dict[str, Any]]:
+def get_endpoints_with_permissions(
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Return every serving endpoint with its current ACL.
 
     Each item contains the endpoint summary plus a flat ``acl`` list so
@@ -1418,56 +1502,57 @@ def get_endpoints_with_permissions() -> List[Dict[str, Any]]:
     """
     ck = "endpoints_with_perms"
     cached = _cache_get(ck, ttl=120)
-    if cached is not None:
-        return cached
+    if cached is None:
+        from backend.services.access_service import _list_uc_grants
 
-    from backend.services.access_service import _list_uc_grants
+        eps = get_all_endpoints()
+        results = []
+        for ep in eps:
+            eid = ep.get("endpoint_id")
+            models = ", ".join(
+                se.get("entity_name") or se.get("name") or ""
+                for se in (ep.get("served_entities") or [])
+            ) or "—"
 
-    eps = get_all_endpoints()
-    results = []
-    for ep in eps:
-        eid = ep.get("endpoint_id")
-        models = ", ".join(
-            se.get("entity_name") or se.get("name") or ""
-            for se in (ep.get("served_entities") or [])
-        ) or "—"
+            is_fmapi = not eid  # FMAPI / databricks-* endpoints have no endpoint_id
+            uc_model_name = None
 
-        is_fmapi = not eid  # FMAPI / databricks-* endpoints have no endpoint_id
-        uc_model_name = None
+            if is_fmapi:
+                uc_model_name = _get_fmapi_uc_model_name(ep["name"], eps)
+                try:
+                    grants = _list_uc_grants("function", uc_model_name)
+                except Exception as exc:
+                    logger.warning("Failed to fetch UC grants for %s: %s", uc_model_name, exc)
+                    grants = []
+                acl = [
+                    {
+                        "principal": grant["principal"],
+                        "principal_type": _infer_principal_type(grant["principal"]),
+                        "permissions": [{
+                            "permission_level": grant["privilege"],
+                            "inherited": grant.get("inherited", False),
+                        }],
+                    }
+                    for grant in grants
+                ]
+            else:
+                acl = _get_endpoint_permissions(eid)
 
-        if is_fmapi:
-            uc_model_name = _get_fmapi_uc_model_name(ep["name"], eps)
-            try:
-                grants = _list_uc_grants("function", uc_model_name)
-            except Exception as exc:
-                logger.warning("Failed to fetch UC grants for %s: %s", uc_model_name, exc)
-                grants = []
-            acl = [
-                {
-                    "principal": grant["principal"],
-                    "principal_type": _infer_principal_type(grant["principal"]),
-                    "permissions": [{
-                        "permission_level": grant["privilege"],
-                        "inherited": grant.get("inherited", False),
-                    }],
-                }
-                for grant in grants
-            ]
-        else:
-            acl = _get_endpoint_permissions(eid)
-
-        results.append({
-            "endpoint_id": eid,
-            "endpoint_name": ep["name"],
-            "state": ep.get("state", "UNKNOWN"),
-            "task": ep.get("task", ""),
-            "endpoint_type": ep.get("endpoint_type", ""),
-            "served_models": models,
-            "acl": acl,
-            "is_foundation_model": is_fmapi,
-            "uc_model_name": uc_model_name,
-        })
-    return _cache_set(ck, results)
+            results.append({
+                "endpoint_id": eid,
+                "endpoint_name": ep["name"],
+                "state": ep.get("state", "UNKNOWN"),
+                "task": ep.get("task", ""),
+                "endpoint_type": ep.get("endpoint_type", ""),
+                "served_models": models,
+                "acl": acl,
+                "is_foundation_model": is_fmapi,
+                "uc_model_name": uc_model_name,
+            })
+        cached = _cache_set(ck, results)
+    if _deny_live(allowed_workspace_ids):
+        return []
+    return cached
 
 
 def update_endpoint_permission(
@@ -1965,7 +2050,7 @@ def _invalidate_perm_caches():
 # Composite endpoint — single request for initial page load
 # =====================================================================
 
-def get_page_data() -> Dict[str, Any]:
+def get_page_data(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Return overview + endpoints in one call to avoid waterfall.
 
     This is what the frontend should call on first render.
@@ -1973,8 +2058,8 @@ def get_page_data() -> Dict[str, Any]:
     hook calls for individual pieces (permissions, rate-limits, etc.)
     hit the in-memory cache instead of going to the network.
     """
-    endpoints = get_all_endpoints()
-    overview = get_overview()
+    endpoints = get_all_endpoints(allowed_workspace_ids=allowed_workspace_ids)
+    overview = get_overview(allowed_workspace_ids=allowed_workspace_ids)
     return {
         "overview": overview,
         "endpoints": endpoints,

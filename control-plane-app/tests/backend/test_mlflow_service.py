@@ -81,6 +81,81 @@ class TestCachedReads:
             assert result == []
 
 
+class TestAccessScope:
+    """Workspace-access scoping added to the cross-workspace cache reads."""
+
+    def test_get_cached_traces_no_access_returns_empty_without_query(self):
+        with patch("backend.services.mlflow_service.execute_query") as mock_q:
+            from backend.services.mlflow_service import get_cached_traces
+            result = get_cached_traces(None, 50, allowed_workspace_ids=[])
+            assert result == []
+            mock_q.assert_not_called()
+
+    def test_get_cached_traces_scoped_uses_any_filter(self):
+        with patch("backend.services.mlflow_service.execute_query", return_value=[]) as mock_q:
+            from backend.services.mlflow_service import get_cached_traces
+            get_cached_traces(None, 50, allowed_workspace_ids=["ws1", "ws2"])
+            sql = mock_q.call_args[0][0]
+            params = mock_q.call_args[0][1]
+            assert "workspace_id = ANY(%s)" in sql
+            assert ["ws1", "ws2"] in params
+
+    def test_get_cached_traces_requested_workspace_outside_scope_returns_empty(self):
+        with patch("backend.services.mlflow_service.execute_query") as mock_q:
+            from backend.services.mlflow_service import get_cached_traces
+            result = get_cached_traces("ws-not-allowed", 50, allowed_workspace_ids=["ws1"])
+            assert result == []
+            mock_q.assert_not_called()
+
+    def test_get_cached_experiments_account_admin_unfiltered(self):
+        with patch("backend.services.mlflow_service.execute_query", return_value=[]) as mock_q:
+            from backend.services.mlflow_service import get_cached_experiments
+            get_cached_experiments(None, 50, allowed_workspace_ids=None)
+            sql = mock_q.call_args[0][0]
+            assert "ANY" not in sql
+
+    def test_get_cached_models_no_access_returns_empty_without_query(self):
+        with patch("backend.services.mlflow_service.execute_query") as mock_q:
+            from backend.services.mlflow_service import get_cached_models
+            result = get_cached_models(100, allowed_workspace_ids=[])
+            assert result == []
+            mock_q.assert_not_called()
+
+    def test_get_agent_tool_usage_suppressed_for_scoped_caller(self):
+        with patch("backend.services.mlflow_service.execute_query") as mock_q:
+            from backend.services.mlflow_service import get_agent_tool_usage
+            result = get_agent_tool_usage(allowed_workspace_ids=["ws1"])
+            assert result == {"totals": {}, "rows": []}
+            mock_q.assert_not_called()
+
+    def test_get_agent_eval_scores_suppressed_for_scoped_caller(self):
+        with patch("backend.services.mlflow_service.execute_query") as mock_q:
+            from backend.services.mlflow_service import get_agent_eval_scores
+            result = get_agent_eval_scores(allowed_workspace_ids=[])
+            assert result == {"totals": {}, "rows": []}
+            mock_q.assert_not_called()
+
+    def test_get_ai_audit_suppressed_for_scoped_caller(self):
+        with patch("backend.services.mlflow_service.execute_query") as mock_q:
+            from backend.services.mlflow_service import get_ai_audit
+            result = get_ai_audit(allowed_workspace_ids=["ws1"])
+            assert result == {"totals": {}, "summary": [], "recent": []}
+            mock_q.assert_not_called()
+
+    def test_get_ai_audit_unrestricted_still_queries(self):
+        with patch("backend.services.mlflow_service.execute_query", return_value=[]) as mock_q:
+            from backend.services.mlflow_service import get_ai_audit
+            get_ai_audit(allowed_workspace_ids=None)
+            mock_q.assert_called()
+
+    def test_get_observability_workspaces_no_access_returns_empty(self):
+        with patch("backend.services.mlflow_service.execute_query") as mock_q:
+            from backend.services.mlflow_service import get_observability_workspaces
+            result = get_observability_workspaces(allowed_workspace_ids=[])
+            assert result == []
+            mock_q.assert_not_called()
+
+
 class TestCurrentWorkspaceQueries:
     """Current workspace MLflow REST API queries."""
 

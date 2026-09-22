@@ -26,6 +26,17 @@ export interface CurrentUser {
   is_admin: boolean
   is_account_admin: boolean
   groups: string[]
+  // Mirrors the server-side access scope (backend/utils/access_scope.py):
+  // true for account admins and workspace admins, false for everyone else.
+  // The API enforces this on every data endpoint regardless — this flag is
+  // only used to render a "no access" state instead of empty charts/tables.
+  has_workspace_access: boolean
+  allowed_workspace_count: number | null
+  // True when the caller may see live APIs that only exist on the app's
+  // home (deploy) workspace. Account admin is always true; workspace admin
+  // only when that home workspace is one they administer.
+  sees_deploy_workspace: boolean
+  current_workspace_id: string | null
 }
 
 export function useCurrentUser() {
@@ -494,7 +505,7 @@ export function useWorkspaceDirectory() {
 const GW_STALE = 10 * 60 * 1000 // 10 minutes
 
 /** Composite hook: overview + endpoints in a single request (avoids waterfall). */
-export function useGatewayPageData() {
+export function useGatewayPageData(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ['gateway', 'page-data'],
     queryFn: async () => {
@@ -507,6 +518,7 @@ export function useGatewayPageData() {
       } as { overview: any; endpoints: any[]; last_refreshed: string | null }
     },
     staleTime: GW_STALE,
+    enabled: options?.enabled ?? true,
   })
 }
 
@@ -1075,7 +1087,7 @@ export function useSyncAgents() {
 
 // ── Tools ────────────────────────────────────────────────────────
 
-export function useToolsOverview() {
+export function useToolsOverview(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ['tools', 'overview'],
     queryFn: async () => {
@@ -1090,6 +1102,7 @@ export function useToolsOverview() {
         last_refreshed: string | null
       }
     },
+    enabled: options?.enabled ?? true,
   })
 }
 
@@ -1503,7 +1516,7 @@ export interface PlaygroundEndpoint {
   app_url?: string        // set for Databricks App agents
 }
 
-export function usePlaygroundEndpoints() {
+export function usePlaygroundEndpoints(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ['playground', 'endpoints'],
     queryFn: async () => {
@@ -1511,6 +1524,7 @@ export function usePlaygroundEndpoints() {
       return data as PlaygroundEndpoint[]
     },
     staleTime: 120_000, // matches backend 2-min cache
+    enabled: options?.enabled ?? true,
   })
 }
 
@@ -1793,6 +1807,32 @@ export function useRefreshGateway() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['gateway'] })
+    },
+  })
+}
+
+export function useRefreshVectorSearch() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async () => {
+      const { data } = await apiClient.post('/vector-search/refresh')
+      return data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['vector-search'] })
+    },
+  })
+}
+
+export function useRefreshMlflowCache() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async () => {
+      const { data } = await apiClient.post('/mlflow/refresh-cache')
+      return data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['mlflow'] })
     },
   })
 }

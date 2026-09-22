@@ -1,6 +1,7 @@
 """API routes for agents."""
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from backend.utils.auth import get_current_user
+from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.access_scope import resolve_scope, get_allowed_workspace_ids, sees_deploy_workspace
 from typing import List, Optional, Dict, Any
 from backend.models.agent import AgentOut, AgentListOut, AgentUpdate
 from backend.services import agent_service
@@ -20,40 +21,58 @@ router = APIRouter(prefix="/agents", tags=["agents"], dependencies=[Depends(get_
 
 
 @router.get("", response_model=List[AgentListOut])
-def list_agents(active_only: bool = Query(default=False)):
+def list_agents(
+    active_only: bool = Query(default=False),
+    user: UserInfo = Depends(get_current_user),
+):
     """List all agents from the registry."""
-    return agent_service.get_all_agents(active_only=active_only)
+    return agent_service.get_all_agents(
+        active_only=active_only,
+        allowed_workspace_ids=get_allowed_workspace_ids(user),
+    )
 
 
 @router.get("/full")
-def list_agents_full(active_only: bool = Query(default=False)):
+def list_agents_full(
+    active_only: bool = Query(default=False),
+    user: UserInfo = Depends(get_current_user),
+):
     """List all agents with full detail (tags, config, description)."""
-    return agent_service.get_all_agents_full(active_only=active_only)
+    return agent_service.get_all_agents_full(
+        active_only=active_only,
+        allowed_workspace_ids=get_allowed_workspace_ids(user),
+    )
 
 
 @router.get("/discovered")
 def list_discovered_agents(
     workspace_id: Optional[str] = Query(default=None),
+    user: UserInfo = Depends(get_current_user),
 ):
-    """List agents discovered from live API + system tables."""
-    return get_discovered_agents(workspace_id)
+    """List agents discovered from live API + system tables, scoped to the
+    caller's workspace access (account admin = all, workspace admin = their
+    workspaces, everyone else = empty)."""
+    allowed = resolve_scope(user, workspace_id)
+    return get_discovered_agents(workspace_id, allowed_workspace_ids=allowed)
 
 
 @router.get("/all")
 def list_all_agents(
     workspace_id: Optional[str] = Query(default=None),
+    user: UserInfo = Depends(get_current_user),
 ):
     """Merged view: registered + discovered agents, filterable by workspace."""
-    return get_all_agents_merged(workspace_id)
+    allowed = resolve_scope(user, workspace_id)
+    return get_all_agents_merged(workspace_id, allowed_workspace_ids=allowed)
 
 
 @router.get("/discovery/status")
-def discovery_status(request: Request):
-    """Current discovery cache status."""
+def discovery_status(request: Request, user: UserInfo = Depends(get_current_user)):
+    """Current discovery cache status, scoped to the caller's workspaces."""
     # Check if the current request has an OBO token — this means user auth
     # is enabled on the app, regardless of whether the last sync used OBO.
     has_obo = bool(request.headers.get("x-forwarded-access-token"))
-    status = get_discovery_status()
+    status = get_discovery_status(allowed_workspace_ids=get_allowed_workspace_ids(user))
     status["obo_enabled"] = has_obo or status.get("obo_enabled", False)
     return status
 
@@ -95,6 +114,14 @@ def sync_agents(request: Request):
             refresh_agent_permissions(user_token=user_token)
         except Exception as exc:
             logger.warning("   Background agent permissions cache refresh failed: %s", exc)
+        try:
+            # Must run AFTER the workspace registry refresh above — it reads
+            # get_all_workspace_hosts() to know which workspace_ids to query.
+            from backend.services.workspace_admins_service import refresh_workspace_admins
+            wa_cnt = refresh_workspace_admins(user_token=user_token)
+            logger.info("   Background workspace admins cache: %s (workspace_id, user) rows", wa_cnt)
+        except Exception as exc:
+            logger.warning("   Background workspace admins cache refresh failed: %s", exc)
 
     t = threading.Thread(target=_bg_refresh, daemon=True)
     t.start()
@@ -108,7 +135,11 @@ def sync_agents(request: Request):
 
 
 @router.post("/workspace-registry")
-def populate_workspace_registry(request: Request, body: Dict[str, Any] = {}):
+def populate_workspace_registry(
+    request: Request,
+    body: Dict[str, Any] = {},
+    user: UserInfo = Depends(get_current_user),
+):
     """Populate the workspace registry from an external source.
 
     Accepts either:
@@ -117,6 +148,8 @@ def populate_workspace_registry(request: Request, body: Dict[str, Any] = {}):
 
     Typically called from a setup script that has account-level API access.
     """
+    if not user.is_account_admin:
+        raise HTTPException(status_code=403, detail="Account admin access required")
     from backend.services.workspace_registry import _upsert_workspace, get_all_workspace_hosts
     count = 0
 
@@ -148,13 +181,16 @@ def populate_workspace_registry(request: Request, body: Dict[str, Any] = {}):
 
 
 @router.get("/discovery/diagnostics")
-def discovery_diagnostics():
+def discovery_diagnostics(user: UserInfo = Depends(get_current_user)):
     """Run app-discovery paths in isolation and return raw diagnostics."""
+    # Live discovery dumps names across workspaces — account admin only.
+    if get_allowed_workspace_ids(user) is not None:
+        return {}
     return get_app_discovery_diagnostics()
 
 
 @router.get("/with-permissions")
-def agents_with_permissions(request: Request):
+def agents_with_permissions(request: Request, user: UserInfo = Depends(get_current_user)):
     """List all agents with their cached permissions (from Lakebase).
 
     Data is refreshed during Sync (POST /api/agents/sync).
@@ -175,34 +211,51 @@ def agents_with_permissions(request: Request):
         except Exception as exc:
             logger.warning("On-demand agent permissions cache fill failed: %s", exc)
 
-    return get_cached_agent_permissions()
+    return get_cached_agent_permissions(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/{agent_id}", response_model=AgentOut)
-def get_agent(agent_id: str):
+def get_agent(agent_id: str, user: UserInfo = Depends(get_current_user)):
     """Get agent details."""
-    agent = agent_service.get_agent_by_id(agent_id)
+    agent = agent_service.get_agent_by_id(
+        agent_id, allowed_workspace_ids=get_allowed_workspace_ids(user),
+    )
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     return agent
 
 
 @router.put("/{agent_id}", response_model=AgentOut)
-def update_agent(agent_id: str, update: AgentUpdate):
-    """Update an agent."""
+def update_agent(
+    agent_id: str,
+    update: AgentUpdate,
+    user: UserInfo = Depends(get_current_user),
+):
+    """Update an agent in the local (deploy-workspace) registry."""
+    allowed = get_allowed_workspace_ids(user)
+    if allowed is not None and not sees_deploy_workspace(allowed):
+        raise HTTPException(status_code=404, detail="Agent not found")
     success = agent_service.update_agent(agent_id, update)
     if not success:
         raise HTTPException(status_code=400, detail="Failed to update agent")
-    agent = agent_service.get_agent_by_id(agent_id)
+    agent = agent_service.get_agent_by_id(
+        agent_id, allowed_workspace_ids=allowed,
+    )
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     return agent
 
 
 @router.get("/{agent_id}/metrics")
-def get_agent_metrics(agent_id: str, hours: int = Query(default=24, ge=1, le=168)):
+def get_agent_metrics(
+    agent_id: str,
+    hours: int = Query(default=24, ge=1, le=168),
+    user: UserInfo = Depends(get_current_user),
+):
     """Get performance metrics for an agent."""
-    metrics = agent_service.get_agent_metrics(agent_id, hours)
+    metrics = agent_service.get_agent_metrics(
+        agent_id, hours, allowed_workspace_ids=get_allowed_workspace_ids(user),
+    )
     if not metrics:
         raise HTTPException(status_code=404, detail="Agent not found or no metrics available")
     return {"data": metrics, "meta": {"agent_id": agent_id, "hours": hours}}

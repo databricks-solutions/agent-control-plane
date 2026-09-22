@@ -4,7 +4,8 @@ from pydantic import BaseModel
 from typing import Optional, List
 from backend.config import settings
 from backend.services import gateway_service
-from backend.utils.auth import get_current_user, require_admin, require_account_admin, UserInfo
+from backend.utils.auth import get_current_user, require_admin, UserInfo
+from backend.utils.access_scope import get_allowed_workspace_ids
 
 router = APIRouter(prefix="/gateway", tags=["ai-gateway"], dependencies=[Depends(get_current_user)])
 
@@ -34,27 +35,27 @@ def refresh_cache():
 
 
 @router.get("/page-data")
-def gateway_page_data():
+def gateway_page_data(user: UserInfo = Depends(get_current_user)):
     """Composite: overview + endpoints in a single request (avoids waterfall)."""
-    return gateway_service.get_page_data()
+    return gateway_service.get_page_data(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/overview")
-def gateway_overview():
+def gateway_overview(user: UserInfo = Depends(get_current_user)):
     """AI Gateway KPI overview."""
-    return gateway_service.get_overview()
+    return gateway_service.get_overview(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/endpoints")
-def list_endpoints():
+def list_endpoints(user: UserInfo = Depends(get_current_user)):
     """List all serving endpoints with AI Gateway config."""
-    return gateway_service.get_all_endpoints()
+    return gateway_service.get_all_endpoints(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/endpoints/{name}")
-def get_endpoint(name: str):
+def get_endpoint(name: str, user: UserInfo = Depends(get_current_user)):
     """Get a single endpoint by name."""
-    ep = gateway_service.get_endpoint(name)
+    ep = gateway_service.get_endpoint(name, allowed_workspace_ids=get_allowed_workspace_ids(user))
     if not ep:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Endpoint not found")
@@ -62,15 +63,22 @@ def get_endpoint(name: str):
 
 
 @router.get("/permissions")
-def list_permissions(endpoint_name: Optional[str] = Query(None)):
+def list_permissions(
+    endpoint_name: Optional[str] = Query(None),
+    user: UserInfo = Depends(get_current_user),
+):
     """List permissions (optionally by endpoint)."""
-    return gateway_service.get_permissions(endpoint_name)
+    return gateway_service.get_permissions(
+        endpoint_name, allowed_workspace_ids=get_allowed_workspace_ids(user),
+    )
 
 
 @router.get("/endpoints-permissions")
-def endpoints_with_permissions():
+def endpoints_with_permissions(user: UserInfo = Depends(get_current_user)):
     """List ALL endpoints with their full ACL (for the permissions editor)."""
-    return gateway_service.get_endpoints_with_permissions()
+    return gateway_service.get_endpoints_with_permissions(
+        allowed_workspace_ids=get_allowed_workspace_ids(user),
+    )
 
 
 @router.post("/permissions/update")
@@ -140,45 +148,64 @@ def remove_permission(body: PermissionRemove, request: Request, user: UserInfo =
 
 
 @router.get("/rate-limits")
-def list_rate_limits(endpoint_name: Optional[str] = Query(None)):
+def list_rate_limits(
+    endpoint_name: Optional[str] = Query(None),
+    user: UserInfo = Depends(get_current_user),
+):
     """List rate limits from AI Gateway config."""
-    return gateway_service.get_rate_limits(endpoint_name)
+    return gateway_service.get_rate_limits(
+        endpoint_name, allowed_workspace_ids=get_allowed_workspace_ids(user),
+    )
 
 
 @router.get("/guardrails")
-def list_guardrails(endpoint_name: Optional[str] = Query(None)):
+def list_guardrails(
+    endpoint_name: Optional[str] = Query(None),
+    user: UserInfo = Depends(get_current_user),
+):
     """List guardrails config from AI Gateway."""
-    return gateway_service.get_guardrails(endpoint_name)
+    return gateway_service.get_guardrails(
+        endpoint_name, allowed_workspace_ids=get_allowed_workspace_ids(user),
+    )
 
 
 @router.get("/usage/summary")
-def usage_summary(days: int = Query(default=7, le=90)):
+def usage_summary(
+    days: int = Query(default=7, le=90),
+    user: UserInfo = Depends(get_current_user),
+):
     """Per-endpoint usage summary from system tables."""
-    return gateway_service.get_usage_summary(days)
+    return gateway_service.get_usage_summary(days, allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/usage/timeseries")
 def usage_timeseries(
     days: int = Query(default=7, le=90),
     endpoint_name: Optional[str] = Query(None),
+    user: UserInfo = Depends(get_current_user),
 ):
     """Hourly usage time series from system tables."""
-    return gateway_service.get_usage_timeseries(days, endpoint_name)
+    return gateway_service.get_usage_timeseries(
+        days, endpoint_name, allowed_workspace_ids=get_allowed_workspace_ids(user),
+    )
 
 
 @router.get("/usage/by-user")
-def usage_by_user(days: int = Query(default=7, le=90)):
+def usage_by_user(
+    days: int = Query(default=7, le=90),
+    user: UserInfo = Depends(get_current_user),
+):
     """Per-user usage summary from system tables."""
-    return gateway_service.get_usage_by_user(days)
+    return gateway_service.get_usage_by_user(days, allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/uag-v2-usage")
-def uag_v2_usage():
+def uag_v2_usage(user: UserInfo = Depends(get_current_user)):
     """Unity AI Gateway (v2) usage summary from system.ai_gateway.usage —
     v2-routed endpoints only, ~20-min fresh (cached tokens + latency/TTFB).
     Breakdowns include requester_type, destination_model, api_type,
     service_type (model/MCP/provider) and route_action (routing outcomes)."""
-    return gateway_service.get_uag_v2_usage()
+    return gateway_service.get_uag_v2_usage(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 class ModelServiceGrant(BaseModel):
@@ -215,75 +242,83 @@ def model_service_grant(body: ModelServiceGrant, request: Request, user: UserInf
 
 
 @router.get("/endpoint-inventory")
-def endpoint_inventory():
+def endpoint_inventory(user: UserInfo = Depends(get_current_user)):
     """Account-wide served-entity inventory (read-only) from
     system.serving.served_entities — all serving endpoints across every workspace in
     the metastore, not just the deploy workspace. Live management stays per-workspace."""
-    return gateway_service.get_endpoint_inventory()
+    return gateway_service.get_endpoint_inventory(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/uag-budget-status")
-def uag_budget_status():
+def uag_budget_status(user: UserInfo = Depends(get_current_user)):
     """Read-only budget configuration inventory from the account Budgets API
     (/api/2.1/accounts/{id}/budgets): per-budget cap thresholds, enforce
     (BLOCK_USAGE) vs alert-only, filter, and AI-relevance. Fleet-wide view;
     enforcement stays platform-side. Empty when the workflow had no account
     credentials to read the (account-scoped) API."""
-    return gateway_service.get_uag_budget_status()
+    return gateway_service.get_uag_budget_status(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/uag-mcp-tools")
-def uag_mcp_tools():
+def uag_mcp_tools(user: UserInfo = Depends(get_current_user)):
     """Per-tool MCP activity from system.ai_gateway.usage (service_type =
     MCP_SERVICE): service name, tool, server type, calls, users."""
-    return gateway_service.get_uag_mcp_tools()
+    return gateway_service.get_uag_mcp_tools(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/uag-v2-timeseries")
-def uag_v2_timeseries():
+def uag_v2_timeseries(user: UserInfo = Depends(get_current_user)):
     """Daily UAG v2 usage series (requests + tokens) for trend charts."""
-    return gateway_service.get_uag_v2_timeseries()
+    return gateway_service.get_uag_v2_timeseries(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/uag-coding-agents")
-def uag_coding_agents():
+def uag_coding_agents(user: UserInfo = Depends(get_current_user)):
     """Coding-agent activity (Claude Code / Codex / Cursor / Gemini CLI) from
     Unity AI Gateway usage — requests, users, active days, tokens."""
-    return gateway_service.get_uag_coding_agents()
+    return gateway_service.get_uag_coding_agents(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/guardrail-coverage")
-def guardrail_coverage():
+def guardrail_coverage(user: UserInfo = Depends(get_current_user)):
     """Guardrail coverage/activity per endpoint from Unity AI Gateway v2
     (which endpoints are guarded, check volume, judge models). Coverage only —
     not block/mask outcomes (those need the gated UAG feature-results surface)."""
-    return gateway_service.get_guardrail_coverage()
+    return gateway_service.get_guardrail_coverage(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/throttling")
-def throttling():
+def throttling(user: UserInfo = Depends(get_current_user)):
     """Throttling / reliability per endpoint from Unity AI Gateway usage —
     HTTP 429 (rate-limited) and 5xx (server-error) counts + throttle rate."""
-    return gateway_service.get_throttling()
+    return gateway_service.get_throttling(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/fallback-routing")
-def fallback_routing():
+def fallback_routing(user: UserInfo = Depends(get_current_user)):
     """Smart-routing fallback per endpoint from Unity AI Gateway usage — how often
     routing fell back to a backup model, recovery rate, and backup destinations."""
-    return gateway_service.get_fallback_routing()
+    return gateway_service.get_fallback_routing(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/inference-logs")
 def inference_logs(
     limit: int = Query(default=50, le=500),
     endpoint_name: Optional[str] = Query(None),
+    user: UserInfo = Depends(get_current_user),
 ):
     """Recent request logs from system tables."""
-    return gateway_service.get_inference_logs(limit, endpoint_name)
+    return gateway_service.get_inference_logs(
+        limit, endpoint_name, allowed_workspace_ids=get_allowed_workspace_ids(user),
+    )
 
 
 @router.get("/metrics")
-def operational_metrics(hours: int = Query(default=24, le=168)):
+def operational_metrics(
+    hours: int = Query(default=24, le=168),
+    user: UserInfo = Depends(get_current_user),
+):
     """Operational metrics from system tables."""
-    return gateway_service.get_operational_metrics(hours)
+    return gateway_service.get_operational_metrics(
+        hours, allowed_workspace_ids=get_allowed_workspace_ids(user),
+    )

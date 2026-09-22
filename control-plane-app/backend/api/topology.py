@@ -1,6 +1,7 @@
 """Topology API — exposes the agent dependency graph."""
 from fastapi import APIRouter, Depends
-from backend.utils.auth import get_current_user
+from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.access_scope import get_allowed_workspace_ids, sees_deploy_workspace
 from backend.services.topology_service import (
     build_topology,
     _fetch_agents,
@@ -14,14 +15,21 @@ router = APIRouter(prefix="/topology", tags=["topology"], dependencies=[Depends(
 
 
 @router.get("")
-async def get_topology(force: bool = False):
+async def get_topology(force: bool = False, user: UserInfo = Depends(get_current_user)):
     """Return the full agent dependency graph as {nodes, edges, stats}."""
+    if not sees_deploy_workspace(get_allowed_workspace_ids(user)):
+        return {
+            "nodes": [], "edges": [],
+            "stats": {"total_nodes": 0, "agent_nodes": 0, "tool_nodes": 0, "total_edges": 0},
+        }
     return build_topology(force=force)
 
 
 @router.get("/debug")
-async def debug_topology():
+async def debug_topology(user: UserInfo = Depends(get_current_user)):
     """Return raw agent configs and tool data for topology debugging."""
+    if not sees_deploy_workspace(get_allowed_workspace_ids(user)):
+        return {"agents": [], "tools": []}
     agents = _fetch_agents()
     tools = _fetch_tools()
     return {
@@ -50,7 +58,7 @@ async def debug_topology():
 
 
 @router.get("/debug/traces")
-async def debug_topology_traces():
+async def debug_topology_traces(user: UserInfo = Depends(get_current_user)):
     """Diagnose why traces are or aren't producing edges.
 
     Returns:
@@ -59,6 +67,12 @@ async def debug_topology_traces():
         data keys, span count, span types)
       - which traces matched a known agent
     """
+    if not sees_deploy_workspace(get_allowed_workspace_ids(user)):
+        return {
+            "agent_count": 0, "agent_lut_size": 0, "agent_endpoint_names": [],
+            "experiments_found": 0, "sample_experiments": [],
+            "traces_found": 0, "sample_traces": [],
+        }
     agents = _fetch_agents()
     agent_lut = _build_agent_lookup(agents)
     agent_names = {a["endpoint_name"] or a["name"]: a["agent_id"] for a in agents}

@@ -10,6 +10,8 @@ from backend.utils.auth import (
     _cache_key,
     _get_cached,
     _put_cache,
+    _lookup_account_admin,
+    _ACCOUNT_ADMIN_CACHE,
     _SP_FALLBACK,
     UserInfo,
 )
@@ -137,6 +139,63 @@ class TestRequireAdmin:
             with pytest.raises(HTTPException) as exc_info:
                 await require_admin(request)
             assert exc_info.value.status_code == 403
+
+
+class TestLookupAccountAdmin:
+    """_lookup_account_admin resolves real account-admin status independently
+    of local workspace-admin status (the bug this replaced: every workspace
+    admin used to be treated as an account admin)."""
+
+    def setup_method(self):
+        _ACCOUNT_ADMIN_CACHE.clear()
+
+    def test_empty_username_is_never_admin(self):
+        assert _lookup_account_admin("") is False
+
+    def test_no_account_id_fails_closed_without_network_call(self):
+        with patch("backend.services.workspace_registry._get_account_id", return_value=None), \
+             patch("backend.utils.auth.httpx") as mock_httpx:
+            assert _lookup_account_admin("someone@databricks.com") is False
+            mock_httpx.get.assert_not_called()
+
+    def test_account_scim_hit_grants_admin(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "Resources": [{"groups": [{"display": "Account Admins"}], "entitlements": [], "roles": []}]
+        }
+        with patch("backend.services.workspace_registry._get_account_id", return_value="acct-1"), \
+             patch("backend.utils.auth.httpx") as mock_httpx:
+            mock_httpx.get.return_value = mock_resp
+            assert _lookup_account_admin("real-admin@databricks.com") is True
+
+    def test_account_scim_miss_is_not_admin(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"Resources": []}
+        with patch("backend.services.workspace_registry._get_account_id", return_value="acct-1"), \
+             patch("backend.utils.auth.httpx") as mock_httpx:
+            mock_httpx.get.return_value = mock_resp
+            assert _lookup_account_admin("nobody@databricks.com") is False
+
+    def test_result_is_cached(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "Resources": [{"groups": [{"display": "account admins"}], "entitlements": [], "roles": []}]
+        }
+        with patch("backend.services.workspace_registry._get_account_id", return_value="acct-1"), \
+             patch("backend.utils.auth.httpx") as mock_httpx:
+            mock_httpx.get.return_value = mock_resp
+            assert _lookup_account_admin("cached@databricks.com") is True
+            assert _lookup_account_admin("cached@databricks.com") is True
+            assert mock_httpx.get.call_count == 1  # second call served from cache
+
+    def test_error_fails_closed(self):
+        with patch("backend.services.workspace_registry._get_account_id", return_value="acct-1"), \
+             patch("backend.utils.auth.httpx") as mock_httpx:
+            mock_httpx.get.side_effect = RuntimeError("network down")
+            assert _lookup_account_admin("erroring@databricks.com") is False
 
 
 class TestRequireAccountAdmin:

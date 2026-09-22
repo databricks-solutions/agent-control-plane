@@ -13,6 +13,7 @@ from backend.services.access_service import (
     get_all_principals,
 )
 from backend.utils.auth import get_current_user, require_admin, UserInfo
+from backend.utils.access_scope import get_allowed_workspace_ids
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_current_user)])
 
@@ -39,6 +40,9 @@ def list_permissions(
     user: UserInfo = Depends(get_current_user),
 ) -> List[Dict[str, Any]]:
     """Get permissions on a specific resource."""
+    from backend.utils.access_scope import sees_deploy_workspace
+    if not sees_deploy_workspace(get_allowed_workspace_ids(user)):
+        return []
     return get_resource_permissions(resource_type, resource_name)
 
 
@@ -79,7 +83,10 @@ def search_principals_route(
     user: UserInfo = Depends(get_current_user),
 ) -> List[Dict[str, Any]]:
     """Search for principals (users/groups/SPs) by name — for autocomplete."""
+    from backend.utils.access_scope import sees_deploy_workspace
     from backend.services.access_service import search_principals
+    if not sees_deploy_workspace(get_allowed_workspace_ids(user)):
+        return []
     return search_principals(q, type, limit)
 
 
@@ -89,4 +96,7 @@ def list_principals(
     user: UserInfo = Depends(get_current_user),
 ) -> List[Dict[str, Any]]:
     """Get all principals with access to AI resources (serving endpoints + usage)."""
+    # Account-wide principal inventory — not filterable by workspace.
+    if get_allowed_workspace_ids(user) is not None:
+        return []
     return get_all_principals(days=days)

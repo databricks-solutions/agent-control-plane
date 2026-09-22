@@ -19,7 +19,32 @@ from backend.services.billing_service import (
 # Composite: all workspace data in one round-trip
 # =====================================================================
 
-def get_workspaces_page_data(days: int = 30) -> Dict[str, Any]:
+def _empty_workspaces_page_data(current_ws: Optional[str]) -> Dict[str, Any]:
+    """Shape-compatible empty response for a caller with no workspace access."""
+    return {
+        "current_workspace_id": current_ws,
+        "kpis": {
+            "total_workspaces": 0,
+            "total_serving_cost": 0.0,
+            "total_all_product_cost": 0.0,
+            "total_agents": 0,
+            "total_requests": 0,
+            "total_endpoints": 0,
+            "cost_change_pct": 0.0,
+        },
+        "workspace_summaries": [],
+        "cost_trend": [],
+        "agent_type_breakdown": [],
+        "top_endpoints": [],
+        "products_by_workspace": [],
+        "all_agents": [],
+    }
+
+
+def get_workspaces_page_data(
+    days: int = 30,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Return all data the Workspaces page needs in a single DB round-trip.
 
     Includes:
@@ -27,6 +52,11 @@ def get_workspaces_page_data(days: int = 30) -> Dict[str, Any]:
       • cost_trend — daily cost trend per workspace (top 5 workspaces)
       • agent_type_breakdown — agent counts by type per workspace
       • top_endpoints — highest-cost endpoints across all workspaces
+
+    ``allowed_workspace_ids``: None = no restriction (account admin);
+    [] = no access at all → short-circuit to an empty page; [ids...] =
+    restrict every query below to those workspaces (see
+    ``backend.utils.access_scope``).
     """
     from psycopg2.extras import RealDictCursor
 
@@ -34,19 +64,30 @@ def get_workspaces_page_data(days: int = 30) -> Dict[str, Any]:
 
     current_ws = get_current_workspace_id()
 
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return _empty_workspaces_page_data(current_ws)
+
+    restricted = allowed_workspace_ids is not None
+    # Named params throughout — this query has 5 CTEs sharing %(days)s /
+    # %(aid)s at different repeat counts; positional params would be easy
+    # to miscount here, so pyformat named binding is used instead.
+    ws_clause = "AND workspace_id = ANY(%(aid)s)" if restricted else ""
+    ws_clause_only = "WHERE workspace_id = ANY(%(aid)s)" if restricted else ""
+    named_params = {"days": days, "aid": allowed_workspace_ids}
+
     with DatabasePool.get_connection() as conn:
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
         # 1. Workspace summaries — aggregate cost + token + agent data
         cur.execute(
-            """
+            f"""
             WITH ws_cost AS (
                 SELECT workspace_id,
                        SUM(total_cost_usd)::NUMERIC(18,2)  AS total_cost,
                        SUM(total_dbus)::NUMERIC(18,2)       AS total_dbus,
                        COUNT(DISTINCT endpoint_name)::INT   AS endpoint_count
                 FROM billing_serving_daily
-                WHERE usage_date >= CURRENT_DATE - %s
+                WHERE usage_date >= CURRENT_DATE - %(days)s {ws_clause}
                 GROUP BY workspace_id
             ),
             ws_tokens AS (
@@ -55,7 +96,7 @@ def get_workspaces_page_data(days: int = 30) -> Dict[str, Any]:
                        SUM(input_tokens)::BIGINT            AS total_input_tokens,
                        SUM(output_tokens)::BIGINT           AS total_output_tokens
                 FROM billing_token_daily
-                WHERE usage_date >= CURRENT_DATE - %s
+                WHERE usage_date >= CURRENT_DATE - %(days)s {ws_clause}
                 GROUP BY workspace_id
             ),
             ws_agents AS (
@@ -63,21 +104,22 @@ def get_workspaces_page_data(days: int = 30) -> Dict[str, Any]:
                        COUNT(*)::INT                        AS agent_count,
                        COUNT(DISTINCT type)::INT            AS agent_type_count
                 FROM discovered_agents
+                {ws_clause_only}
                 GROUP BY workspace_id
             ),
             ws_products AS (
                 SELECT workspace_id,
                        SUM(total_cost_usd)::NUMERIC(18,2)  AS total_all_product_cost
                 FROM billing_product_daily
-                WHERE usage_date >= CURRENT_DATE - %s
+                WHERE usage_date >= CURRENT_DATE - %(days)s {ws_clause}
                 GROUP BY workspace_id
             ),
             ws_cost_prev AS (
                 SELECT workspace_id,
                        SUM(total_cost_usd)::NUMERIC(18,2)  AS prev_cost
                 FROM billing_serving_daily
-                WHERE usage_date >= CURRENT_DATE - (%s * 2)
-                  AND usage_date < CURRENT_DATE - %s
+                WHERE usage_date >= CURRENT_DATE - (%(days)s * 2)
+                  AND usage_date < CURRENT_DATE - %(days)s {ws_clause}
                 GROUP BY workspace_id
             )
             SELECT
@@ -99,7 +141,7 @@ def get_workspaces_page_data(days: int = 30) -> Dict[str, Any]:
             LEFT JOIN ws_cost_prev cp      ON cp.workspace_id = COALESCE(c.workspace_id, t.workspace_id, a.workspace_id, p.workspace_id)
             ORDER BY COALESCE(c.total_cost, 0) DESC
             """,
-            (days, days, days, days, days),
+            named_params,
         )
         summaries = [dict(r) for r in cur.fetchall()]
 
@@ -123,49 +165,53 @@ def get_workspaces_page_data(days: int = 30) -> Dict[str, Any]:
 
         # 3. Agent type breakdown per workspace
         cur.execute(
-            """SELECT workspace_id,
+            f"""SELECT workspace_id,
                       type           AS agent_type,
                       COUNT(*)::INT  AS count
                FROM discovered_agents
+               {ws_clause_only}
                GROUP BY workspace_id, type
-               ORDER BY workspace_id, count DESC"""
+               ORDER BY workspace_id, count DESC""",
+            named_params,
         )
         type_breakdown = [dict(r) for r in cur.fetchall()]
 
         # 4. Top endpoints across workspaces
         cur.execute(
-            """SELECT workspace_id,
+            f"""SELECT workspace_id,
                       endpoint_name,
                       SUM(total_cost_usd)::NUMERIC(18,2) AS total_cost,
                       SUM(total_dbus)::NUMERIC(18,2)     AS total_dbus
                FROM billing_serving_daily
-               WHERE usage_date >= CURRENT_DATE - %s
+               WHERE usage_date >= CURRENT_DATE - %(days)s {ws_clause}
                GROUP BY workspace_id, endpoint_name
                ORDER BY total_cost DESC
                LIMIT 20""",
-            (days,),
+            named_params,
         )
         top_endpoints = [dict(r) for r in cur.fetchall()]
 
         # 5. Product cost breakdown per workspace
         cur.execute(
-            """SELECT workspace_id,
+            f"""SELECT workspace_id,
                       billing_origin_product,
                       SUM(total_cost_usd)::NUMERIC(18,2) AS total_cost
                FROM billing_product_daily
-               WHERE usage_date >= CURRENT_DATE - %s
+               WHERE usage_date >= CURRENT_DATE - %(days)s {ws_clause}
                GROUP BY workspace_id, billing_origin_product
                ORDER BY total_cost DESC""",
-            (days,),
+            named_params,
         )
         products_by_ws = [dict(r) for r in cur.fetchall()]
 
         # 6. Agents list (for workspace detail drill-down)
         cur.execute(
-            """SELECT workspace_id, name, type, endpoint_name,
+            f"""SELECT workspace_id, name, type, endpoint_name,
                       endpoint_status, model_name, creator, source
                FROM discovered_agents
-               ORDER BY workspace_id, name"""
+               {ws_clause_only}
+               ORDER BY workspace_id, name""",
+            named_params,
         )
         all_agents = [dict(r) for r in cur.fetchall()]
 
