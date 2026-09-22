@@ -1,6 +1,6 @@
 """FastAPI routes for real-time Operations — live endpoint health from Databricks APIs."""
 from fastapi import APIRouter, Depends, Query
-from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.auth import get_current_user, require_admin, UserInfo
 from backend.utils.access_scope import get_allowed_workspace_ids, sees_deploy_workspace
 from backend.services import operations_service
 
@@ -36,7 +36,7 @@ def recent_usage(
 
 
 @router.post("/cache/refresh")
-def refresh_cache():
+def refresh_cache(user: UserInfo = Depends(require_admin)):
     """Clear the operations in-memory cache."""
     operations_service.clear_cache()
     return {"status": "ok", "message": "Operations cache cleared"}

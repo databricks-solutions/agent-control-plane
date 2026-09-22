@@ -12,7 +12,7 @@ with the identical filtering in ``workspaces.py`` / ``agents.py``.
 """
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Depends, Query
-from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.auth import get_current_user, require_admin, UserInfo
 from backend.utils.access_scope import resolve_scope
 from backend.services.billing_service import (
     get_serving_cost_summary,
@@ -76,7 +76,7 @@ def cache_status(user: UserInfo = Depends(get_current_user)) -> Dict[str, Any]:
 
 
 @router.post("/cache/refresh")
-def cache_refresh(days: int = Query(default=90, ge=1, le=365)):
+def cache_refresh(days: int = Query(default=90, ge=1, le=365), user: UserInfo = Depends(require_admin)):
     """Kick off a background cache refresh from system tables (non-blocking).
 
     The refresh runs in a daemon thread.  Poll ``GET /billing/cache/status``

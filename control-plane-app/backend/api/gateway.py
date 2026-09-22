@@ -28,7 +28,7 @@ class PermissionRemove(BaseModel):
 
 
 @router.post("/cache/refresh")
-def refresh_cache():
+def refresh_cache(user: UserInfo = Depends(require_admin)):
     """Clear the AI Gateway in-memory cache so the next request fetches fresh data."""
     gateway_service.clear_cache()
     return {"status": "ok", "message": "Gateway cache cleared — fresh data will be fetched on next request"}

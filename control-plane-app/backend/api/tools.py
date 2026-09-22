@@ -1,6 +1,6 @@
 """API routes for Tools — MCP servers, UC functions, tool-call usage."""
 from fastapi import APIRouter, Depends, Query
-from backend.utils.auth import get_current_user, UserInfo
+from backend.utils.auth import get_current_user, require_admin, UserInfo
 from backend.utils.access_scope import get_allowed_workspace_ids, sees_deploy_workspace
 from typing import Dict, Any, List
 from backend.services.tools_service import (
@@ -72,7 +72,7 @@ def tool_usage(
 
 
 @router.post("/sync")
-def sync_tools():
+def sync_tools(user: UserInfo = Depends(require_admin)):
     """Trigger a full tools discovery refresh."""
     refresh_tools()
     return {"status": "ok", "message": "Tools refresh complete"}

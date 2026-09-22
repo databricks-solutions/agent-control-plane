@@ -9,7 +9,7 @@ import {
   useCurrentUser,
   useToolsOverview,
   useGatewayPageData,
-  usePlaygroundEndpoints,
+  useQueryableEndpoints,
   useDiscoveryStatus,
   useSyncAgents,
   useSyncTools,
@@ -473,7 +473,7 @@ function SharedWorkspaceTab({ currentWsId }: { currentWsId: string | null }) {
 
   const { data: toolsOverview } = useToolsOverview({ enabled: seesDeploy })
   const { data: gatewayPage } = useGatewayPageData({ enabled: seesDeploy })
-  const { data: playgroundEndpoints } = usePlaygroundEndpoints({ enabled: seesDeploy })
+  const { data: queryableEndpoints } = useQueryableEndpoints({ enabled: seesDeploy })
   const { data: discoveryStatus } = useDiscoveryStatus()
   const { data: billingCacheStatus } = useBillingCacheStatus()
 
@@ -486,7 +486,7 @@ function SharedWorkspaceTab({ currentWsId }: { currentWsId: string | null }) {
   const refreshOps = useRefreshOperations()
 
   const gwOverview = gatewayPage?.overview || {}
-  const queryable = playgroundEndpoints || []
+  const queryable = queryableEndpoints || []
 
   return (
     <div className="space-y-6">
@@ -496,7 +496,7 @@ function SharedWorkspaceTab({ currentWsId }: { currentWsId: string | null }) {
           <p>
             This is the workspace the control plane app runs in
             {currentWsId ? <> (<span className="font-mono text-xs">{currentWsId}</span>)</> : null}.
-            Live serving, tools, and playground live here. Cache jobs refill the shared
+            Live serving endpoints and tools live here. Cache jobs refill the shared
             Lakebase tables; other pages still only show workspaces you administer.
           </p>
         </div>
@@ -538,7 +538,7 @@ function SharedWorkspaceTab({ currentWsId }: { currentWsId: string | null }) {
             </Card>
             <Card>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium dark:text-gray-300">Playground</CardTitle>
+                <CardTitle className="text-sm font-medium dark:text-gray-300">Serving endpoints</CardTitle>
                 <MessageSquare className="w-4 h-4 text-gray-400" />
               </CardHeader>
               <CardContent className="space-y-2">
@@ -559,7 +559,7 @@ function SharedWorkspaceTab({ currentWsId }: { currentWsId: string | null }) {
           </div>
         ) : (
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            Live serving, tools, and playground live on the app&apos;s home workspace.
+            Live serving endpoints and tools live on the app&apos;s home workspace.
             You don&apos;t administer that workspace, so those resources aren&apos;t listed here.
           </p>
         )}

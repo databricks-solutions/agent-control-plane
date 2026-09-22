@@ -1,5 +1,4 @@
 """Tests for API route authentication and basic responses."""
-import pytest
 from unittest.mock import patch, MagicMock
 
 
@@ -7,7 +6,7 @@ class TestHealthEndpoint:
     """Health endpoint should work without auth."""
 
     def test_health_no_auth_required(self, unauth_client):
-        resp = unauth_client.get("/api/v1/health")
+        resp = unauth_client.get("/api/v1/health/status")
         assert resp.status_code == 200
 
 
@@ -72,25 +71,20 @@ class TestAuthenticatedRoutes:
 
 class TestDebugEndpointsRemoved:
     """Debug endpoints should not exist as API routes.
-    Note: SPA catch-all may serve index.html for unknown paths (200),
-    so we check the response is NOT JSON API data."""
+
+    Unknown /api paths return a real JSON 404 (the SPA catch-all no longer
+    swallows them as index.html/200), so a removed endpoint is a clean 404.
+    """
 
     def test_debug_auth_removed(self, app_client):
         resp = app_client.get("/api/v1/debug/auth")
-        # Should not return JSON with auth info
-        try:
-            data = resp.json()
-            assert "has_obo_token" not in data, "Debug auth endpoint still exists"
-        except Exception:
-            pass  # Non-JSON response = endpoint doesn't exist (SPA fallback)
+        assert resp.status_code == 404
+        assert "has_obo_token" not in resp.json()
 
     def test_debug_workspace_registry_removed(self, app_client):
         resp = app_client.get("/api/v1/debug/workspace-registry")
-        try:
-            data = resp.json()
-            assert "workspace_count" not in data, "Debug workspace-registry endpoint still exists"
-        except Exception:
-            pass
+        assert resp.status_code == 404
+        assert "workspace_count" not in resp.json()
 
 
 class TestMlflowRoutes:
@@ -108,7 +102,9 @@ class TestMlflowRoutes:
             assert resp.status_code == 200
 
     def test_traces_returns_list(self, app_client):
-        with patch("backend.services.mlflow_service.search_traces", return_value=[]):
+        # /mlflow/traces is cache-only (reads get_cached_traces); it no longer
+        # calls the live search_traces.
+        with patch("backend.services.mlflow_service.get_cached_traces", return_value=[]):
             resp = app_client.get("/api/v1/mlflow/traces")
             assert resp.status_code == 200
 

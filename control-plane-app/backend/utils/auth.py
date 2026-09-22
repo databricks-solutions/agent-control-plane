@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 import httpx
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
 from backend.config import get_databricks_host
 
@@ -284,26 +284,64 @@ async def get_current_user(request: Request) -> UserInfo:
     return user
 
 
-async def require_admin(request: Request) -> UserInfo:
-    """Same as ``get_current_user`` but raises 403 if not a workspace admin."""
-    user = await get_current_user(request)
-    if not user.is_admin:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Admin access required (user={user.username})",
-        )
+def _is_sp_fallback(user: UserInfo) -> bool:
+    """True for the service-principal fallback identity (no per-user OBO)."""
+    return not user.username or user.username == "service-principal"
+
+
+def _sp_fallback_unrestricted(user: UserInfo) -> bool:
+    """True when this is the SP fallback in a deployment that has OBO disabled.
+
+    In that mode the app runs as a single SP identity with no per-user
+    authorization, so the SP fallback is treated as unrestricted — matching
+    ``access_scope.get_allowed_workspace_ids`` and SECURITY.md. Never true when
+    OBO is enabled (a token-less request there is anomalous and fails closed).
+    """
+    if not _is_sp_fallback(user):
+        return False
+    from backend.config import settings
+    return not settings.obo_enabled
+
+
+async def require_user(user: UserInfo = Depends(get_current_user)) -> UserInfo:
+    """Require a *real* authenticated user.
+
+    Unlike ``get_current_user`` (which falls back to the SP identity so
+    read paths stay functional), this raises 401 when the request carries no
+    OBO token and OBO is enabled — the SP fallback is not a real user. When
+    OBO is disabled the app runs as a single SP identity, so the fallback is
+    accepted, matching the read-path rule in ``backend.utils.access_scope``.
+    """
+    if _is_sp_fallback(user) and not _sp_fallback_unrestricted(user):
+        raise HTTPException(status_code=401, detail="Authentication required")
     return user
 
 
-async def require_account_admin(request: Request) -> UserInfo:
-    """Same as ``get_current_user`` but raises 403 if not an account admin.
+async def require_admin(user: UserInfo = Depends(get_current_user)) -> UserInfo:
+    """Raise 403 unless the caller is a workspace admin.
+
+    In a no-OBO single-SP deployment the SP fallback is unrestricted (see
+    ``_sp_fallback_unrestricted``), so admin mutations stay reachable there —
+    otherwise they would 403 with no way to authorize.
+    """
+    if user.is_admin or _sp_fallback_unrestricted(user):
+        return user
+    raise HTTPException(
+        status_code=403,
+        detail=f"Admin access required (user={user.username})",
+    )
+
+
+async def require_account_admin(user: UserInfo = Depends(get_current_user)) -> UserInfo:
+    """Raise 403 unless the caller is an account admin.
 
     Cross-workspace permission management requires account-level privileges.
+    As with ``require_admin``, a no-OBO single-SP deployment treats the SP
+    fallback as unrestricted.
     """
-    user = await get_current_user(request)
-    if not user.is_account_admin:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Account admin access required for cross-workspace operations (user={user.username})",
-        )
-    return user
+    if user.is_account_admin or _sp_fallback_unrestricted(user):
+        return user
+    raise HTTPException(
+        status_code=403,
+        detail=f"Account admin access required for cross-workspace operations (user={user.username})",
+    )
