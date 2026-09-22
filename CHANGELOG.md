@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   top-level `ErrorBoundary` so a render error shows a recoverable message
   instead of a blank screen, and the header connection badge now reflects the
   live `/health/status` check (Connected / Degraded / Disconnected) instead of
-  being hardcoded to "Connected".
+  being hardcoded to "Connected". The identity pill now distinguishes
+  **Account Admin** (purple) from **Workspace Admin** (amber) instead of a
+  generic "Admin".
 
 ### Security
 - **Removed caller-controlled credential-forwarding paths.** Deleted the

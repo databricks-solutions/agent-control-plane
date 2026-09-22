@@ -154,11 +154,21 @@ export default function Layout() {
               </div>
               <div className="text-sm">
                 <span className="font-medium text-db-navy-900 dark:text-gray-100">{user.display_name}</span>
-                {user.is_admin && (
-                  <span className="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400">
-                    Admin
+                {user.is_account_admin ? (
+                  <span
+                    className="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-400"
+                    title="Account admin — unrestricted access across all workspaces"
+                  >
+                    Account Admin
                   </span>
-                )}
+                ) : user.is_admin ? (
+                  <span
+                    className="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400"
+                    title="Workspace admin — scoped to the workspaces you administer"
+                  >
+                    Workspace Admin
+                  </span>
+                ) : null}
               </div>
             </div>
           )}
