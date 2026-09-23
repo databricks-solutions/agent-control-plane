@@ -536,7 +536,7 @@ export function useWorkspaceDirectory() {
   })
 }
 
-// ── AI Gateway (real Databricks data) ───────────────────────────
+// ── Unity Gateway (real Databricks data) ───────────────────────────
 // Backend caches for 10 min; match that on the client so React Query
 // never refetches while the server-side cache is still fresh.
 const GW_STALE = 10 * 60 * 1000 // 10 minutes
@@ -1325,7 +1325,7 @@ export interface BillingPageData {
   tokens_by_user: any[]
   /** MODEL_SERVING $ attributed by custom_tag (window aggregate, workspace-agnostic) */
   cost_by_tag: CostByTagRow[]
-  /** Actual $ for external LLMs (OpenAI, Foundry, …) routed through the AI Gateway */
+  /** Actual $ for external LLMs (OpenAI, Foundry, …) routed through the Unity Gateway */
   external_model_spend: ExternalModelSpendRow[]
 }
 

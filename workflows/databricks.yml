@@ -34,7 +34,7 @@ variables:
     description: "Tier 3 prototype (parked). When 'true', the observability discovery task fans out MLflow REST calls across all workspaces using SP creds. Off by default — destination workspaces reject these calls today (HTTP 403 cert validation). Cross-workspace observability is served by UC SQL paths instead (Tier 2)."
   gateway_log_retention_days:
     default: "30"
-    description: "Time window (days) for AI Gateway / inference-log payload caching."
+    description: "Time window (days) for Unity Gateway / inference-log payload caching."
   gateway_log_max_rows_per_table:
     default: "10000"
     description: "Per-source-table cap on rows pulled per inference-log discovery run."
@@ -113,7 +113,7 @@ resources:
           environment_key: default
 
         - task_key: discover_gateway_usage
-          description: "Query system.serving.endpoint_usage for AI Gateway usage → Delta"
+          description: "Query system.serving.endpoint_usage for Unity Gateway usage → Delta"
           notebook_task:
             notebook_path: ./06_discover_gateway_usage.py
             base_parameters:
@@ -133,7 +133,7 @@ resources:
           environment_key: default
 
         - task_key: discover_gateway_inference_logs
-          description: "Discover AI Gateway / Model Serving inference-log payload tables account-wide via SQL (Tier 2a) → Delta"
+          description: "Discover Unity Gateway / Model Serving inference-log payload tables account-wide via SQL (Tier 2a) → Delta"
           notebook_task:
             notebook_path: ./08_discover_gateway_inference_logs.py
             base_parameters:
@@ -155,7 +155,7 @@ resources:
           environment_key: default
 
         - task_key: discover_ai_gateway_usage
-          description: "Query system.ai_gateway.usage (v2 Unity AI Gateway, ~20-min fresh) for a per-endpoint usage summary incl. cached tokens + latency/TTFB → Delta. Additive to billing (cost) and serving.endpoint_usage (broad)."
+          description: "Query system.ai_gateway.usage (v2 Unity Gateway, ~20-min fresh) for a per-endpoint usage summary incl. cached tokens + latency/TTFB → Delta. Additive to billing (cost) and serving.endpoint_usage (broad)."
           notebook_task:
             notebook_path: ./11_discover_ai_gateway_usage.py
             base_parameters:

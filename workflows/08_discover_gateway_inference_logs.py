@@ -1,15 +1,15 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Discover AI Gateway / Inference Logs (Tier 2a)
+# MAGIC # Discover Unity Gateway / Inference Logs (Tier 2a)
 # MAGIC
 # MAGIC Pure SQL discovery: scans `system.information_schema.tables` for any
-# MAGIC `*_payload` table in Unity Catalog (AI Gateway request-logging output
+# MAGIC `*_payload` table in Unity Catalog (Unity Gateway request-logging output
 # MAGIC and Model Serving inference tables share this convention), then queries
 # MAGIC each one over the retention window. UC governance is the only auth
 # MAGIC boundary — no per-endpoint API calls or per-workspace setup.
 # MAGIC
 # MAGIC Two schema variants are tolerated:
-# MAGIC   • newer AI Gateway: `request_time` (TIMESTAMP), `execution_duration_ms` (LONG)
+# MAGIC   • newer Unity Gateway: `request_time` (TIMESTAMP), `execution_duration_ms` (LONG)
 # MAGIC   • legacy Model Serving: `timestamp_ms` (LONG), `execution_time_ms` (LONG)
 # MAGIC
 # MAGIC Writes to Delta table `gateway_inference_logs`, which the sync workflow

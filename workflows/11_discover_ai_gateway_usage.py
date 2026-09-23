@@ -1,14 +1,14 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Unity AI Gateway (v2) Usage Discovery Job
+# MAGIC # Unity Gateway (v2) Usage Discovery Job
 # MAGIC
-# MAGIC Queries `system.ai_gateway.usage` (v2 Unity AI Gateway traffic only) for a
+# MAGIC Queries `system.ai_gateway.usage` (v2 Unity Gateway traffic only) for a
 # MAGIC per-endpoint usage summary and writes a Delta table for `02_sync_to_lakebase`.
 # MAGIC
 # MAGIC **Why a separate source:** `system.ai_gateway.usage` is ~20-min fresh (vs
 # MAGIC ~2 hr for `system.billing.usage`) and carries data the others lack — cached
 # MAGIC tokens (`token_details`), time-to-first-byte, per-request tags. It covers
-# MAGIC ONLY requests routed through Unity AI Gateway v2 endpoints (a subset of all
+# MAGIC ONLY requests routed through Unity Gateway v2 endpoints (a subset of all
 # MAGIC serving), so it is additive — not a replacement for billing (dollar cost)
 # MAGIC or serving.endpoint_usage (broad coverage + rate-limit hits).
 # MAGIC
@@ -159,7 +159,7 @@ UAG_THROTTLING_SCHEMA = StructType([
 # back to a backup model (routing_information.attempts has >1 entry, i.e. the
 # primary attempt failed and a FALLBACK attempt followed), how many of those
 # ultimately recovered (final attempt < 400), and which backup destinations were
-# used. Reliability signal for AI Gateway smart-routing.
+# used. Reliability signal for Unity Gateway smart-routing.
 UAG_FALLBACK_SCHEMA = StructType([
     StructField("endpoint_name", StringType(), False),
     StructField("total_requests", LongType(), True),

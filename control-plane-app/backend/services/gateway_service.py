@@ -1,7 +1,7 @@
-"""AI Gateway service — pulls REAL data from Databricks APIs and system tables.
+"""Unity Gateway service — pulls REAL data from Databricks APIs and system tables.
 
 Data sources:
-  • Databricks SDK  → serving endpoints list, AI Gateway config, permissions
+  • Databricks SDK  → serving endpoints list, Unity Gateway config, permissions
   • system.serving.endpoint_usage   → per-request usage (tokens, latency, status)
   • system.serving.served_entities  → endpoint ↔ entity mapping
 
@@ -153,7 +153,7 @@ def _execute_system_sql(sql: str, warehouse_id: Optional[str] = None) -> List[Di
 
 
 # =====================================================================
-# SDK helpers — list endpoints, permissions, AI Gateway config
+# SDK helpers — list endpoints, permissions, Unity Gateway config
 # =====================================================================
 
 def _list_serving_endpoints() -> List[Dict[str, Any]]:
@@ -190,7 +190,7 @@ def _list_serving_endpoints() -> List[Dict[str, Any]]:
                     entity["foundation_model"] = True
                 served_entities.append(entity)
 
-        # AI Gateway config
+        # Unity Gateway config
         gw_config = None
         if hasattr(ep, "ai_gateway") and ep.ai_gateway:
             gw = ep.ai_gateway
@@ -224,7 +224,7 @@ def _list_serving_endpoints() -> List[Dict[str, Any]]:
 
 
 def _serialize_guardrails(guardrails) -> Dict[str, Any]:
-    """Serialize AI Gateway guardrails config to a dict."""
+    """Serialize Unity Gateway guardrails config to a dict."""
     result: Dict[str, Any] = {}
     try:
         if guardrails.input:
@@ -247,7 +247,7 @@ def _serialize_guardrails(guardrails) -> Dict[str, Any]:
 
 
 def _serialize_rate_limits(rate_limits) -> List[Dict[str, Any]]:
-    """Serialize AI Gateway rate limit configs to a list of dicts."""
+    """Serialize Unity Gateway rate limit configs to a list of dicts."""
     results = []
     if not rate_limits:
         return results
@@ -412,7 +412,7 @@ def get_endpoint(name: str, allowed_workspace_ids: Optional[List[str]] = None) -
 
 
 def get_overview(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
-    """KPI overview for the AI Gateway page (cached).
+    """KPI overview for the Unity Gateway page (cached).
 
     Endpoint counts come from the deploy-workspace live list. System-table
     usage stats are account-wide (no workspace_id) — suppressed for scoped
@@ -504,7 +504,7 @@ def get_rate_limits(
     endpoint_name: Optional[str] = None,
     allowed_workspace_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Get rate limits from AI Gateway config on endpoints (cached)."""
+    """Get rate limits from Unity Gateway config on endpoints (cached)."""
     ck = f"rate_limits:{endpoint_name or '__all__'}"
     cached = _cache_get(ck)
     if cached is None:
@@ -534,7 +534,7 @@ def get_guardrails(
     endpoint_name: Optional[str] = None,
     allowed_workspace_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Get guardrails config from AI Gateway on endpoints (cached)."""
+    """Get guardrails config from Unity Gateway on endpoints (cached)."""
     ck = f"guardrails:{endpoint_name or '__all__'}"
     cached = _cache_get(ck)
     if cached is None:
@@ -558,7 +558,7 @@ def get_guardrails(
 
 
 def get_inference_table_config(endpoint_name: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Get inference table configs from AI Gateway on endpoints (cached)."""
+    """Get inference table configs from Unity Gateway on endpoints (cached)."""
     ck = f"inference_tbl_cfg:{endpoint_name or '__all__'}"
     cached = _cache_get(ck)
     if cached is not None:
@@ -641,7 +641,7 @@ def _max_as_of(rows: List[Dict[str, Any]]) -> Optional[str]:
 
 
 def get_uag_v2_usage(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Unity AI Gateway (v2) usage summary from `uag_usage_summary` (sourced from
+    """Unity Gateway (v2) usage summary from `uag_usage_summary` (sourced from
     system.ai_gateway.usage — v2-routed endpoints only, ~20-min fresh).
 
     Returns {as_of, totals, endpoints}. Degrades to empty if the table isn't
@@ -1035,7 +1035,7 @@ def get_uag_mcp_tools(allowed_workspace_ids: Optional[List[str]] = None) -> Dict
 
 def get_guardrail_coverage(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Guardrail COVERAGE / activity from `uag_guardrail_daily` — which endpoints
-    have Unity AI Gateway v2 guardrails running, how often, and by which judge
+    have Unity Gateway v2 guardrails running, how often, and by which judge
     model(s).
 
     IMPORTANT: this is coverage/activity only, NOT block/mask outcomes. The
@@ -1151,9 +1151,9 @@ def get_throttling(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[st
 
 def get_fallback_routing(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Smart-routing fallback per endpoint from `uag_fallback_routing_daily`: how
-    often the AI Gateway had to fall back to a backup model (>1 routing attempt),
+    often the Unity Gateway had to fall back to a backup model (>1 routing attempt),
     how many recovered (final attempt < 400), and which backup destinations were
-    used. Reliability signal for AI Gateway smart-routing. Degrades to empty when
+    used. Reliability signal for Unity Gateway smart-routing. Degrades to empty when
     the table is unsynced or no endpoint fell back.
     """
     from backend.database import execute_query, execute_one
@@ -2076,13 +2076,13 @@ def get_page_data(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str
 def prewarm_cache() -> None:
     """Pre-warm the in-memory cache with data for all gateway tabs.
 
-    Called once at startup so that when users first visit the AI Gateway
+    Called once at startup so that when users first visit the Unity Gateway
     page, all tabs render instantly from cache instead of firing live
     SQL queries against system tables (which take 3-10 s each).
     """
     import time as _t
     start = _t.time()
-    logger.info("AI Gateway: pre-warming cache …")
+    logger.info("Unity Gateway: pre-warming cache …")
     try:
         get_all_endpoints()       # Overview tab (SDK)
         get_overview()            # Overview KPIs (SDK + 1 SQL)
@@ -2092,7 +2092,7 @@ def prewarm_cache() -> None:
         get_inference_logs(50)    # Request Logs tab (1 SQL)
         get_operational_metrics(24)  # Metrics tab (2 SQL)
         elapsed = round(_t.time() - start, 1)
-        logger.info("AI Gateway cache pre-warmed in %ss", elapsed)
+        logger.info("Unity Gateway cache pre-warmed in %ss", elapsed)
     except Exception as exc:
         elapsed = round(_t.time() - start, 1)
-        logger.warning("AI Gateway cache pre-warm partial (%ss): %s", elapsed, exc)
+        logger.warning("Unity Gateway cache pre-warm partial (%ss): %s", elapsed, exc)

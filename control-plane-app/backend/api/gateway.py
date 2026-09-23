@@ -1,4 +1,4 @@
-"""FastAPI routes for AI Gateway — powered by real Databricks APIs."""
+"""FastAPI routes for Unity Gateway — powered by real Databricks APIs."""
 from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from pydantic import BaseModel
 from typing import Optional, List
@@ -29,7 +29,7 @@ class PermissionRemove(BaseModel):
 
 @router.post("/cache/refresh")
 def refresh_cache(user: UserInfo = Depends(require_admin)):
-    """Clear the AI Gateway in-memory cache so the next request fetches fresh data."""
+    """Clear the Unity Gateway in-memory cache so the next request fetches fresh data."""
     gateway_service.clear_cache()
     return {"status": "ok", "message": "Gateway cache cleared — fresh data will be fetched on next request"}
 
@@ -42,13 +42,13 @@ def gateway_page_data(user: UserInfo = Depends(get_current_user)):
 
 @router.get("/overview")
 def gateway_overview(user: UserInfo = Depends(get_current_user)):
-    """AI Gateway KPI overview."""
+    """Unity Gateway KPI overview."""
     return gateway_service.get_overview(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/endpoints")
 def list_endpoints(user: UserInfo = Depends(get_current_user)):
-    """List all serving endpoints with AI Gateway config."""
+    """List all serving endpoints with Unity Gateway config."""
     return gateway_service.get_all_endpoints(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
@@ -152,7 +152,7 @@ def list_rate_limits(
     endpoint_name: Optional[str] = Query(None),
     user: UserInfo = Depends(get_current_user),
 ):
-    """List rate limits from AI Gateway config."""
+    """List rate limits from Unity Gateway config."""
     return gateway_service.get_rate_limits(
         endpoint_name, allowed_workspace_ids=get_allowed_workspace_ids(user),
     )
@@ -163,7 +163,7 @@ def list_guardrails(
     endpoint_name: Optional[str] = Query(None),
     user: UserInfo = Depends(get_current_user),
 ):
-    """List guardrails config from AI Gateway."""
+    """List guardrails config from Unity Gateway."""
     return gateway_service.get_guardrails(
         endpoint_name, allowed_workspace_ids=get_allowed_workspace_ids(user),
     )
@@ -201,7 +201,7 @@ def usage_by_user(
 
 @router.get("/uag-v2-usage")
 def uag_v2_usage(user: UserInfo = Depends(get_current_user)):
-    """Unity AI Gateway (v2) usage summary from system.ai_gateway.usage —
+    """Unity Gateway (v2) usage summary from system.ai_gateway.usage —
     v2-routed endpoints only, ~20-min fresh (cached tokens + latency/TTFB).
     Breakdowns include requester_type, destination_model, api_type,
     service_type (model/MCP/provider) and route_action (routing outcomes)."""
@@ -275,13 +275,13 @@ def uag_v2_timeseries(user: UserInfo = Depends(get_current_user)):
 @router.get("/uag-coding-agents")
 def uag_coding_agents(user: UserInfo = Depends(get_current_user)):
     """Coding-agent activity (Claude Code / Codex / Cursor / Gemini CLI) from
-    Unity AI Gateway usage — requests, users, active days, tokens."""
+    Unity Gateway usage — requests, users, active days, tokens."""
     return gateway_service.get_uag_coding_agents(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/guardrail-coverage")
 def guardrail_coverage(user: UserInfo = Depends(get_current_user)):
-    """Guardrail coverage/activity per endpoint from Unity AI Gateway v2
+    """Guardrail coverage/activity per endpoint from Unity Gateway v2
     (which endpoints are guarded, check volume, judge models). Coverage only —
     not block/mask outcomes (those need the gated UAG feature-results surface)."""
     return gateway_service.get_guardrail_coverage(allowed_workspace_ids=get_allowed_workspace_ids(user))
@@ -289,14 +289,14 @@ def guardrail_coverage(user: UserInfo = Depends(get_current_user)):
 
 @router.get("/throttling")
 def throttling(user: UserInfo = Depends(get_current_user)):
-    """Throttling / reliability per endpoint from Unity AI Gateway usage —
+    """Throttling / reliability per endpoint from Unity Gateway usage —
     HTTP 429 (rate-limited) and 5xx (server-error) counts + throttle rate."""
     return gateway_service.get_throttling(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/fallback-routing")
 def fallback_routing(user: UserInfo = Depends(get_current_user)):
-    """Smart-routing fallback per endpoint from Unity AI Gateway usage — how often
+    """Smart-routing fallback per endpoint from Unity Gateway usage — how often
     routing fell back to a backup model, recovery rate, and backup destinations."""
     return gateway_service.get_fallback_routing(allowed_workspace_ids=get_allowed_workspace_ids(user))
 

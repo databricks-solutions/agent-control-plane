@@ -33,11 +33,11 @@ Auto-discovered agent registry across all workspaces. Finds serving endpoints, D
 
 ![Agents](docs/gifs/agents.gif)
 
-### AI Gateway
+### Unity Gateway
 
-Unified view of all model serving endpoints with usage analytics, token volume charts, per-endpoint and per-user breakdowns. Manage Unity Catalog permissions directly from the UI. Monitor operational metrics (requests, errors, latency), view individual request logs, and inspect rate limits and safety guardrails configured via AI Gateway.
+Unified view of all model serving endpoints with usage analytics, token volume charts, per-endpoint and per-user breakdowns. Manage Unity Catalog permissions directly from the UI. Monitor operational metrics (requests, errors, latency), view individual request logs, and inspect rate limits and safety guardrails configured via Unity Gateway.
 
-![AI Gateway](docs/gifs/ai-gateway.gif)
+![Unity Gateway](docs/gifs/ai-gateway.gif)
 
 ### Knowledge Bases
 
@@ -54,7 +54,7 @@ Trace discovery uses three complementary paths so coverage doesn't depend on a s
 | Tier | Source | What it covers |
 |------|--------|----------------|
 | **1. Local default-backend MLflow** | MLflow tracking REST in the deploy workspace | Traces written to the workspace's default control-plane backend |
-| **2a. AI Gateway / Model Serving inference logs** | Unity Catalog SQL on `*_payload` tables | Request/response payloads + latency/status from any served endpoint with inference logging enabled, account-wide |
+| **2a. Unity Gateway / Model Serving inference logs** | Unity Catalog SQL on `*_payload` tables | Request/response payloads + latency/status from any served endpoint with inference logging enabled, account-wide |
 | **2b. UC-stored MLflow traces** | Unity Catalog SQL on `*_otel_spans` and `trace_logs_*` tables | MLflow traces stored directly in UC (both OTel-spans and Databricks-native row-per-trace formats), account-wide |
 
 Tier 2a/2b are the cross-workspace path — UC governance is the only auth boundary, so a single discovery run can pull traces from any workspace whose tables are in the same metastore.
@@ -68,7 +68,7 @@ The discovery tiers find what's already being written. To populate them, opt age
 | Tier | What to enable on your agent / endpoint |
 |------|-----------------------------------------|
 | **1** | Use MLflow tracing in your agent code (`mlflow.trace`/autolog). Traces land in the deploy workspace's default MLflow tracking backend automatically. |
-| **2a** | Enable **inference table logging** on your Model Serving endpoint (or the equivalent **AI Gateway request logging** if the endpoint sits behind AI Gateway). Both write request/response payloads to a `<endpoint>_payload` Delta table in Unity Catalog. |
+| **2a** | Enable **inference table logging** on your Model Serving endpoint (or the equivalent **Unity Gateway request logging** if the endpoint sits behind Unity Gateway). Both write request/response payloads to a `<endpoint>_payload` Delta table in Unity Catalog. |
 | **2b** | Either (i) bind your MLflow experiment to a Unity Catalog trace location so traces materialize as `*_otel_spans` tables, or (ii) use Databricks-managed MLflow with a UC-bound experiment, which writes `trace_logs_<experiment_id>` tables. Either format is picked up automatically. |
 
 If none of these are enabled for an agent, no trace data will exist for the workflow to discover — the gap is upstream of the control plane.
@@ -225,7 +225,7 @@ Key endpoints:
 - `GET /api/v1/billing/page-data` — cost attribution dashboard
 - `GET /api/v1/mlflow/experiments` — MLflow experiments (cross-workspace)
 - `GET /api/v1/mlflow/traces` — MLflow traces
-- `GET /api/v1/gateway/overview` — AI Gateway analytics
+- `GET /api/v1/gateway/overview` — Unity Gateway analytics
 - `POST /api/v1/agents/sync` — trigger agent discovery refresh
 
 ## License

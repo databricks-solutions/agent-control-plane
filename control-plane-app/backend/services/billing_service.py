@@ -237,7 +237,7 @@ def ensure_billing_tables():
             PRIMARY KEY (usage_date, workspace_id, endpoint_name, user_identity)
         )
         """,
-        # Actual per-user $ via Unity AI Gateway v2 attribution (identity_metadata.run_by).
+        # Actual per-user $ via Unity Gateway v2 attribution (identity_metadata.run_by).
         # Populated by 09_discover_billing → 02_sync. Empty on workspaces without v2 attribution.
         """
         CREATE TABLE IF NOT EXISTS billing_user_cost_daily (
@@ -677,7 +677,7 @@ def get_actual_cost_by_user(
     """Top users by ACTUAL model-serving cost.
 
     Reads billing_user_cost_daily — real per-user dollar cost attributed by the
-    platform via Unity AI Gateway v2 (system.billing.usage identity_metadata.run_by),
+    platform via Unity Gateway v2 (system.billing.usage identity_metadata.run_by),
     rather than the token-share estimate in get_serving_cost_by_user(). Returns an
     empty list on workspaces where v2 attribution is not yet populated; callers
     should fall back to the estimate in that case.
@@ -1023,7 +1023,7 @@ def get_all_page_data(
         )
         cost_by_user = [dict(r) for r in cur.fetchall()]
 
-        # 9b. ACTUAL per-user cost via Unity AI Gateway v2 attribution — preferred
+        # 9b. ACTUAL per-user cost via Unity Gateway v2 attribution — preferred
         # over the token-share estimate above when the v2 table has data.
         cur.execute(
             f"""SELECT run_by AS user_identity,
@@ -1071,7 +1071,7 @@ def get_all_page_data(
             cost_by_tag = [dict(r) for r in cur.fetchall()]
 
         # 12. external-model spend (workspace-agnostic; actual $ for external LLMs
-        # routed through the AI Gateway — real billed cost, not estimated).
+        # routed through the Unity Gateway — real billed cost, not estimated).
         if ws_ids is not None:
             external_model_spend: List[Dict[str, Any]] = []
         else:

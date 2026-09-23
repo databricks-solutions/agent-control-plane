@@ -2,7 +2,7 @@
 # MAGIC %md
 # MAGIC # Gateway Usage Discovery Job
 # MAGIC
-# MAGIC Queries `system.serving.endpoint_usage` for AI Gateway usage data
+# MAGIC Queries `system.serving.endpoint_usage` for Unity Gateway usage data
 # MAGIC and writes results to Delta tables for Lakebase sync.
 # MAGIC
 # MAGIC **Data flow:** system.serving.endpoint_usage → Delta tables → Lakebase (sync task)

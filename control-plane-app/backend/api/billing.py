@@ -179,7 +179,7 @@ def cost_by_user(
     workspace_id: Optional[str] = Query(default=None),
     user: UserInfo = Depends(get_current_user),
 ):
-    """Top users by cost. Prefers ACTUAL Unity AI Gateway v2 attribution and
+    """Top users by cost. Prefers ACTUAL Unity Gateway v2 attribution and
     falls back to the token-share estimate; response ``source`` says which."""
     allowed = resolve_scope(user, workspace_id)
     return get_cost_by_user(days, workspace_id=workspace_id, allowed_workspace_ids=allowed)

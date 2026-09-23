@@ -529,10 +529,10 @@ function SharedWorkspaceTab({ currentWsId }: { currentWsId: string | null }) {
               <CardContent className="space-y-2">
                 <p className="text-2xl font-semibold dark:text-gray-100">{gwOverview.total_endpoints ?? 0}</p>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
-                  {gwOverview.ready_endpoints ?? 0} ready · {gwOverview.gateway_enabled ?? 0} with AI Gateway
+                  {gwOverview.ready_endpoints ?? 0} ready · {gwOverview.gateway_enabled ?? 0} with Unity Gateway
                 </p>
                 <Link to="/ai-gateway" className="inline-flex items-center gap-1 text-xs text-db-red hover:underline">
-                  Open AI Gateway <ChevronRight className="w-3 h-3" />
+                  Open Unity Gateway <ChevronRight className="w-3 h-3" />
                 </Link>
               </CardContent>
             </Card>

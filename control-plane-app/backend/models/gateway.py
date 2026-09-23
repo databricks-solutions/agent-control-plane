@@ -1,4 +1,4 @@
-"""Pydantic models for AI Gateway data."""
+"""Pydantic models for Unity Gateway data."""
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 from datetime import datetime

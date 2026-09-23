@@ -133,7 +133,7 @@ async def lifespan(app: FastAPI):
             ensure_gateway_usage_columns()
             prewarm_cache()
         except Exception as exc:
-            logger.warning("AI Gateway startup init skipped: %s", exc)
+            logger.warning("Unity Gateway startup init skipped: %s", exc)
 
     def _init_observability():
         try:

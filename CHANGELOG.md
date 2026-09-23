@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the deploy-time `OBO_ENABLED` env flag); backend `GET`/`PUT /settings`.
 
 ### Changed
+- **Consistent "Unity Gateway" naming.** Renamed remaining "AI Gateway" /
+  "Mosaic AI Gateway" / "Unity AI Gateway" product references to **Unity
+  Gateway** across the README, docs, UI labels/headings, and code
+  comments/docstrings. The gateway page is now titled "Unity Gateway" with an
+  "Overview" tab (was a redundant "Unity Gateway" tab); the deprecated v1 view
+  keeps its "Legacy AI Gateway" label. Technical identifiers are unchanged —
+  the `system.ai_gateway.*` system tables, the `ai_gateway` serving-endpoint
+  config field, the `/ai-gateway` route, and the `uag_*` cache tables keep
+  their names.
 - **Frontend delivery resilience** (review finding #8). Route pages are now
   code-split with `React.lazy` (each is its own on-demand chunk) and the
   heaviest vendor libraries (`react`, `recharts`, `@xyflow/react`) split into

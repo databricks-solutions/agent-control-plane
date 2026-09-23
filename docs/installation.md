@@ -212,7 +212,7 @@ The discovery workflows run as the **workflow run-as identity** (see Step 7); th
 grants below must target *that* principal. Cross-workspace observability
 additionally needs the **app's service principal** to read `system.mlflow`.
 
-### Billing & serving (required for Governance / AI Gateway cost)
+### Billing & serving (required for Governance / Unity Gateway cost)
 
 The billing discovery (`09_discover_billing.py`) joins `system.billing.list_prices`
 to compute cost in USD. A run-as identity with `SELECT` on `system.billing.usage`
@@ -278,7 +278,7 @@ The workflow hasn't run yet, or `system.mlflow` access hasn't been granted. Chec
 ### Fewer traces than expected
 Trace coverage is bounded by two things: (a) which trace-producing features are enabled on the agents themselves, and (b) what the discovery run-as principal can see and read in Unity Catalog (see Step 7 → "Choose the discovery run-as principal"). Common causes:
 
-- **The agent isn't producing the kind of trace you expect.** Check the README's *"What your agents need to do for traces to exist"* table — Tier 1 needs MLflow tracing in code, Tier 2a needs inference-table or AI Gateway request logging on the endpoint, Tier 2b needs the experiment bound to a UC trace location. If none are enabled for an agent, no trace data exists for the workflow to find.
+- **The agent isn't producing the kind of trace you expect.** Check the README's *"What your agents need to do for traces to exist"* table — Tier 1 needs MLflow tracing in code, Tier 2a needs inference-table or Unity Gateway request logging on the endpoint, Tier 2b needs the experiment bound to a UC trace location. If none are enabled for an agent, no trace data exists for the workflow to find.
 - The run-as principal is not a metastore admin and has no grants on the catalog where the missing traces live. Either add it to the metastore admin group or grant explicit `USE CATALOG + USE SCHEMA + SELECT`.
 - Traces fall outside the retention window (`trace_retention_days`, default 90). Bump it via the bundle variable.
 - Traces live in a different workspace's default MLflow backend (not in Unity Catalog). Cross-workspace REST fan-out (Tier 3) is on the roadmap; until then, those traces are only visible from within their owning workspace.
