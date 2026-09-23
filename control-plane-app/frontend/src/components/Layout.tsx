@@ -190,7 +190,7 @@ export default function Layout() {
               onClick={() => setGenieOpen((o) => !o)}
               aria-label={genieOpen ? 'Close Ask Genie' : 'Open Ask Genie'}
               title="Ask Genie (⌘K)"
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-all shadow-md shadow-db-red/40 hover:shadow-lg hover:shadow-db-red/50
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-shadow shadow-[0_0_10px_2px_rgba(255,54,33,0.45)] hover:shadow-[0_0_14px_3px_rgba(255,54,33,0.6)]
                 ${genieOpen
                   ? 'bg-db-red/10 text-db-red ring-1 ring-db-red/30'
                   : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600'}`}
