@@ -232,10 +232,16 @@ def update_cached_acl_for_endpoint(endpoint_name: str, workspace_id: str = ""):
 def _fetch_remote_acl(workspace_id: str, endpoint_name: str, resource_type: str, agent_type: str) -> list:
     """Fetch ACL from a remote workspace using SP M2M OAuth."""
     import os
-    from backend.services.workspace_registry import get_workspace_host
+    from backend.services.workspace_registry import get_workspace_host, is_valid_workspace_host
 
     host = get_workspace_host(str(workspace_id))
     if not host:
+        return []
+
+    # Defense-in-depth: never POST the SP client credentials below to anything
+    # that isn't a Databricks workspace host (get_workspace_host already validates).
+    if not is_valid_workspace_host(host):
+        logger.warning("Refusing SP token exchange to non-Databricks host: %r", host)
         return []
 
     client_id = os.environ.get("DATABRICKS_CLIENT_ID", "")

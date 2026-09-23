@@ -11,6 +11,7 @@ from __future__ import annotations
 import threading
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import httpx
 from databricks.sdk import WorkspaceClient
@@ -88,20 +89,82 @@ def _seed_from_env():
 
 # ── Resolve workspace_id → host URL ─────────────────────────────
 
-def get_workspace_host(workspace_id: str) -> Optional[str]:
-    """Return the host URL for a workspace, or None if unknown.
+# Host suffixes accepted as Databricks workspace hosts. The registry host is
+# used to mint the app service principal's OAuth token (client_credentials →
+# {host}/oidc/v1/token), so an attacker-influenced host would receive the SP's
+# client_id/secret. Validate before storing AND before use so those credentials
+# can never be sent anywhere but a real Databricks workspace.
+#
+# These are Databricks-operated apex domains — their subdomains cannot be
+# registered by a third party — so the defaults cover every region/cloud
+# (AWS commercial + GovCloud, Azure commercial + Gov, GCP, dev/staging) without
+# enumerating each host pattern. Workspaces on a custom PrivateLink / vanity
+# domain (not under a Databricks apex) must be allowed via the comma-separated
+# EXTRA_WORKSPACE_HOST_SUFFIXES env var so they aren't silently dropped.
+_DEFAULT_WORKSPACE_HOST_SUFFIXES = (
+    ".databricks.com",       # AWS commercial (*.cloud.*), GCP (*.gcp.*), dev/staging
+    ".azuredatabricks.net",  # Azure commercial
+    ".databricks.us",        # AWS GovCloud (*.cloud.databricks.us)
+    ".databricks.azure.us",  # Azure Government
+)
 
-    Checks in-memory cache (seeded from WORKSPACE_HOSTS env) → Lakebase → returns None.
+
+def _allowed_host_suffixes() -> tuple:
+    """Default Databricks apex suffixes plus any operator-configured extras."""
+    import os
+    raw = os.environ.get("EXTRA_WORKSPACE_HOST_SUFFIXES", "")
+    extras = tuple(
+        (s.strip().lower() if s.strip().startswith(".") else "." + s.strip().lower())
+        for s in raw.split(",") if s.strip()
+    )
+    return _DEFAULT_WORKSPACE_HOST_SUFFIXES + extras
+
+
+def is_valid_workspace_host(host: Optional[str]) -> bool:
+    """True only for an https Databricks workspace host on an allowed domain.
+
+    Guards the credential-forwarding paths: the SP OAuth client_id/secret is
+    POSTed to ``{host}/oidc/v1/token`` for cross-workspace calls, so ``host``
+    must be provably a Databricks workspace, never a caller-supplied endpoint.
+    Custom PrivateLink/vanity domains are supported via EXTRA_WORKSPACE_HOST_SUFFIXES.
+    """
+    if not host:
+        return False
+    candidate = host if "://" in host else f"https://{host}"
+    try:
+        parsed = urlparse(candidate)
+    except Exception:
+        return False
+    if parsed.scheme != "https" or not parsed.hostname:
+        return False
+    hostname = parsed.hostname.lower()
+    return any(hostname.endswith(suffix) for suffix in _allowed_host_suffixes())
+
+
+def get_workspace_host(workspace_id: str) -> Optional[str]:
+    """Return the host URL for a workspace, or None if unknown / not a valid
+    Databricks workspace host.
+
+    Checks in-memory cache (seeded from WORKSPACE_HOSTS env) → Lakebase → None.
+    Hosts that don't pass ``is_valid_workspace_host`` are never returned, so the
+    SP-credential mint sites downstream can't be pointed at an arbitrary host.
     """
     if not workspace_id:
         return None
 
     ws_str = str(workspace_id).strip()
 
+    def _validated(host: Optional[str]) -> Optional[str]:
+        if host and is_valid_workspace_host(host):
+            return host
+        if host:
+            logger.warning("Rejecting non-Databricks workspace host for %s: %r", ws_str, host)
+        return None
+
     # In-memory cache first (fast path — seeded from WORKSPACE_HOSTS env var)
     with _cache_lock:
         if ws_str in _registry_cache:
-            return _registry_cache[ws_str]
+            return _validated(_registry_cache[ws_str])
 
     # Lakebase lookup
     try:
@@ -110,9 +173,10 @@ def get_workspace_host(workspace_id: str) -> Optional[str]:
             (ws_str,),
         )
         if row and row.get("workspace_host"):
-            host = row["workspace_host"]
-            with _cache_lock:
-                _registry_cache[ws_str] = host
+            host = _validated(row["workspace_host"])
+            if host:
+                with _cache_lock:
+                    _registry_cache[ws_str] = host
             return host
     except Exception:
         pass
@@ -122,17 +186,29 @@ def get_workspace_host(workspace_id: str) -> Optional[str]:
 
 
 def get_all_workspace_hosts() -> Dict[str, str]:
-    """Return all workspace_id → host mappings (in-memory cache + Lakebase)."""
-    result: Dict[str, str] = {}
+    """Return all valid workspace_id → host mappings (in-memory cache + Lakebase).
+
+    Hosts that don't pass ``is_valid_workspace_host`` are dropped (and logged),
+    mirroring ``get_workspace_host``'s guard: consumers (e.g. cross-workspace app
+    discovery) mint the app SP token against these hosts, so an invalid or
+    poisoned row must never reach them.
+    """
+    merged: Dict[str, str] = {}
     # Start with Lakebase
     try:
         rows = execute_query("SELECT workspace_id, workspace_host FROM workspace_registry")
-        result = {r["workspace_id"]: r["workspace_host"] for r in rows}
+        merged = {r["workspace_id"]: r["workspace_host"] for r in rows}
     except Exception:
         pass
     # Overlay in-memory cache (includes WORKSPACE_HOSTS env entries)
     with _cache_lock:
-        result.update(_registry_cache)
+        merged.update(_registry_cache)
+    result: Dict[str, str] = {}
+    for ws_id, host in merged.items():
+        if is_valid_workspace_host(host):
+            result[ws_id] = host
+        else:
+            logger.warning("Dropping non-Databricks workspace host for %s: %r", ws_id, host)
     return result
 
 
@@ -281,6 +357,12 @@ def _try_list_workspaces(url: str, token: str, label: str) -> Optional[list]:
 
 def _upsert_workspace(ws_id: str, host: str, name: str = "", deployment: str = ""):
     """Insert or update a single workspace in the registry."""
+    # Never persist a host that isn't a real Databricks workspace — the host is
+    # later used to mint the app SP's OAuth token, so a bad host is a credential
+    # exfiltration risk. Skip (and log) rather than store it.
+    if not is_valid_workspace_host(host):
+        logger.warning("Skipping workspace_registry upsert for %s — invalid host: %r", ws_id, host)
+        return
     try:
         execute_update(
             """INSERT INTO workspace_registry (workspace_id, workspace_host, workspace_name, deployment_name, last_updated)

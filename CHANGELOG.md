@@ -43,6 +43,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hardcoding the AWS host.
 - **Unknown `/api` and `/ws` paths return a real JSON 404** instead of the SPA
   HTML with a 200 (which masked typos/removed routes).
+- **Workspace-registry hosts are validated before the SP token exchange.** The
+  registry host is used to mint the app service principal's OAuth token
+  (`client_credentials` → `{host}/oidc/v1/token`) for cross-workspace calls, so
+  a bad host would leak the SP `client_id`/`secret`. Hosts are now checked
+  against a Databricks-operated apex allowlist (`*.databricks.com` /
+  `*.azuredatabricks.net` / `*.databricks.us` / `*.databricks.azure.us`, https
+  only — covering every region/cloud) at store time (`_upsert_workspace`), at
+  read time (both `get_workspace_host` and `get_all_workspace_hosts`, the latter
+  feeding cross-workspace app discovery), and again immediately before each
+  token POST (the three SP-mint sites in `gateway_service`,
+  `agent_permissions_cache`, and `discovery_service`). Custom PrivateLink /
+  vanity workspace domains are added via the `EXTRA_WORKSPACE_HOST_SUFFIXES` env
+  var so they aren't silently dropped.
 
 ### Fixed
 - **Workspace admins no longer see "No workspace access".** `get_allowed_workspace_ids`

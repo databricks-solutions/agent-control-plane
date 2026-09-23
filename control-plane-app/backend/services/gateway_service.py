@@ -1778,9 +1778,15 @@ def _get_remote_headers_and_host(workspace_id: str, user_token: str = "") -> Opt
     so callers can provide a specific error message.
     """
     import os
-    from backend.services.workspace_registry import get_workspace_host
+    from backend.services.workspace_registry import get_workspace_host, is_valid_workspace_host
     host = get_workspace_host(str(workspace_id))
     if not host:
+        return None
+
+    # Defense-in-depth: get_workspace_host already validates, but never POST the
+    # SP client credentials below to anything that isn't a Databricks workspace.
+    if not is_valid_workspace_host(host):
+        logger.warning("Refusing SP token exchange to non-Databricks host: %r", host)
         return None
 
     # SP M2M OAuth — exchange credentials for a token on the remote workspace
