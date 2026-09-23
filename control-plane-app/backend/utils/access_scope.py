@@ -37,6 +37,18 @@ def get_allowed_workspace_ids(user: UserInfo) -> Optional[List[str]]:
         # fallback must never be treated as an admin of anything. Fail closed.
         return []
 
+    # Runtime access mode (admin-toggleable, see settings_service). In "open"
+    # mode any authenticated user gets unrestricted READ visibility — writes are
+    # still gated by require_admin/require_account_admin, so this loosens
+    # visibility only. "strict" mode applies the per-user scoping below.
+    try:
+        from backend.services.settings_service import get_access_mode
+        if get_access_mode() == "open":
+            return None
+    except Exception:
+        # Settings unavailable → fall through to strict scoping (fail closed).
+        pass
+
     try:
         from backend.services.workspace_admins_service import get_admin_workspace_ids
         ids = set(get_admin_workspace_ids(user.username))

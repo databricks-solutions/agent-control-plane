@@ -9,7 +9,17 @@ someone with no workspace access at all.
 """
 from unittest.mock import patch
 
+import pytest
+
 from backend.utils.auth import UserInfo
+
+
+@pytest.fixture(autouse=True)
+def _strict_mode():
+    """These tests exercise strict per-user suppression; pin the runtime access
+    mode to 'strict' so the default 'open' short-circuit doesn't mask it."""
+    with patch("backend.services.settings_service.get_access_mode", return_value="strict"):
+        yield
 
 
 def _user(**overrides) -> UserInfo:

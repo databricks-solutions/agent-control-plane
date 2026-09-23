@@ -51,6 +51,43 @@ export function useCurrentUser() {
   })
 }
 
+// App settings (admin-toggleable access mode)
+export type AccessMode = 'open' | 'strict'
+
+export interface AppSettings {
+  access_mode: AccessMode
+  valid_access_modes: AccessMode[]
+  can_edit: boolean
+}
+
+export function useAppSettings() {
+  return useQuery({
+    queryKey: ['settings'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/settings')
+      return data as AppSettings
+    },
+    staleTime: 60_000,
+  })
+}
+
+export function useSetAccessMode() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (accessMode: AccessMode) => {
+      const { data } = await apiClient.put('/settings', { access_mode: accessMode })
+      return data as AppSettings
+    },
+    onSuccess: () => {
+      // Access mode changes what every scoped query returns, so refresh
+      // the settings, the caller's identity/scope, and all cached data.
+      queryClient.invalidateQueries({ queryKey: ['settings'] })
+      queryClient.invalidateQueries({ queryKey: ['current-user'] })
+      queryClient.invalidateQueries()
+    },
+  })
+}
+
 // Agents
 export function useAgents(activeOnly = false) {
   return useQuery({

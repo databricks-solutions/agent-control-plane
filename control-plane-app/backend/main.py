@@ -12,7 +12,7 @@ from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from backend.config import settings, get_databricks_host
-from backend.api import agents, requests, kpis, analytics, health, websocket, gateway, mlflow, billing, tools, access, serving, workspaces, user_analytics, topology, operations, vector_search, gateway_logs, genie
+from backend.api import agents, requests, kpis, analytics, health, websocket, gateway, mlflow, billing, tools, access, serving, workspaces, user_analytics, topology, operations, vector_search, gateway_logs, genie, settings as settings_api
 from backend.utils.auth import get_current_user
 
 
@@ -164,6 +164,11 @@ async def lifespan(app: FastAPI):
             log_lakebase_config()
         except Exception as exc:
             logger.warning("Lakebase config diagnostic skipped: %s", exc)
+        try:
+            from backend.services.settings_service import ensure_settings_table
+            ensure_settings_table()
+        except Exception as exc:
+            logger.warning("Settings table init skipped: %s", exc)
         _init_billing()
         _init_discovery()
         _init_tools()
@@ -342,6 +347,7 @@ app.include_router(operations.router, prefix=settings.api_prefix)
 app.include_router(vector_search.router, prefix=settings.api_prefix)
 app.include_router(gateway_logs.router, prefix=settings.api_prefix)
 app.include_router(genie.router, prefix=settings.api_prefix)
+app.include_router(settings_api.router, prefix=settings.api_prefix)
 app.include_router(websocket.router)
 
 # ── Serve React SPA from the built dist/ folder ──────────────────

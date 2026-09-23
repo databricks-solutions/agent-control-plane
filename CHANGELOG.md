@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Access mode toggle (Admin → App Settings).** A runtime, admin-editable
+  setting controls how much a non-admin sees: **`open`** (default) — any
+  authenticated user sees all workspaces read-only, for teams that want a shared
+  dashboard — or **`strict`** — the per-user workspace scoping (account admins
+  see all, workspace admins see the workspaces they administer, others see
+  nothing). Workspace *or* account admins can flip it from the new App Settings
+  tab. It affects **read visibility only** — every mutation stays gated by
+  `require_admin`/`require_account_admin`, and cross-workspace SP-credential
+  paths are unchanged. Persisted in a Lakebase `app_settings` table (distinct
+  from the deploy-time `OBO_ENABLED` env flag); backend `GET`/`PUT /settings`.
+
 ### Changed
 - **Frontend delivery resilience** (review finding #8). Route pages are now
   code-split with `React.lazy` (each is its own on-demand chunk) and the

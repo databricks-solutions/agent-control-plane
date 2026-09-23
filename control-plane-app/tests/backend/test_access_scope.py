@@ -1,12 +1,24 @@
 """Tests for the workspace access-scope rule (backend/utils/access_scope.py).
 
-Rule under test: account admin -> None (unrestricted); workspace admin ->
-[ids...]; everyone else (including the SP fallback) -> [] (nothing).
+Rule under test (STRICT mode): account admin -> None (unrestricted); workspace
+admin -> [ids...]; everyone else (including the SP fallback) -> [] (nothing).
+Open mode (the default) is covered separately in TestOpenMode.
 """
 from unittest.mock import patch
 
+import pytest
+
 from backend.utils.auth import UserInfo
 from backend.utils.access_scope import get_allowed_workspace_ids, resolve_scope
+
+
+@pytest.fixture(autouse=True)
+def _strict_mode():
+    """These tests exercise strict per-user scoping; pin the runtime access mode
+    to 'strict' so the default 'open' short-circuit doesn't mask it. Individual
+    open-mode tests override this with their own patch."""
+    with patch("backend.services.settings_service.get_access_mode", return_value="strict"):
+        yield
 
 
 def _user(**overrides) -> UserInfo:
@@ -262,3 +274,33 @@ class TestDiscoveryStatusScope:
         mock_q.assert_not_called()
         assert result["total_discovered"] == 0
         assert result["by_type"] == {}
+
+
+class TestOpenMode:
+    """Open mode (the default): any authenticated user gets unrestricted READ
+    visibility (None). Writes stay gated elsewhere; this only affects reads."""
+
+    def test_open_mode_non_admin_gets_all(self):
+        user = _user(username="plain@databricks.com", is_admin=False, is_account_admin=False)
+        with patch("backend.services.settings_service.get_access_mode", return_value="open"):
+            assert get_allowed_workspace_ids(user) is None
+
+    def test_open_mode_does_not_consult_admins_cache(self):
+        user = _user(username="plain@databricks.com")
+        with patch("backend.services.settings_service.get_access_mode", return_value="open"), \
+             patch("backend.services.workspace_admins_service.get_admin_workspace_ids") as cache:
+            assert get_allowed_workspace_ids(user) is None
+            cache.assert_not_called()
+
+    def test_account_admin_still_none_in_either_mode(self):
+        user = _user(username="acct@databricks.com", is_account_admin=True)
+        for mode in ("open", "strict"):
+            with patch("backend.services.settings_service.get_access_mode", return_value=mode):
+                assert get_allowed_workspace_ids(user) is None
+
+    def test_settings_error_fails_closed_to_strict(self):
+        """If the access mode can't be read, fall through to strict scoping."""
+        user = _user(username="plain@databricks.com", is_admin=False)
+        with patch("backend.services.settings_service.get_access_mode", side_effect=RuntimeError("db down")), \
+             patch("backend.services.workspace_admins_service.get_admin_workspace_ids", return_value=[]):
+            assert get_allowed_workspace_ids(user) == []
