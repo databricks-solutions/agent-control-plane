@@ -55,7 +55,8 @@ Identity and access management with all principals, builders/users breakdown, RB
 ```
 ┌─────────────────────────────────────────────────────┐
 │  Databricks APIs + System Tables                    │
-│  (serving, billing, mlflow, access, apps, genie)    │
+│  (serving, billing, mlflow, ai_gateway, access,     │
+│   Unity Catalog, apps, genie)                       │
 └──────────────────────┬──────────────────────────────┘
                        │  Scheduled workflow (every 30 min)
                        ▼
@@ -73,12 +74,13 @@ Identity and access management with all principals, builders/users breakdown, RB
 ```
 
 **Key data sources:**
-- `system.serving.served_entities` — cross-workspace agent discovery
-- `system.serving.endpoint_usage` — per-endpoint request and token metrics
+- `system.serving.served_entities` / `endpoint_usage` — cross-workspace agent discovery + per-endpoint request/token metrics
+- `system.ai_gateway.usage` / `external_model_spend` — Unity Gateway routing metrics (tokens, latency, guardrails, throttling, fallback) and external-LLM spend
 - `system.billing.usage` + `system.billing.list_prices` — cost attribution
 - `system.mlflow.experiments_latest` / `runs_latest` — observability
-- `system.access.audit` — user activity and access patterns
-- Databricks REST APIs — endpoints, apps, genie spaces, traces
+- `system.access.audit` / `workspaces_latest` — user activity and the cross-workspace registry (ids → names)
+- Unity Catalog (`information_schema` + `*_payload` / `*_otel_spans` / `trace_logs_*` tables) — cross-workspace trace discovery
+- Databricks REST APIs — endpoints, apps, genie spaces, budgets, UC model services
 
 ## Quick Start
 
