@@ -245,14 +245,19 @@ function saveThread(conversationId: string | null, messages: ChatMessage[]) {
   }
 }
 
-export default function AskGenieOverlay() {
+interface AskGenieOverlayProps {
+  /** Controlled open state — the trigger button lives in the header (Layout). */
+  open: boolean
+  setOpen: (updater: boolean | ((prev: boolean) => boolean)) => void
+}
+
+export default function AskGenieOverlay({ open, setOpen }: AskGenieOverlayProps) {
   const { data: config } = useAppConfig()
   const genieEnabled = !!config?.features?.genie_enabled
   const { data: info } = useGenieSpaceInfo(genieEnabled)
   const location = useLocation()
   const suggestions = useMemo(() => suggestionsForPath(location.pathname), [location.pathname])
 
-  const [open, setOpen] = useState(false)
   const [maximized, setMaximized] = useState(false)
   const [input, setInput] = useState('')
   // Lazy-init from sessionStorage so a hard refresh resumes the thread.
@@ -416,17 +421,7 @@ export default function AskGenieOverlay() {
 
   return (
     <>
-      {/* Floating action button */}
-      <button
-        type="button"
-        aria-label={open ? 'Close Ask Genie' : 'Open Ask Genie'}
-        title="Ask Genie (⌘K)"
-        onClick={() => setOpen(o => !o)}
-        className={`fixed bottom-6 right-6 z-50 w-14 h-14 rounded-full shadow-lg flex items-center justify-center transition-all
-          ${open ? 'bg-gray-700 dark:bg-gray-600 text-white' : 'bg-db-red text-white hover:bg-db-red/90 shadow-db-red/30 hover:scale-105'}`}
-      >
-        {open ? <X className="w-6 h-6" /> : <Sparkles className="w-6 h-6" />}
-      </button>
+      {/* Trigger button lives in the header (see Layout / AskGenieButton). */}
 
       {/* Chat panel */}
       <div

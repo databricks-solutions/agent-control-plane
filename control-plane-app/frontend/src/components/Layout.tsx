@@ -17,8 +17,9 @@ import {
 } from 'lucide-react'
 import DatabricksLogo from './DatabricksLogo'
 import { useTheme } from '@/context/ThemeContext'
-import { useCurrentUser, useHealthStatus } from '@/api/hooks'
+import { useCurrentUser, useHealthStatus, useAppConfig, useGenieSpaceInfo } from '@/api/hooks'
 import AskGenieOverlay from './AskGenieOverlay'
+import genieIcon from '@/assets/genie-icon.svg'
 
 const navItems = [
   { to: '/', label: 'Governance', icon: Shield, exact: true },
@@ -46,6 +47,15 @@ export default function Layout() {
     : health?.status === 'healthy'
     ? { label: 'Connected', dot: 'bg-green-500', wrap: 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400', pulse: true }
     : { label: 'Degraded', dot: 'bg-amber-500', wrap: 'bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400', pulse: false }
+
+  // Ask Genie — trigger button lives here in the header; the panel is the
+  // controlled AskGenieOverlay below. Only shown when the Genie space is
+  // enabled + available (same gate the overlay uses).
+  const { data: appConfig } = useAppConfig()
+  const genieEnabled = !!appConfig?.features?.genie_enabled
+  const { data: genieInfo } = useGenieSpaceInfo(genieEnabled)
+  const genieAvailable = genieEnabled && !!genieInfo?.available
+  const [genieOpen, setGenieOpen] = useState(false)
 
   // Per-tab alert badges (none currently).
   const badges: Record<string, number> = {}
@@ -173,6 +183,23 @@ export default function Layout() {
             </div>
           )}
 
+          {/* Ask Genie — opens the controlled chat panel (AskGenieOverlay) */}
+          {genieAvailable && (
+            <button
+              type="button"
+              onClick={() => setGenieOpen((o) => !o)}
+              aria-label={genieOpen ? 'Close Ask Genie' : 'Open Ask Genie'}
+              title="Ask Genie (⌘K)"
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors
+                ${genieOpen
+                  ? 'bg-db-red/10 text-db-red ring-1 ring-db-red/30'
+                  : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600'}`}
+            >
+              <img src={genieIcon} alt="" className="w-4 h-4" />
+              <span>Ask Genie</span>
+            </button>
+          )}
+
           {/* Theme Toggle */}
           <button
             onClick={toggleTheme}
@@ -220,9 +247,10 @@ export default function Layout() {
         </main>
       </div>
 
-      {/* Floating chatbot — Ask Genie. Gated on FEATURE_GENIE_ENABLED;
-          renders nothing when the flag is off so the bundle stays clean. */}
-      <AskGenieOverlay />
+      {/* Ask Genie chat panel — trigger button is in the header above.
+          Gated on FEATURE_GENIE_ENABLED + space availability inside the
+          overlay, so it renders nothing when Genie is off. */}
+      <AskGenieOverlay open={genieOpen} setOpen={setGenieOpen} />
     </div>
   )
 }
