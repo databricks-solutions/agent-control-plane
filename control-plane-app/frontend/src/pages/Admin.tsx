@@ -16,6 +16,8 @@ import {
   useRemoveEndpointPermission,
   useCurrentUser,
   useSyncAgents,
+  useAppSettings,
+  useSetAccessMode,
 } from '@/api/hooks'
 import { RefreshButton } from '@/components/RefreshButton'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -43,9 +45,10 @@ import {
   CheckCircle,
   AlertCircle,
   RefreshCw,
+  Settings,
 } from 'lucide-react'
 
-type TabKey = 'identity' | 'activity'
+type TabKey = 'identity' | 'activity' | 'settings'
 
 const DOW_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 const HOUR_LABELS = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, '0')}:00`)
@@ -98,6 +101,9 @@ export default function AdminPage() {
   const removeAgentPerm = useRemoveEndpointPermission()
   const { data: currentUser } = useCurrentUser()
   const isAccountAdmin = currentUser?.is_account_admin ?? false
+
+  const { data: appSettings } = useAppSettings()
+  const setAccessMode = useSetAccessMode()
   const syncAgents = useSyncAgents()
 
   const requests = recentData?.data || []
@@ -403,6 +409,7 @@ export default function AdminPage() {
   const tabs: { key: TabKey; label: string; icon: any }[] = [
     { key: 'identity', label: 'Identity & Access', icon: Shield },
     { key: 'activity', label: 'User Activity', icon: Activity },
+    { key: 'settings', label: 'App Settings', icon: Settings },
   ]
 
   const avgReqPerUser = uaKpis && uaKpis.active_users_period > 0
@@ -1120,6 +1127,61 @@ export default function AdminPage() {
               </Card>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ═══════ TAB: App Settings ═══════ */}
+      {tab === 'settings' && (
+        <div className="max-w-2xl">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Shield className="w-4 h-4 text-db-red" /> Access mode
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                Controls how much a non-admin can see. This affects <strong>read visibility only</strong> —
+                creating, editing, and cross-workspace actions always require admin access.
+              </p>
+              <div className="flex flex-col sm:flex-row gap-2">
+                {(['open', 'strict'] as const).map((mode) => {
+                  const active = appSettings?.access_mode === mode
+                  const disabled = !appSettings?.can_edit || setAccessMode.isPending
+                  return (
+                    <button
+                      key={mode}
+                      disabled={disabled}
+                      onClick={() => { if (!active) setAccessMode.mutate(mode) }}
+                      className={`flex-1 text-left rounded-lg border p-3 transition-colors ${
+                        active
+                          ? 'border-db-red bg-db-red/5 dark:bg-db-red/10'
+                          : 'border-gray-200 dark:border-gray-700'
+                      } ${disabled ? 'opacity-60 cursor-not-allowed' : 'hover:border-db-red/60 cursor-pointer'}`}
+                    >
+                      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                        {mode === 'open' ? 'Open' : 'Strict'}
+                        {active && <span className="ml-1.5 text-xs font-normal text-db-red">· current</span>}
+                      </div>
+                      <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                        {mode === 'open'
+                          ? 'Any authenticated user sees all workspaces (read-only).'
+                          : 'Users see only workspaces they administer; account admins see everything.'}
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+              {appSettings && !appSettings.can_edit && (
+                <p className="text-xs text-gray-400 dark:text-gray-500">
+                  Only workspace or account admins can change this.
+                </p>
+              )}
+              {setAccessMode.isError && (
+                <p className="text-xs text-red-500">Couldn't update access mode — check your permissions and try again.</p>
+              )}
+            </CardContent>
+          </Card>
         </div>
       )}
     </div>
