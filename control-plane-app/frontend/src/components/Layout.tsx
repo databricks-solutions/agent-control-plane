@@ -23,7 +23,7 @@ import AskGenieOverlay from './AskGenieOverlay'
 const navItems = [
   { to: '/', label: 'Governance', icon: Shield, exact: true },
   { to: '/agents', label: 'Agents', icon: Bot },
-  { to: '/ai-gateway', label: 'AI Gateway', icon: Waypoints },
+  { to: '/ai-gateway', label: 'Unity Gateway', icon: Waypoints },
   { to: '/vector-search', label: 'Knowledge Bases', icon: Database },
   { to: '/tools', label: 'Tools', icon: Wrench },
   { to: '/observability', label: 'Observability', icon: Eye },

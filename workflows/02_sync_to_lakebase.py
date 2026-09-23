@@ -1043,7 +1043,7 @@ print(f"✅ Upserted {trace_detail_count} trace details (from Delta)")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Phase 2c: Sync AI Gateway / Inference Logs (Tier 2a, Delta → Lakebase)
+# MAGIC ## Phase 2c: Sync Unity Gateway / Inference Logs (Tier 2a, Delta → Lakebase)
 
 # COMMAND ----------
 
@@ -1827,7 +1827,7 @@ gw_conn.close()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Sync Unity AI Gateway (v2) usage summary (Delta → Lakebase)
+# MAGIC ## Sync Unity Gateway (v2) usage summary (Delta → Lakebase)
 # MAGIC Mirrors `uag_usage_summary` from `11_discover_ai_gateway_usage`.
 
 # COMMAND ----------
@@ -2613,7 +2613,7 @@ btag_count = _sync_billing_full_refresh(
     "cost_by_tag", "cost-by-tag rows",
 )
 
-# Sync billing_external_model_spend (external LLM $ via AI Gateway — window aggregate)
+# Sync billing_external_model_spend (external LLM $ via Unity Gateway — window aggregate)
 print(f"▸ Syncing {BEXT_TABLE} → billing_external_model_spend ...")
 bext_count = _sync_billing_full_refresh(
     billing_conn, "billing_external_model_spend", BEXT_TABLE,

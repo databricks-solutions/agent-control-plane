@@ -1,4 +1,4 @@
-"""Reads AI Gateway / Model Serving inference-log rows cached in Lakebase
+"""Reads Unity Gateway / Model Serving inference-log rows cached in Lakebase
 (`gateway_inference_logs` table, populated by the discovery workflow's Tier 2a
 SQL discovery — see workflows/08_discover_gateway_inference_logs.py).
 

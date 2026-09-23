@@ -1,4 +1,4 @@
-"""API routes for AI Gateway / Model Serving inference logs (Tier 2a)."""
+"""API routes for Unity Gateway / Model Serving inference logs (Tier 2a)."""
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 

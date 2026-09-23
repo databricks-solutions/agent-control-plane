@@ -77,12 +77,12 @@ EXPECTED = [
     # We assert existence; row count of 0 produces a WARN, not a failure.
     "billing_serving_daily",         # may be empty if no model serving in last 90d
     "billing_cost_by_tag",           # MODEL_SERVING $ by custom_tag; empty if no tagged serving usage
-    "billing_external_model_spend",  # external LLM $ via AI Gateway; empty if no external-model routing
+    "billing_external_model_spend",  # external LLM $ via Unity Gateway; empty if no external-model routing
     "observability_traces",
     "observability_trace_details",
     "observability_experiments",
     "observability_runs",
-    "gateway_inference_logs",        # only populated when Mosaic AI Gateway inference logging is enabled
+    "gateway_inference_logs",        # only populated when Unity Gateway inference logging is enabled
     "vector_search_endpoints",       # workspace may have no Vector Search endpoints
     "vector_search_indexes",         # endpoints can exist with 0 indexes
     "vector_search_health_history",

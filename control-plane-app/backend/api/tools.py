@@ -44,7 +44,7 @@ def list_mcp_servers(user: UserInfo = Depends(get_current_user)) -> List[Dict[st
 
 @router.get("/mcp-activity")
 def mcp_activity(user: UserInfo = Depends(get_current_user)) -> Dict[str, Any]:
-    """Server-grouped MCP tool activity from Unity AI Gateway v2 (managed vs
+    """Server-grouped MCP tool activity from Unity Gateway v2 (managed vs
     UC-registered services, per-tool request/error/user counts)."""
     # uag_mcp_tool_daily is account-wide — only account admins (allowed is None).
     if get_allowed_workspace_ids(user) is not None:

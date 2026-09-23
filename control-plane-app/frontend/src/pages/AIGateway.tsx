@@ -69,7 +69,7 @@ import {
 
 /* ── tab definitions ─────────────────────────────────────────── */
 const baseTabs = [
-  { id: 'uag-v2', label: 'Unity Gateway', icon: Sparkles },
+  { id: 'uag-v2', label: 'Overview', icon: Sparkles },
   { id: 'budgets', label: 'Budgets', icon: Wallet },
   { id: 'legacy', label: 'Legacy AI Gateway', icon: Archive },
 ] as const
@@ -115,7 +115,7 @@ export default function AIGatewayPage() {
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">AI Gateway</h2>
+          <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Unity Gateway</h2>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
             Manage, monitor and govern serving endpoints across your workspace&nbsp;
             <a
@@ -1033,7 +1033,7 @@ function FallbackRoutingCard() {
           </span>
         </CardTitle>
         <p className="text-[11px] text-gray-400 dark:text-gray-500">
-          Requests where AI Gateway smart-routing failed over to a backup model (a primary attempt failed, then a FALLBACK attempt ran).
+          Requests where Unity Gateway smart-routing failed over to a backup model (a primary attempt failed, then a FALLBACK attempt ran).
           Recovery = share of an endpoint's fallbacks whose final attempt succeeded. Only endpoints that fell back are shown.
           {data?.as_of && <> · as of {formatAsOf(data.as_of)}</>}
         </p>
@@ -1304,7 +1304,7 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
                   <SortableHeader label="Name" sortKey="name" current={sort} onToggle={toggle} />
                   <SortableHeader label="Task" sortKey="task" current={sort} onToggle={toggle} />
                   <SortableHeader label="Status" sortKey="state" current={sort} onToggle={toggle} />
-                  <SortableHeader label="AI Gateway" sortKey="ai_gateway" current={sort} onToggle={toggle} />
+                  <SortableHeader label="Unity Gateway" sortKey="ai_gateway" current={sort} onToggle={toggle} />
                   <SortableHeader label="Creator" sortKey="creator" current={sort} onToggle={toggle} />
                   <SortableHeader label="Served Entities" sortKey="served_entities" current={sort} onToggle={toggle} />
                 </tr>
@@ -2123,7 +2123,7 @@ function RateLimitsAndGuardrailsSection() {
         </CardHeader>
         <CardContent>
           <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
-            Rate limits configured via AI Gateway on serving endpoints.
+            Rate limits configured via Unity Gateway on serving endpoints.
           </p>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -2165,7 +2165,7 @@ function RateLimitsAndGuardrailsSection() {
         </CardHeader>
         <CardContent>
           <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
-            Safety guardrails configured via AI Gateway to protect inputs and outputs.
+            Safety guardrails configured via Unity Gateway to protect inputs and outputs.
           </p>
           {guardrails && guardrails.length > 0 ? (
             <div className="space-y-4">

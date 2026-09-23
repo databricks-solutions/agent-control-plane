@@ -102,7 +102,7 @@ TAG_COST_SCHEMA = StructType([
 ])
 
 # External-model spend: per provider·model·endpoint $ for external LLMs routed
-# through the AI Gateway (OpenAI, Microsoft Foundry, …), from the native
+# through the Unity Gateway (OpenAI, Microsoft Foundry, …), from the native
 # system.ai_gateway.external_model_spend table — actual billed cost, not an
 # estimate. Window aggregate (retention window owned here); no date grain.
 EXT_SPEND_SCHEMA = StructType([
@@ -160,7 +160,7 @@ USER_EP_SCHEMA = StructType([
 # Actual per-user dollar cost from system.billing.usage v2 attribution
 # (identity_metadata.run_by + usage_metadata.ai_gateway.endpoint_id). Unlike
 # billing_user_endpoint_daily (tokens only, cost estimated by token-share),
-# this carries real cost attributed by the platform — Unity AI Gateway PPT FM.
+# this carries real cost attributed by the platform — Unity Gateway PPT FM.
 USER_COST_SCHEMA = StructType([
     StructField("usage_date", StringType(), False),
     StructField("workspace_id", StringType(), False),
@@ -426,7 +426,7 @@ print(f"  ✅ {len(user_ep_rows)} user-endpoint rows")
 # MAGIC ## Query 5: billing_user_cost_daily (ACTUAL per-user $ via UAG v2 attribution)
 # MAGIC
 # MAGIC Uses `identity_metadata.run_by` + `usage_metadata.ai_gateway.endpoint_id`,
-# MAGIC available for Pay-Per-Token Foundation Models queried via Unity AI Gateway
+# MAGIC available for Pay-Per-Token Foundation Models queried via Unity Gateway
 # MAGIC endpoints. Degrades gracefully (empty) on workspaces where these v2 fields
 # MAGIC are not yet populated.
 
@@ -595,9 +595,9 @@ print(f"✅ Wrote {len(tag_cost_rows)} rows to {TAG_COST_TABLE}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Query 7: billing_external_model_spend (external LLM $ via AI Gateway)
+# MAGIC ## Query 7: billing_external_model_spend (external LLM $ via Unity Gateway)
 # MAGIC Actual billed cost for external models (OpenAI, Microsoft Foundry, …) routed
-# MAGIC through the AI Gateway, from the native `system.ai_gateway.external_model_spend`
+# MAGIC through the Unity Gateway, from the native `system.ai_gateway.external_model_spend`
 # MAGIC table. Not an estimate — real dollars. Rolled up per provider·model·endpoint.
 
 # COMMAND ----------
@@ -633,7 +633,7 @@ except IncompleteBillingDownload:
     # short result. Only a genuine missing/unreadable table degrades below.
     raise
 except Exception as exc:
-    # Fail-open: the table is newish (AI Gateway external-model routing) and may
+    # Fail-open: the table is newish (Unity Gateway external-model routing) and may
     # not exist / be readable on every account. Degrade to empty rather than fail
     # the whole billing discovery run.
     print(f"  ⚠️  external_model_spend query unavailable: {exc}")

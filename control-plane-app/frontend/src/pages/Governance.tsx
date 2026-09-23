@@ -1096,7 +1096,7 @@ function AllProductsTab({ data }: { data?: BillingPageData }) {
         </Card>
       </div>
 
-      {/* External-model spend (actual $ for external LLMs via the AI Gateway) */}
+      {/* External-model spend (actual $ for external LLMs via the Unity Gateway) */}
       <ExternalModelSpendSection data={data} />
     </div>
   )
