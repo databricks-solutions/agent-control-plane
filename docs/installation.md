@@ -246,6 +246,28 @@ GRANT SELECT ON TABLE system.mlflow.runs_latest TO `<sp-application-id>`;
 GRANT SELECT ON TABLE system.mlflow.run_metrics_history TO `<sp-application-id>`;
 ```
 
+### How trace discovery works
+
+Trace discovery pulls from three complementary paths so coverage doesn't depend on a single backend:
+
+| Tier | Source | What it covers |
+|------|--------|----------------|
+| **1. Local default-backend MLflow** | MLflow tracking REST in the deploy workspace | Traces written to the workspace's default control-plane backend |
+| **2a. Unity Gateway / Model Serving inference logs** | Unity Catalog SQL on `*_payload` tables | Request/response payloads + latency/status from any served endpoint with inference logging enabled, account-wide |
+| **2b. UC-stored MLflow traces** | Unity Catalog SQL on `*_otel_spans` and `trace_logs_*` tables | MLflow traces stored directly in UC (both OTel-spans and Databricks-native row-per-trace formats), account-wide |
+
+Tier 2a/2b are the cross-workspace path — UC governance is the only auth boundary, so a single discovery run can pull traces from any workspace whose tables are in the same metastore. **Tier 3 (cross-workspace REST fan-out for default-backend traces)** is on the roadmap and currently disabled; until it lands, default-backend traces are only visible from within their owning workspace.
+
+**What your agents need to do for traces to exist** — the discovery tiers find what's already being written, so opt agents into the relevant feature:
+
+| Tier | What to enable on your agent / endpoint |
+|------|-----------------------------------------|
+| **1** | Use MLflow tracing in your agent code (`mlflow.trace`/autolog). Traces land in the deploy workspace's default MLflow tracking backend automatically. |
+| **2a** | Enable **inference table logging** on your Model Serving endpoint (or the equivalent **Unity Gateway request logging** if the endpoint sits behind Unity Gateway). Both write request/response payloads to a `<endpoint>_payload` Delta table in Unity Catalog. |
+| **2b** | Either (i) bind your MLflow experiment to a Unity Catalog trace location so traces materialize as `*_otel_spans` tables, or (ii) use Databricks-managed MLflow with a UC-bound experiment, which writes `trace_logs_<experiment_id>` tables. Either format is picked up automatically. |
+
+> **Coverage depends on what the discovery principal can read.** The Tier 2 paths use `system.information_schema.tables`, which is principal-filtered: a table only appears if the principal has at least `BROWSE`/`USE` along the catalog → schema → table chain, and reading rows additionally requires `SELECT` (or ownership). For account-wide coverage that auto-extends to new catalogs, run the discovery workflow as a **metastore admin** (see Step 7 → "Choose the discovery run-as principal").
+
 ## Step 9: Verify
 
 1. Open your app URL (shown in the deploy output)
@@ -278,7 +300,7 @@ The workflow hasn't run yet, or `system.mlflow` access hasn't been granted. Chec
 ### Fewer traces than expected
 Trace coverage is bounded by two things: (a) which trace-producing features are enabled on the agents themselves, and (b) what the discovery run-as principal can see and read in Unity Catalog (see Step 7 → "Choose the discovery run-as principal"). Common causes:
 
-- **The agent isn't producing the kind of trace you expect.** Check the README's *"What your agents need to do for traces to exist"* table — Tier 1 needs MLflow tracing in code, Tier 2a needs inference-table or Unity Gateway request logging on the endpoint, Tier 2b needs the experiment bound to a UC trace location. If none are enabled for an agent, no trace data exists for the workflow to find.
+- **The agent isn't producing the kind of trace you expect.** See *"How trace discovery works"* under Step 8 — Tier 1 needs MLflow tracing in code, Tier 2a needs inference-table or Unity Gateway request logging on the endpoint, Tier 2b needs the experiment bound to a UC trace location. If none are enabled for an agent, no trace data exists for the workflow to find.
 - The run-as principal is not a metastore admin and has no grants on the catalog where the missing traces live. Either add it to the metastore admin group or grant explicit `USE CATALOG + USE SCHEMA + SELECT`.
 - Traces fall outside the retention window (`trace_retention_days`, default 90). Bump it via the bundle variable.
 - Traces live in a different workspace's default MLflow backend (not in Unity Catalog). Cross-workspace REST fan-out (Tier 3) is on the roadmap; until then, those traces are only visible from within their owning workspace.
