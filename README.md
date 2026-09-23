@@ -4,9 +4,6 @@ A management and observability platform for AI agents deployed on Databricks —
 
 📺 **[View the interactive demo →](https://databricks-solutions.github.io/agent-control-plane/product-demo.html)** (walkthrough of the app; no install required)
 
-<!-- Screenshots: Replace these placeholders with actual screenshots of your deployment -->
-<!-- ![Dashboard](docs/screenshots/governance.png) -->
-
 ## The Problem
 
 As enterprises deploy more AI agents, a new operational challenge emerges: **who is using what, how is it performing, and who has access?**
@@ -25,25 +22,17 @@ Built natively on Databricks: **Lakebase**, **system tables**, **MLflow**, **Uni
 
 Cost attribution and billing analytics powered by `system.billing.usage`. Track DBU spend per endpoint, token usage trends, and cost breakdown by SKU across all workspaces in the account. Drill into daily cost trends, product-level breakdown, and top consumers.
 
-![Governance](docs/gifs/governance.gif)
-
 ### Agents
 
-Auto-discovered agent registry across all workspaces. Finds serving endpoints, Databricks Apps, Genie Spaces, and Agent Bricks (Knowledge Assistants, Multi-Agent Supervisors, Knowledge Inference Engines). View endpoint status, operations metrics, interactive dependency topology, and test agents with an embedded playground.
-
-![Agents](docs/gifs/agents.gif)
+Auto-discovered agent registry across all workspaces. Finds serving endpoints, Databricks Apps, Genie Spaces, and Agent Bricks (Knowledge Assistants, Multi-Agent Supervisors, Knowledge Inference Engines). View endpoint status, operations metrics, and an interactive dependency topology.
 
 ### Unity Gateway
 
 Unified view of all model serving endpoints with usage analytics, token volume charts, per-endpoint and per-user breakdowns. Manage Unity Catalog permissions directly from the UI. Monitor operational metrics (requests, errors, latency), view individual request logs, and inspect rate limits and safety guardrails configured via Unity Gateway.
 
-![Unity Gateway](docs/gifs/ai-gateway.gif)
-
 ### Knowledge Bases
 
 Combined monitoring for Vector Search and Lakebase. Overview tab shows total cost, daily cost trends by product, and top workspaces by spend. Vector Search tab provides endpoint/index inventory, sync status, health history, and cost attribution by workload type (ingest, serving, storage). Lakebase tab shows instance inventory, compute vs storage cost, and per-workspace breakdown.
-
-![Knowledge Bases](docs/gifs/knowledge-bases.gif)
 
 ### Observability
 
@@ -75,25 +64,17 @@ If none of these are enabled for an agent, no trace data will exist for the work
 
 > **Coverage depends on what the discovery principal can read.** The Tier 2 paths use `system.information_schema.tables`, which is principal-filtered: a table only appears if the principal has at least `BROWSE`/`USE` along the catalog → schema → table chain. Reading rows additionally requires `SELECT` (or ownership). For account-wide coverage that auto-extends to new catalogs, run the discovery workflow as a **metastore admin** (or as a service principal that's a member of the metastore admin group). See [installation guide → Step 7](docs/installation.md#step-7-deploy-the-discovery-workflows) for the run-as configuration.
 
-![Observability](docs/gifs/observability.gif)
-
 ### Tools
 
 Registry of Unity Catalog functions and MCP servers available to agents. Browse function signatures, descriptions, and catalog locations.
-
-![Tools](docs/gifs/tools.gif)
 
 ### Workspaces
 
 Multi-workspace federation dashboard. See agent inventory, cost breakdown, cloud provider, and deployment region per workspace. Drill into individual workspaces for detailed agent and cost views.
 
-![Workspaces](docs/gifs/workspaces.gif)
-
 ### Admin
 
-Identity and access management with all principals, builders/users breakdown, RBAC matrix, and per-agent permission management. User activity tab shows top users, request distribution, daily active user trends, activity heatmap (24h UTC, Monday-first), and per-user agent usage.
-
-![Admin](docs/gifs/admin.gif)
+Identity and access management with all principals, builders/users breakdown, RBAC matrix, and per-agent permission management. User activity tab shows top users, request distribution, daily active user trends, activity heatmap (24h UTC, Monday-first), and per-user agent usage. An **App Settings** tab lets workspace or account admins choose the access mode — **open** (any authenticated user sees all workspaces read-only) or **strict** (per-user workspace scoping: account admins see everything, workspace admins see only the workspaces they administer).
 
 ## Architecture
 
@@ -111,7 +92,7 @@ Identity and access management with all principals, builders/users breakdown, RB
                        │  Sub-100ms reads
                        ▼
 ┌─────────────────────────────────────────────────────┐
-│  FastAPI Backend (17 routers, 16 services)          │
+│  FastAPI Backend (20 routers, 19 services)          │
 │  → React Frontend (TanStack Query + Tailwind)       │
 │  → Databricks App (OBO authentication)              │
 └─────────────────────────────────────────────────────┘
@@ -154,7 +135,7 @@ See the full **[Installation Guide](docs/installation.md)** for detailed setup i
 - **Lakebase instance** (PostgreSQL) — for fast dashboard reads
 - **SQL warehouse** (serverless preferred) — for system table queries
 - **Databricks App** with User Authorization (OBO) enabled
-- **Node.js 18+** and **Python 3.10+** — for building and deploying
+- **Node.js 18+** and **Python 3.11+** — for building and deploying
 
 ## Project Structure
 
@@ -162,7 +143,7 @@ See the full **[Installation Guide](docs/installation.md)** for detailed setup i
 agent-control-plane/
 ├── control-plane-app/          # The Databricks App
 │   ├── backend/                # FastAPI (Python)
-│   │   ├── api/                # 17 route modules
+│   │   ├── api/                # 20 route modules
 │   │   ├── services/           # Business logic
 │   │   ├── models/             # Pydantic schemas
 │   │   └── utils/auth.py       # OBO authentication
@@ -171,13 +152,18 @@ agent-control-plane/
 │   ├── deploy.sh               # Parameterized deploy script
 │   ├── grant_sp_permissions.py # SP workspace permission setup
 │   └── propagate-sp.sh         # Cross-workspace SP propagation
-├── workflows/                  # Databricks Asset Bundles
+├── workflows/                  # Databricks Asset Bundles (15 discovery tasks)
 │   ├── 01_discover_agents.py          # Agent discovery → Delta
 │   ├── 02_sync_to_lakebase.py         # All Delta → Lakebase + billing cache
 │   ├── 03_discover_knowledge_bases.py # Vector Search + Lakebase + billing → Delta
 │   ├── 04_discover_observability.py   # Cross-workspace traces → Delta
 │   ├── 05_discover_user_analytics.py  # User activity → Delta
 │   ├── 06_discover_gateway_usage.py   # Gateway usage → Delta
+│   ├── ...                            # 07–15: UC OTel traces, inference logs,
+│   │                                  #   billing, smoke check, gateway usage,
+│   │                                  #   model classify, budgets, endpoint
+│   │                                  #   inventory, model services
+│   ├── 10_smoke_check_lakebase.py     # Post-sync smoke check (fails CI on empty)
 │   └── databricks.yml                 # Bundle configuration
 ├── docs/                       # Documentation
 │   ├── installation.md         # Setup guide
