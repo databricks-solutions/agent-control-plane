@@ -275,6 +275,95 @@ Tier 2a/2b are the cross-workspace path — UC governance is the only auth bound
 3. **Governance page**: Should show billing/cost data (after the first workflow run)
 4. **Observability page**: Should show MLflow experiments and runs from all workspaces
 
+## Step 10: Budgets — live view & management (optional)
+
+The **Unity Gateway → Budgets** tab surfaces every native Databricks **account
+budget** (cap thresholds, enforce `BLOCK_USAGE` vs alert-only, filter,
+AI-relevance) and lets **account admins create, edit, and delete** budgets right
+from the app.
+
+**Why this needs its own service principal.** The Budgets API is
+**account-scoped** (`/api/2.1/accounts/{account_id}/budgets`). The app's per-user
+OBO token is *workspace*-scoped, and so is the app's own service principal —
+neither can authenticate to the account console. So reading or managing budgets
+in the app requires an **account-level service principal** whose OAuth
+credentials the app can use. Without it, the Budgets tab stays empty (it falls
+back to whatever the discovery workflow synced — also nothing, unless you do
+Step 10.4).
+
+### 10.1 Create an account service principal
+
+In the **account console** (`https://accounts.<cloud>/`, e.g.
+`accounts.cloud.databricks.com`):
+
+1. **User management → Service principals → Add service principal** (e.g. `acp-budgets`).
+2. Generate an **OAuth secret** for it — note the **client ID** and **secret**.
+3. **Assign the `all-apis` OAuth scope** to the service principal. Some accounts
+   restrict which scopes a client may request; if `all-apis` isn't assigned, the
+   token exchange fails with
+   `403 access_denied: Scopes 'all-apis' are not assigned to the client`.
+4. Give it account access to **read** budgets — and, for create/edit/delete, to
+   **manage** them. The simplest path is to make it an **account admin**; for
+   least privilege, grant only the account budget/usage permissions your account
+   exposes.
+
+> The app also uses this SP to resolve a caller's **account-admin** status (the
+> account SCIM `Users` API is likewise account-scoped), which is what gates
+> budget *writes*. `all-apis` + account-admin covers that lookup too.
+
+### 10.2 Store the credentials in a secret scope
+
+```bash
+databricks secrets create-scope acp-budgets
+
+# keys MUST be named client_id / client_secret
+databricks secrets put-secret acp-budgets client_id     --string-value "<client-id>"
+databricks secrets put-secret acp-budgets client_secret --string-value "<oauth-secret>"
+
+# let the APP's service principal read the scope at runtime.
+# <app-sp-application-id> is the app's service principal (from the app detail
+# page, or: databricks apps get <app-name> | grep service_principal_client_id)
+databricks secrets put-acl acp-budgets <app-sp-application-id> READ
+```
+
+> Enter the secret from a trusted shell (avoid shell history / logs). The app
+> reads it **as its own service principal**, never as the calling user — so the
+> `READ` ACL on the app SP is required.
+
+### 10.3 Point the app at the scope
+
+Add to `control-plane-app/.env` (the deploy script wires it into `app.yaml`):
+
+```env
+BUDGET_SP_SECRET_SCOPE=acp-budgets
+```
+
+Redeploy the app (`bash deploy.sh`). The Budgets tab now fetches **live** config
+from the account API on each request (short-cached). Account admins see a **New
+budget** button plus per-row **Edit** / **Delete** (deletes require
+confirmation). Everyone else sees the read-only inventory.
+
+> **Account budget cap.** Databricks accounts cap at **1000 active budgets**.
+> When full, **create** returns `429 RESOURCE_EXHAUSTED` — delete a budget first.
+
+### 10.4 (Optional) Populate Spent / % Used
+
+The Budgets API returns *configuration only*, not spend. To fill **Spent (MTD)**
+and **% Used**, let the discovery workflow compute spend from
+`system.billing.usage` and sync it to Lakebase, where the app merges it onto the
+live config by budget id. Set the **same scope** as a workflow variable — in
+`workflows/databricks.yml` (or pass `--var` at deploy):
+
+```yaml
+discovery_sp_secret_scope: "acp-budgets"
+```
+
+The workflow's run-as identity must be able to **read that secret scope** and
+have `SELECT` on `system.billing` (Step 8). Spend refreshes on the workflow
+schedule — `system.billing` itself lags ~24h, so computing it live would buy
+nothing. Budgets whose filter shape can't be attributed (multi-tag,
+tag + workspace) show `$0` / `0%`.
+
 ## Troubleshooting
 
 ### "SP only" shown instead of your username
@@ -319,3 +408,13 @@ The workflow runs as the user and is trying to `ALTER` or `CREATE INDEX` on a ta
 
 ### "No SQL warehouse found"
 The workflow needs a running SQL warehouse to query system tables. Verify `warehouse_id` in `databricks.yml` points to a running warehouse.
+
+### Budgets tab empty, or create/edit/delete missing
+See **Step 10**. The Budgets API is account-scoped and unreachable with the app's
+workspace token, so you need an account SP with `BUDGET_SP_SECRET_SCOPE` set.
+Common causes:
+- **`BUDGET_SP_SECRET_SCOPE` not set** (or the app SP lacks `READ` on the scope) → empty tab.
+- **`403 Scopes 'all-apis' are not assigned to the client`** → assign the `all-apis` OAuth scope to the SP (Step 10.1).
+- **No New/Edit/Delete buttons** → those are gated to **account admins**; the app resolves account-admin status via the same SP, so it needs account SCIM read.
+- **Spent / % Used all `$0`** → set `discovery_sp_secret_scope` on the workflow (Step 10.4) so spend is computed and synced; complex-filter budgets stay `$0` by design.
+- **`create` returns 429** → the account is at its 1000-budget cap; delete a budget first.
