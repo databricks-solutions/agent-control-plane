@@ -161,6 +161,8 @@
     color: var(--accent-ink);
   }
   .tile .glyph svg { width: 19px; height: 19px; display: block; }
+  .tile .glyph.img { background: #ffffff; border: 1px solid #ece8e1; padding: 3px; }
+  .tile .glyph.img img { width: 100%; height: 100%; object-fit: contain; display: block; }
   .tile .tx { min-width: 0; }
   .tile .name { font: 600 14px/1.15 "DM Sans", sans-serif; letter-spacing: -0.01em; }
   .tile .sub  { font: 400 11.5px/1.25 "DM Sans", sans-serif; color: var(--muted); margin-top: 2px; }
@@ -375,7 +377,7 @@
           <div class="tx"><div class="name">AI Search</div><div class="sub">Vector indexes &amp; knowledge bases</div></div>
         </div>
         <div class="tile grow">
-          <span class="glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3c1 2.5 3.5 5 6 6-2.5 1-5 3.5-6 6-1-2.5-3.5-5-6-6 2.5-1 5-3.5 6-6Z"/></svg></span>
+          <span class="glyph img" aria-hidden="true"><img src="logos/genie.svg" alt="" /></span>
           <div class="tx"><div class="name">Genie</div><div class="sub">Natural-language data rooms</div></div>
         </div>
         <div class="tile grow">
