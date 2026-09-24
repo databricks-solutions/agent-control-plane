@@ -52,26 +52,9 @@ Identity and access management with all principals, builders/users breakdown, RB
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────┐
-│  Databricks APIs + System Tables                    │
-│  (serving, billing, mlflow, ai_gateway, access,     │
-│   Unity Catalog, apps, genie)                       │
-└──────────────────────┬──────────────────────────────┘
-                       │  Scheduled workflow (every 30 min)
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│  Delta Tables → Lakebase (PostgreSQL)               │
-│  (agents, experiments, runs, traces, billing cache) │
-└──────────────────────┬──────────────────────────────┘
-                       │  Sub-100ms reads
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│  FastAPI Backend (20 routers, 19 services)          │
-│  → React Frontend (TanStack Query + Tailwind)       │
-│  → Databricks App (OBO authentication)              │
-└─────────────────────────────────────────────────────┘
-```
+![Agent Control Plane architecture — a layered Databricks platform stack: account-wide sources (system tables + APIs) → scheduled discovery workflows → Delta → Lakebase cache → the single-pane-of-glass app on Databricks Apps, governed by Unity Catalog](docs/architecture.png)
+
+A scheduled workflow reads account-wide sources into Delta and snapshots them into Lakebase; the app then serves everything back in milliseconds. It reads **only** Lakebase on the request path — system tables are touched only by the discovery workflow.
 
 **Key data sources:**
 - `system.serving.served_entities` / `endpoint_usage` — cross-workspace agent discovery + per-endpoint request/token metrics
