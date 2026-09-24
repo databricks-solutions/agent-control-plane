@@ -87,6 +87,8 @@ env:
     value: "${FEATURE_GENIE_ENABLED:-false}"
   - name: GENIE_SPACE_ID
     value: "${GENIE_SPACE_ID:-}"
+  - name: BUDGET_SP_SECRET_SCOPE
+    value: "${BUDGET_SP_SECRET_SCOPE:-}"
 
 resources:
   - name: obo-auth

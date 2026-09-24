@@ -848,6 +848,52 @@ export function useUagBudgetStatus() {
   })
 }
 
+/** Budget create/update payload — passed through to the account Budgets API. */
+export interface BudgetWritePayload {
+  display_name: string
+  alert_configurations: Array<Record<string, unknown>>
+  filter: Record<string, unknown>
+}
+
+/** Fetch one budget's full (unflattened) object for the edit form (account admin). */
+export async function fetchBudgetRaw(budgetId: string): Promise<any> {
+  const { data } = await apiClient.get(`/gateway/uag-budgets/${budgetId}`)
+  return data
+}
+
+export function useCreateBudget() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (body: BudgetWritePayload) => {
+      const { data } = await apiClient.post('/gateway/uag-budgets', body)
+      return data
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['gateway', 'uag-budget-status'] }),
+  })
+}
+
+export function useUpdateBudget() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ budgetId, body }: { budgetId: string; body: BudgetWritePayload }) => {
+      const { data } = await apiClient.put(`/gateway/uag-budgets/${budgetId}`, body)
+      return data
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['gateway', 'uag-budget-status'] }),
+  })
+}
+
+export function useDeleteBudget() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (budgetId: string) => {
+      const { data } = await apiClient.delete(`/gateway/uag-budgets/${budgetId}`)
+      return data
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['gateway', 'uag-budget-status'] }),
+  })
+}
+
 /** Account-wide served-entity inventory (read-only) from system.serving.served_entities. */
 export interface EndpointInventory {
   as_of: string | null

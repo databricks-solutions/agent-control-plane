@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     # Genie Ask tab — space id minted by setup_genie_space.py and pinned via env.
     genie_space_id: str = ""
 
+    # Budgets on-demand path. The account Budgets API is account-scoped, so the
+    # app can't reach it with the caller's (workspace-scoped) OBO token. When this
+    # names a Databricks secret scope holding an account SP's OAuth creds (keys:
+    # ``client_id`` / ``client_secret``) with account budget read, the app fetches
+    # budgets live per request (short-cached) instead of the discovery workflow.
+    # Empty → fall back to the workflow-synced ``uag_budget_status`` Lakebase table.
+    budget_sp_secret_scope: str = ""
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": False,

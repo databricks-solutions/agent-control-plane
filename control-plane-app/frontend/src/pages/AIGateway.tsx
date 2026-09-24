@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, Fragment } from 'react'
+import { useState, useMemo, useCallback, useEffect, Fragment, type ReactNode } from 'react'
 import { useIsFetching } from '@tanstack/react-query'
 import {
   useGatewayPageData,
@@ -23,6 +23,12 @@ import {
   useGatewayMetrics,
   useEndpointInventory,
   useUagBudgetStatus,
+  type UagBudgetStatus,
+  useCreateBudget,
+  useUpdateBudget,
+  useDeleteBudget,
+  fetchBudgetRaw,
+  type BudgetWritePayload,
   useModelServices,
   useModelServiceGrants,
   useAppConfig,
@@ -34,6 +40,7 @@ import { formatAsOf } from '@/lib/formatters'
 import { SortableHeader, useSort, sortRows } from '@/components/SortableTable'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { KpiCard } from '@/components/KpiCard'
 import { TablePagination } from '@/components/TablePagination'
 import { LineChart } from '@/components/charts/LineChart'
@@ -250,19 +257,29 @@ export default function AIGatewayPage() {
 
 /* ── Budgets (native account budgets, read-only) ───────────────── */
 
+type BudgetRow = UagBudgetStatus['budgets'][number]
+
 function BudgetsTab() {
   const { data, isLoading } = useUagBudgetStatus()
+  const { data: user } = useCurrentUser()
+  const canManage = !!user?.is_account_admin
   const budgets = data?.budgets ?? []
   const totals = data?.totals ?? {}
   const hasData = budgets.length > 0
+  const isLive = (data as any)?.source === 'live'
 
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(10)
   const { sort, toggle } = useSort<string>('max_threshold_usd')
 
+  // Management state: which modal is open (create/edit) and the delete target.
+  const [editing, setEditing] = useState<{ mode: 'create' } | { mode: 'edit'; row: BudgetRow } | null>(null)
+  const [deleting, setDeleting] = useState<BudgetRow | null>(null)
+  const [banner, setBanner] = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null)
+
   const sorted = useMemo(
     () =>
-      sortRows(budgets, sort, (b: (typeof budgets)[number], k) => {
+      sortRows(budgets, sort, (b: BudgetRow, k) => {
         if (k === 'enforce') return b.enforce ? 2 : b.alerting ? 1 : 0
         if (k === 'is_ai') return b.is_ai ? 1 : 0
         return (b as any)[k]
@@ -283,32 +300,51 @@ function BudgetsTab() {
                 role="tooltip"
                 className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 hidden w-80 rounded-lg border border-gray-200 bg-white p-3 text-left text-[11px] font-normal leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
               >
-                Read-only inventory of native Databricks budgets (account Budgets API).
-                Shows each budget's cap, whether it <strong>enforces</strong> a hard cap
-                (BLOCK_USAGE) or only <strong>alerts</strong>, its filter, and whether it
-                scopes AI spend. <strong>Spent (MTD)</strong> and <strong>% Used</strong> are
-                this month's list-price spend matched to the budget's filter (from
-                <code>system.billing.usage</code>); shown as <em>n/a</em> for complex filters
-                we don't estimate. Budgets are created and enforced by the platform — this app
-                only surfaces their status.
+                Native Databricks budgets from the account Budgets API. Shows each budget's
+                cap, whether it <strong>enforces</strong> a hard cap (BLOCK_USAGE) or only
+                <strong> alerts</strong>, its filter, and whether it scopes AI spend.
+                {' '}Config is fetched <strong>live</strong>{isLive ? '' : ' (currently from cache)'}.{' '}
+                <strong>Spent (MTD)</strong>/<strong>% Used</strong> are month-to-date list-price spend matched to
+                the budget's filter, computed by the discovery workflow (billing lags ~24h); <em>n/a</em> for
+                complex filters it can't attribute.{' '}
+                Account admins can create, edit, and delete budgets here.
               </span>
             </span>
-            {data?.as_of && (
-              <span className="ml-auto text-[10px] font-normal text-gray-400 dark:text-gray-500">
-                as of {formatAsOf(data.as_of)}
-              </span>
-            )}
+            <div className="ml-auto flex items-center gap-3">
+              {data?.as_of && (
+                <span className="text-[10px] font-normal text-gray-400 dark:text-gray-500">
+                  {isLive ? 'live' : `as of ${formatAsOf(data.as_of)}`}
+                </span>
+              )}
+              {canManage && (
+                <Button size="sm" onClick={() => { setBanner(null); setEditing({ mode: 'create' }) }}>
+                  <Plus className="w-4 h-4 mr-1" /> New budget
+                </Button>
+              )}
+            </div>
           </CardTitle>
         </CardHeader>
         <CardContent>
+          {banner && (
+            <div
+              className={`mb-4 flex items-start gap-2 rounded-md px-3 py-2 text-sm ${
+                banner.kind === 'ok'
+                  ? 'bg-green-50 text-green-700 dark:bg-green-900/30 dark:text-green-300'
+                  : 'bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+              }`}
+            >
+              {banner.kind === 'ok' ? <CheckCircle className="w-4 h-4 mt-0.5" /> : <AlertCircle className="w-4 h-4 mt-0.5" />}
+              <span className="flex-1">{banner.msg}</span>
+              <button onClick={() => setBanner(null)} aria-label="Dismiss"><X className="w-4 h-4" /></button>
+            </div>
+          )}
           {isLoading ? (
             <div className="py-12 text-center text-gray-400 dark:text-gray-500">Loading…</div>
           ) : !hasData ? (
             <div className="py-12 text-center text-gray-400 dark:text-gray-500">
-              No budgets found. Either none are configured in your Databricks account, or the
-              discovery workflow has no account-level credentials to read the (account-scoped)
-              Budgets API — set <code>discovery_sp_secret_scope</code> to an account SP with
-              budget read access.
+              No budgets found — either none are configured in this account, or the app has no
+              account-level credentials to read the (account-scoped) Budgets API.
+              {canManage && <> Use <strong>New budget</strong> above to create one.</>}
             </div>
           ) : (
             <>
@@ -331,6 +367,7 @@ function BudgetsTab() {
                       <SortableHeader label="Action" sortKey="enforce" current={sort} onToggle={toggle} />
                       <SortableHeader label="Scope" sortKey="is_ai" current={sort} onToggle={toggle} />
                       <th className="py-2 px-2 text-left text-xs text-gray-500 dark:text-gray-400">Filter</th>
+                      {canManage && <th className="py-2 px-2 text-right text-xs text-gray-500 dark:text-gray-400">Actions</th>}
                     </tr>
                   </thead>
                   <tbody>
@@ -345,22 +382,23 @@ function BudgetsTab() {
                           {b.max_threshold_usd ? fmtCost(b.max_threshold_usd) : '—'}
                         </td>
                         <td className="text-right py-2 px-2 tabular-nums">
-                          {b.spent_usd != null ? fmtCost(b.spent_usd) : <span className="text-gray-400 dark:text-gray-500">n/a</span>}
+                          {fmtCost(b.spent_usd ?? 0)}
                         </td>
                         <td className="py-2 px-2">
-                          {b.pct_used != null ? (
-                            <div className="flex items-center gap-2">
-                              <div className="h-1.5 w-16 rounded bg-gray-200 dark:bg-gray-700 overflow-hidden">
-                                <div
-                                  className={`h-full ${b.pct_used >= 100 ? 'bg-red-500' : b.pct_used >= 80 ? 'bg-amber-500' : 'bg-green-500'}`}
-                                  style={{ width: `${Math.min(b.pct_used, 100)}%` }}
-                                />
+                          {(() => {
+                            const pct = b.pct_used ?? 0
+                            return (
+                              <div className="flex items-center gap-2">
+                                <div className="h-1.5 w-16 rounded bg-gray-200 dark:bg-gray-700 overflow-hidden">
+                                  <div
+                                    className={`h-full ${pct >= 100 ? 'bg-red-500' : pct >= 80 ? 'bg-amber-500' : 'bg-green-500'}`}
+                                    style={{ width: `${Math.min(pct, 100)}%` }}
+                                  />
+                                </div>
+                                <span className="tabular-nums text-xs">{pct.toFixed(0)}%</span>
                               </div>
-                              <span className="tabular-nums text-xs">{b.pct_used.toFixed(0)}%</span>
-                            </div>
-                          ) : (
-                            <span className="text-gray-400 dark:text-gray-500 text-xs">n/a</span>
-                          )}
+                            )
+                          })()}
                         </td>
                         <td className="py-2 px-2">
                           {b.enforce ? (
@@ -377,6 +415,26 @@ function BudgetsTab() {
                         <td className="py-2 px-2 text-xs text-gray-500 dark:text-gray-400 max-w-xs truncate" title={b.filter_summary}>
                           {b.filter_summary}
                         </td>
+                        {canManage && (
+                          <td className="py-2 px-2">
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                onClick={() => { setBanner(null); setEditing({ mode: 'edit', row: b }) }}
+                                title="Edit budget"
+                                className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-400"
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => { setBanner(null); setDeleting(b) }}
+                                title="Delete budget"
+                                className="p-1.5 rounded hover:bg-red-50 dark:hover:bg-red-900/30 text-gray-500 hover:text-red-600 dark:text-gray-400 dark:hover:text-red-400"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </td>
+                        )}
                       </tr>
                     ))}
                   </tbody>
@@ -393,7 +451,262 @@ function BudgetsTab() {
           )}
         </CardContent>
       </Card>
+
+      {editing && (
+        <BudgetFormModal
+          mode={editing.mode}
+          row={editing.mode === 'edit' ? editing.row : undefined}
+          onClose={() => setEditing(null)}
+          onDone={(msg) => { setEditing(null); setBanner({ kind: 'ok', msg }) }}
+          onError={(msg) => setBanner({ kind: 'err', msg })}
+        />
+      )}
+      {deleting && (
+        <BudgetDeleteConfirm
+          row={deleting}
+          onClose={() => setDeleting(null)}
+          onDone={(msg) => { setDeleting(null); setBanner({ kind: 'ok', msg }) }}
+          onError={(msg) => { setDeleting(null); setBanner({ kind: 'err', msg }) }}
+        />
+      )}
     </div>
+  )
+}
+
+/* ── Budget management modals (account admin only) ─────────────── */
+
+function errText(e: any): string {
+  return e?.response?.data?.detail || e?.message || 'Operation failed'
+}
+
+/** Strip the account API's server-managed fields so a config can be re-submitted. */
+function sanitizeAlert(a: any) {
+  return {
+    time_period: a.time_period || 'MONTH',
+    trigger_type: a.trigger_type || 'CUMULATIVE_SPENDING_EXCEEDED',
+    quantity_type: a.quantity_type || 'LIST_PRICE_DOLLARS_USD',
+    quantity_threshold: String(a.quantity_threshold ?? ''),
+    ...(a.scope_type ? { scope_type: a.scope_type } : {}),
+    action_configurations: (a.action_configurations || []).map((ac: any) => ({
+      action_type: ac.action_type,
+      ...(ac.target ? { target: ac.target } : {}),
+    })),
+  }
+}
+
+function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-lg bg-white dark:bg-gray-800 shadow-xl border border-gray-200 dark:border-gray-700"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-gray-200 dark:border-gray-700 px-4 py-3">
+          <h3 className="text-sm font-semibold text-db-navy-900 dark:text-gray-100">{title}</h3>
+          <button onClick={onClose} aria-label="Close"><X className="w-4 h-4 text-gray-500" /></button>
+        </div>
+        <div className="p-4">{children}</div>
+      </div>
+    </div>
+  )
+}
+
+function BudgetFormModal({
+  mode, row, onClose, onDone, onError,
+}: {
+  mode: 'create' | 'edit'
+  row?: BudgetRow
+  onClose: () => void
+  onDone: (msg: string) => void
+  onError: (msg: string) => void
+}) {
+  const create = useCreateBudget()
+  const update = useUpdateBudget()
+  const [name, setName] = useState(row?.display_name ?? '')
+  const [amount, setAmount] = useState(row?.max_threshold_usd ? String(row.max_threshold_usd) : '')
+  const [action, setAction] = useState<'alert' | 'block'>(row?.enforce ? 'block' : 'alert')
+  const [email, setEmail] = useState('')
+  const [filterMode, setFilterMode] = useState<'account' | 'tag'>('account')
+  const [tagKey, setTagKey] = useState('')
+  const [tagValues, setTagValues] = useState('')
+  // Edit preserves the budget's existing filter + any extra alert configs.
+  const [rawLoading, setRawLoading] = useState(mode === 'edit')
+  const [raw, setRaw] = useState<any>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    if (mode !== 'edit' || !row) return
+    let alive = true
+    fetchBudgetRaw(row.budget_id)
+      .then((r) => { if (alive) { setRaw(r); const a0 = (r?.alert_configurations || [])[0]; const ac = (a0?.action_configurations || [])[0]; if (ac?.target) setEmail(ac.target) } })
+      .catch(() => { if (alive) onError('Could not load the budget for editing.') })
+      .finally(() => { if (alive) setRawLoading(false) })
+    return () => { alive = false }
+  }, [mode, row]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const submit = async () => {
+    const amt = parseFloat(amount)
+    if (!name.trim()) return onError('Name is required.')
+    if (!(amt > 0)) return onError('Cap must be a positive number.')
+    if (action === 'alert' && !email.trim()) return onError('An alert email is required for alert-only budgets.')
+
+    const primary = {
+      time_period: 'MONTH',
+      trigger_type: 'CUMULATIVE_SPENDING_EXCEEDED',
+      quantity_type: 'LIST_PRICE_DOLLARS_USD',
+      quantity_threshold: String(amt),
+      action_configurations: [
+        action === 'block'
+          ? { action_type: 'BLOCK_USAGE' }
+          : { action_type: 'EMAIL_NOTIFICATION', target: email.trim() },
+      ],
+    }
+
+    let payload: BudgetWritePayload
+    if (mode === 'edit' && raw) {
+      // Rebuild the first alert from the form; keep the rest + the original filter.
+      const rest = (raw.alert_configurations || []).slice(1).map(sanitizeAlert)
+      payload = {
+        display_name: name.trim(),
+        alert_configurations: [primary, ...rest],
+        filter: raw.filter || {},
+      }
+    } else {
+      const filter =
+        filterMode === 'tag' && tagKey.trim()
+          ? { tags: [{ key: tagKey.trim(), value: { operator: 'IN', values: tagValues.split(',').map((s) => s.trim()).filter(Boolean) } }] }
+          : {}
+      payload = { display_name: name.trim(), alert_configurations: [primary], filter }
+    }
+
+    setBusy(true)
+    try {
+      if (mode === 'edit' && row) {
+        await update.mutateAsync({ budgetId: row.budget_id, body: payload })
+        onDone(`Budget "${payload.display_name}" updated.`)
+      } else {
+        await create.mutateAsync(payload)
+        onDone(`Budget "${payload.display_name}" created.`)
+      }
+    } catch (e) {
+      onError(errText(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const multiAlert = (raw?.alert_configurations?.length ?? 0) > 1
+  const inputCls =
+    'w-full rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500'
+
+  return (
+    <Modal title={mode === 'edit' ? 'Edit budget' : 'New budget'} onClose={onClose}>
+      {rawLoading ? (
+        <div className="py-8 text-center text-sm text-gray-400">Loading budget…</div>
+      ) : (
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Name</label>
+            <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. team-ai-monthly" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Monthly cap (USD)</label>
+            <input className={inputCls} type="number" min="0" step="1" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="1000" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">On reaching cap</label>
+            <div className="flex gap-4 text-sm">
+              <label className="inline-flex items-center gap-1.5">
+                <input type="radio" checked={action === 'alert'} onChange={() => setAction('alert')} /> Alert (email)
+              </label>
+              <label className="inline-flex items-center gap-1.5">
+                <input type="radio" checked={action === 'block'} onChange={() => setAction('block')} /> Block usage (hard cap)
+              </label>
+            </div>
+          </div>
+          {action === 'alert' && (
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Alert email</label>
+              <input className={inputCls} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="team@company.com" />
+            </div>
+          )}
+          {mode === 'create' && (
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Scope</label>
+              <div className="flex gap-4 text-sm mb-2">
+                <label className="inline-flex items-center gap-1.5">
+                  <input type="radio" checked={filterMode === 'account'} onChange={() => setFilterMode('account')} /> Account-wide
+                </label>
+                <label className="inline-flex items-center gap-1.5">
+                  <input type="radio" checked={filterMode === 'tag'} onChange={() => setFilterMode('tag')} /> By tag
+                </label>
+              </div>
+              {filterMode === 'tag' && (
+                <div className="grid grid-cols-2 gap-2">
+                  <input className={inputCls} value={tagKey} onChange={(e) => setTagKey(e.target.value)} placeholder="tag key (e.g. team)" />
+                  <input className={inputCls} value={tagValues} onChange={(e) => setTagValues(e.target.value)} placeholder="values, comma-sep" />
+                </div>
+              )}
+            </div>
+          )}
+          {mode === 'edit' && (
+            <p className="text-[11px] text-gray-400 dark:text-gray-500">
+              The budget's existing filter{multiAlert ? ' and additional alert thresholds are' : ' is'} preserved.
+              Manage advanced filters in the account console.
+            </p>
+          )}
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="outline" size="sm" onClick={onClose} disabled={busy}>Cancel</Button>
+            <Button size="sm" onClick={submit} disabled={busy}>
+              {busy ? 'Saving…' : mode === 'edit' ? 'Save changes' : 'Create budget'}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  )
+}
+
+function BudgetDeleteConfirm({
+  row, onClose, onDone, onError,
+}: {
+  row: BudgetRow
+  onClose: () => void
+  onDone: (msg: string) => void
+  onError: (msg: string) => void
+}) {
+  const del = useDeleteBudget()
+  const [busy, setBusy] = useState(false)
+  const label = row.display_name || row.budget_id
+  const submit = async () => {
+    setBusy(true)
+    try {
+      await del.mutateAsync(row.budget_id)
+      onDone(`Budget "${label}" deleted.`)
+    } catch (e) {
+      onError(errText(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal title="Delete budget" onClose={onClose}>
+      <div className="space-y-4">
+        <div className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+          <ShieldAlert className="w-5 h-5 text-red-500 mt-0.5 flex-shrink-0" />
+          <p>
+            Delete <strong>{label}</strong>? This removes the budget from the Databricks account
+            and cannot be undone. Any hard-cap enforcement it applies will stop.
+          </p>
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button size="sm" className="bg-red-600 hover:bg-red-700" onClick={submit} disabled={busy}>
+            {busy ? 'Deleting…' : 'Delete budget'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   )
 }
 
