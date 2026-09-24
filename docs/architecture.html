@@ -166,6 +166,13 @@
   .tile .sub  { font: 400 11.5px/1.25 "DM Sans", sans-serif; color: var(--muted); margin-top: 2px; }
   .tile.grow { flex: 1 1 190px; }
 
+  /* logo tiles — real product lockups sit on a white chip so the full-colour
+     marks read in both themes; caption below in fixed brand teal. */
+  .tile.logo { flex-direction: column; align-items: flex-start; gap: 10px; background: #ffffff; border-color: #e4e0d9; }
+  .tile.logo .lockup { height: 22px; width: auto; max-width: 100%; display: block; }
+  .tile.logo .sub { color: #1b5162; font: 400 11.5px/1.3 "DM Sans", sans-serif; }
+  .apptile .meta-logo { margin-left: auto; height: 18px; width: auto; display: block; }
+
   /* app hero tile spans + carries the feature chips */
   .apptile { flex: 1 1 100%; align-items: flex-start; flex-direction: column; gap: 12px; padding: 15px 16px; }
   .apptile .head { display: flex; align-items: center; gap: 11px; width: 100%; }
@@ -258,7 +265,7 @@
               <div class="name">Agent Control Plane app</div>
               <div class="sub">React + FastAPI · served as a Databricks App with OBO auth</div>
             </div>
-            <span class="meta">databricks apps</span>
+            <img class="meta-logo" src="logos/apps.svg" alt="Databricks Apps" />
           </div>
           <div class="chips">
             <span class="chip">Governance</span>
@@ -285,11 +292,9 @@
         <p>Sub-100 ms dashboard reads</p>
       </div>
       <div class="band">
-        <div class="tile grow">
-          <span class="glyph" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5.5" rx="7.5" ry="3"/><path d="M4.5 5.5v13c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-13"/><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"/></svg>
-          </span>
-          <div class="tx"><div class="name">Lakebase</div><div class="sub">Serverless Postgres — the app's cache tables</div></div>
+        <div class="tile logo grow">
+          <img class="lockup" src="logos/lakebase.svg" alt="Lakebase" />
+          <div class="sub">Serverless Postgres — the app's cache tables</div>
         </div>
       </div>
     </section>
@@ -304,17 +309,13 @@
         <p>Materialize + snapshot, every 30 min</p>
       </div>
       <div class="band">
-        <div class="tile grow">
-          <span class="glyph" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A8 8 0 0 1 19 8"/><path d="M20 18.5A8 8 0 0 1 5 16"/><path d="M19 3v5h-5"/><path d="M5 21v-5h5"/></svg>
-          </span>
-          <div class="tx"><div class="name">Databricks Workflows</div><div class="sub">15 discovery tasks · Asset Bundles</div></div>
+        <div class="tile logo grow">
+          <img class="lockup" src="logos/lakeflow.svg" alt="Lakeflow Jobs" />
+          <div class="sub">15 discovery tasks · Asset Bundles, every 30 min</div>
         </div>
-        <div class="tile grow">
-          <span class="glyph" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4.5-8 4.5-8-4.5L12 3Z"/><path d="M4 12l8 4.5 8-4.5"/><path d="M4 16.5 12 21l8-4.5"/></svg>
-          </span>
-          <div class="tx"><div class="name">Delta tables</div><div class="sub">Discovery output → synced to Lakebase</div></div>
+        <div class="tile logo grow">
+          <img class="lockup" src="logos/delta.svg" alt="Delta Lake" />
+          <div class="sub">Discovery output → synced to Lakebase</div>
         </div>
       </div>
     </section>
@@ -329,17 +330,13 @@
         <p>The auth boundary, account-wide</p>
       </div>
       <div class="band gov">
-        <div class="tile grow">
-          <span class="glyph" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5 4.5 5.5v6c0 5 3.4 8.3 7.5 10 4.1-1.7 7.5-5 7.5-10v-6L12 2.5Z"/><path d="m8.7 12 2.3 2.3L15.5 10"/></svg>
-          </span>
-          <div class="tx"><div class="name">Unity Catalog</div><div class="sub">Access · lineage · the one auth boundary</div></div>
+        <div class="tile logo grow">
+          <img class="lockup" src="logos/unity-catalog.svg" alt="Unity Catalog" />
+          <div class="sub">Access · lineage · the one auth boundary</div>
         </div>
-        <div class="tile grow">
-          <span class="glyph" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="2.4"/><circle cx="18" cy="6.5" r="2.4"/><circle cx="18" cy="17.5" r="2.4"/><path d="M8.2 11 15.8 7.2M8.2 13l7.6 3.8"/></svg>
-          </span>
-          <div class="tx"><div class="name">Unity Gateway</div><div class="sub">Routing metrics, guardrails, budgets, model services</div></div>
+        <div class="tile logo grow">
+          <img class="lockup" src="logos/unity-gateway.svg" alt="Unity AI Gateway" />
+          <div class="sub">Routing metrics, guardrails, budgets, model services</div>
         </div>
       </div>
     </section>
@@ -365,9 +362,9 @@
             </div>
           </div>
         </div>
-        <div class="tile grow">
-          <span class="glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17V7l6 4 3-5 3 5 6-4v10"/><path d="M3 21h18"/></svg></span>
-          <div class="tx"><div class="name">MLflow</div><div class="sub">Experiments, runs &amp; traces</div></div>
+        <div class="tile logo grow">
+          <img class="lockup" src="logos/mlflow.svg" alt="MLflow" />
+          <div class="sub">Experiments, runs &amp; traces</div>
         </div>
         <div class="tile grow">
           <span class="glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="8" rx="4"/><circle cx="8" cy="12" r="1.6"/><circle cx="16" cy="12" r="1.6"/></svg></span>
