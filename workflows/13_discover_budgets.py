@@ -118,24 +118,40 @@ def _load_budgets() -> List[Dict[str, Any]]:
         print(f"  WARNING: could not load SP creds from scope '{SP_SECRET_SCOPE}': {exc}")
         return []
 
+    # Raw client-credentials + REST. The SDK's AccountClient.api_client.do("GET",
+    # .../budgets) fails with "unable to parse response" against this endpoint, so
+    # mint an account token and call the API directly (proven reliable).
     try:
-        from databricks.sdk import AccountClient
-        ac = AccountClient(
-            host=ACCOUNT_HOST,
-            account_id=ACCOUNT_ID,
-            client_id=client_id,
-            client_secret=client_secret,
+        import base64 as _b64
+        import requests
+
+        basic = _b64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+        tok_resp = requests.post(
+            f"{ACCOUNT_HOST}/oidc/accounts/{ACCOUNT_ID}/v1/token",
+            headers={"Authorization": f"Basic {basic}",
+                     "Content-Type": "application/x-www-form-urlencoded"},
+            data={"grant_type": "client_credentials", "scope": "all-apis"},
+            timeout=30,
         )
+        tok_resp.raise_for_status()
+        token = tok_resp.json().get("access_token", "")
+        if not token:
+            print("  WARNING: account OIDC returned no access_token — writing empty table")
+            return []
         budgets: List[Dict[str, Any]] = []
         page_token = None
         while True:
-            query = {"page_token": page_token} if page_token else None
-            resp = ac.api_client.do(
-                "GET", f"/api/2.1/accounts/{ACCOUNT_ID}/budgets", query=query
+            params = {"page_token": page_token} if page_token else None
+            r = requests.get(
+                f"{ACCOUNT_HOST}/api/2.1/accounts/{ACCOUNT_ID}/budgets",
+                headers={"Authorization": f"Bearer {token}"},
+                params=params,
+                timeout=30,
             )
-            batch = (resp or {}).get("budgets", []) if isinstance(resp, dict) else []
-            budgets.extend(batch)
-            page_token = (resp or {}).get("next_page_token") if isinstance(resp, dict) else None
+            r.raise_for_status()
+            j = r.json() or {}
+            budgets.extend(j.get("budgets", []) or [])
+            page_token = j.get("next_page_token")
             if not page_token:
                 break
         print(f"  Loaded {len(budgets)} budgets from the account Budgets API")

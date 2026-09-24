@@ -110,8 +110,21 @@ def _lookup_account_admin(username: str) -> bool:
             logger.info("Account-admin lookup skipped: DATABRICKS_ACCOUNT_ID not resolvable")
             return False
 
+        # The account SCIM API lives on the account console, which a workspace-scoped
+        # identity (the app SP) can't authenticate to. Prefer an account-capable SP
+        # token (the budget/account SP, if configured) and fall back to the app SP
+        # headers only when it isn't available.
         sp_headers = get_databricks_headers()
-        url = f"{get_databricks_account_host()}/api/2.0/accounts/{account_id}/scim/v2/Users"
+        account_host = get_databricks_account_host()
+        try:
+            from backend.services.gateway_service import _account_sp_token
+            acct_tok = _account_sp_token()
+            if acct_tok:
+                sp_headers = {"Authorization": f"Bearer {acct_tok[0]}"}
+                account_host = acct_tok[2]
+        except Exception as exc:
+            logger.debug("account SP token unavailable for admin lookup: %s", exc)
+        url = f"{account_host}/api/2.0/accounts/{account_id}/scim/v2/Users"
         resp = httpx.get(
             url,
             headers=sp_headers,

@@ -730,9 +730,317 @@ def get_uag_v2_usage(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[
     }
 
 
+# =====================================================================
+# Budgets — on-demand account Budgets API (OBO can't reach account APIs)
+# =====================================================================
+# The account Budgets API (/api/2.1/accounts/{id}/budgets) is account-scoped, so
+# the caller's workspace OBO token is rejected by the account console. When
+# ``settings.budget_sp_secret_scope`` names a scope with an account SP's OAuth
+# creds (budget read), we call the API live per request with a short cache —
+# giving fresh config without the discovery workflow. See 13_discover_budgets.py
+# for the batch path this mirrors (and the richer spend computation it does).
+
+# Product values (on the `databricks-product` tag) that mark a budget AI-scoped.
+_AI_PRODUCTS = {
+    "genie", "model_serving", "mosaic_ai_model_serving", "foundation_model",
+    "vector_search", "ai_gateway", "agent", "mosaic_ai_agent",
+}
+_AI_TAG_KEYS = {"ai_model"}
+_AI_NAME_MARKERS = ("genie", "gateway", "ai_model", "ai-gateway", "llm")
+
+
+def _budget_sp_creds() -> Optional[tuple]:
+    """Read the account SP's (client_id, client_secret) from the configured
+    secret scope, as the app SP. Returns None when the scope isn't set/readable."""
+    from backend.config import settings
+    scope = (settings.budget_sp_secret_scope or "").strip()
+    if not scope:
+        return None
+    cached = _cache_get("budget_sp_creds", ttl=300)
+    if cached is not None:
+        return cached or None  # cached () means "known unavailable"
+    import base64
+    from backend.config import _get_workspace_client
+    w = _get_workspace_client()
+    if w is None:
+        return None
+    try:
+        cid = base64.b64decode(w.secrets.get_secret(scope, "client_id").value).decode()
+        sec = base64.b64decode(w.secrets.get_secret(scope, "client_secret").value).decode()
+        creds = (cid, sec) if cid and sec else None
+    except Exception as exc:
+        logger.warning("budget SP creds unavailable from scope '%s': %s", scope, exc)
+        creds = None
+    _cache_set("budget_sp_creds", creds or ())
+    return creds
+
+
+def _account_sp_token() -> Optional[tuple]:
+    """Mint an account-scoped OAuth token for the budget SP (client-credentials).
+    Returns (token, account_id, account_host) or None when creds/account_id are
+    missing or the token exchange fails. 5-min cached (tokens live ~1h)."""
+    creds = _budget_sp_creds()
+    if not creds:
+        return None
+    from backend.config import get_databricks_account_host
+    from backend.services.workspace_registry import _get_account_id
+    account_id = _get_account_id()
+    if not account_id:
+        logger.warning("budgets: account_id not resolvable")
+        return None
+    host = get_databricks_account_host()
+    cached = _cache_get("budget_sp_token", ttl=300)
+    if cached:
+        return (cached, account_id, host)
+    cid, sec = creds
+    try:
+        r = httpx.post(
+            f"{host}/oidc/accounts/{account_id}/v1/token",
+            auth=(cid, sec),
+            data={"grant_type": "client_credentials", "scope": "all-apis"},
+            timeout=_TIMEOUT,
+        )
+        r.raise_for_status()
+        token = r.json().get("access_token", "")
+        if not token:
+            return None
+        _cache_set("budget_sp_token", token)
+        return (token, account_id, host)
+    except Exception as exc:
+        logger.warning("account SP token exchange failed (%s: %s)", type(exc).__name__, exc)
+        return None
+
+
+def _fetch_budgets_live() -> Optional[List[Dict[str, Any]]]:
+    """Fetch raw budget objects from the account Budgets API using the account SP.
+    60s-cached. Returns None if creds/account_id missing or the call fails, so
+    callers fall back to the Lakebase table."""
+    cached = _cache_get("budgets_live_raw", ttl=60)
+    if cached is not None:
+        return cached
+    tok = _account_sp_token()
+    if not tok:
+        return None
+    token, account_id, host = tok
+    try:
+        budgets: List[Dict[str, Any]] = []
+        page_token = None
+        while True:
+            params = {"page_token": page_token} if page_token else None
+            r = httpx.get(
+                f"{host}/api/2.1/accounts/{account_id}/budgets",
+                headers={"Authorization": f"Bearer {token}"},
+                params=params,
+                timeout=_TIMEOUT,
+            )
+            r.raise_for_status()
+            j = r.json() or {}
+            budgets.extend(j.get("budgets", []) or [])
+            page_token = j.get("next_page_token")
+            if not page_token:
+                break
+        return _cache_set("budgets_live_raw", budgets)
+    except Exception as exc:
+        logger.warning("budgets live fetch failed (%s: %s)", type(exc).__name__, exc)
+        return None
+
+
+def _parse_budget(b: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten one raw account budget object into the app's budget shape. Mirrors
+    13_discover_budgets._to_row. Spend/pct are left n/a on the live path (computing
+    them needs a heavy system.billing scan we don't put on the request path)."""
+    alert_cfgs = b.get("alert_configurations") or []
+    thresholds: List[float] = []
+    actions: set = set()
+    time_period = ""
+    for a in alert_cfgs:
+        try:
+            thresholds.append(float(a.get("quantity_threshold") or 0))
+        except (TypeError, ValueError):
+            pass
+        if not time_period:
+            time_period = a.get("time_period") or ""
+        for ac_ in (a.get("action_configurations") or []):
+            if ac_.get("action_type"):
+                actions.add(ac_["action_type"])
+
+    filt = b.get("filter") or {}
+    tags = filt.get("tags") or []
+    tag_bits = []
+    for t in tags:
+        key = t.get("key", "")
+        val = t.get("value") or {}
+        op = val.get("operator", "IN")
+        vals = val.get("values") or []
+        tag_bits.append(f"{key} {op} [{', '.join(str(v) for v in vals[:3])}]")
+    ws_vals = (filt.get("workspace_id") or {}).get("values") or []
+    filter_bits = list(tag_bits)
+    if ws_vals:
+        filter_bits.append(f"workspaces: {len(ws_vals)}")
+    filter_summary = "; ".join(filter_bits) if filter_bits else "account-wide"
+
+    is_ai = False
+    for t in tags:
+        if t.get("key", "") in _AI_TAG_KEYS:
+            is_ai = True
+        if t.get("key", "") == "databricks-product":
+            vals = {str(v).lower() for v in (t.get("value") or {}).get("values", [])}
+            if vals & _AI_PRODUCTS:
+                is_ai = True
+    if any(m in (b.get("display_name") or "").lower() for m in _AI_NAME_MARKERS):
+        is_ai = True
+
+    return {
+        "budget_id": b.get("budget_configuration_id", ""),
+        "display_name": b.get("display_name", ""),
+        "enforce": "BLOCK_USAGE" in actions,
+        "alerting": "EMAIL_NOTIFICATION" in actions,
+        "min_threshold_usd": min(thresholds) if thresholds else 0.0,
+        "max_threshold_usd": max(thresholds) if thresholds else 0.0,
+        "time_period": time_period,
+        "filter_summary": filter_summary,
+        "is_ai": is_ai,
+        "spent_usd": None,
+        "pct_used": None,
+    }
+
+
+def _budget_spend_by_id() -> Dict[str, tuple]:
+    """Month-to-date spend/pct per budget_id from the discovery-synced Lakebase
+    table (`uag_budget_status`). This is where 13_discover_budgets writes the
+    system.billing aggregation — the live path merges it so config stays fresh
+    while spend rides the (day-lagged) workflow cadence. Empty when unsynced."""
+    from backend.database import execute_query
+    try:
+        rows = execute_query("SELECT budget_id, spent_usd, pct_used FROM uag_budget_status")
+    except Exception as exc:
+        logger.warning("budget spend lookup failed: %s", exc)
+        return {}
+    out: Dict[str, tuple] = {}
+    for r in rows:
+        out[r.get("budget_id")] = (
+            float(r["spent_usd"]) if r.get("spent_usd") is not None else None,
+            float(r["pct_used"]) if r.get("pct_used") is not None else None,
+        )
+    return out
+
+
+def _budget_status_live() -> Optional[Dict[str, Any]]:
+    """Assemble the budget-status payload from the live account Budgets API, or
+    None if the live path isn't configured/available (→ fall back to Lakebase).
+    Spend/pct are merged from the workflow-synced Lakebase table by budget_id."""
+    raw = _fetch_budgets_live()
+    if raw is None:
+        return None
+    budgets = [_parse_budget(b) for b in raw if b.get("budget_configuration_id")]
+    spend = _budget_spend_by_id()
+    for b in budgets:
+        s = spend.get(b["budget_id"])
+        if s:
+            b["spent_usd"], b["pct_used"] = s
+    return {
+        "as_of": datetime.now(timezone.utc).isoformat(),
+        "source": "live",
+        "totals": {
+            "budget_count": len(budgets),
+            "enforcing_count": sum(1 for b in budgets if b["enforce"]),
+            "alerting_count": sum(1 for b in budgets if b["alerting"]),
+            "ai_budget_count": sum(1 for b in budgets if b["is_ai"]),
+            "over_cap_count": sum(1 for b in budgets if (b["pct_used"] or 0) >= 100),
+            "near_cap_count": sum(1 for b in budgets if 80 <= (b["pct_used"] or 0) < 100),
+        },
+        "budgets": budgets,
+    }
+
+
+def _budget_write(method: str, budget_id: Optional[str], budget_obj: Optional[Dict[str, Any]],
+                  actor: str) -> Dict[str, Any]:
+    """Create / update / delete a budget via the account Budgets API, as the account
+    SP. Writes are authorized at the API layer (require_account_admin) — `actor` is
+    the acting user, logged here for audit since the call itself runs as the SP.
+    Returns {"ok": True, "budget": {...}} or {"ok": False, "status": int, "error": str}."""
+    tok = _account_sp_token()
+    if not tok:
+        return {"ok": False, "status": 503,
+                "error": "Budget management isn't configured (no account credentials)."}
+    token, account_id, host = tok
+    url = f"{host}/api/2.1/accounts/{account_id}/budgets"
+    if budget_id:
+        url += f"/{budget_id}"
+    body = None
+    if method != "DELETE":
+        obj = dict(budget_obj or {})
+        obj["account_id"] = account_id  # server-injected; never trust a client value
+        body = {"budget": obj}
+    logger.info("budget %s by actor=%s (budget_id=%s)", method, actor, budget_id or "<new>")
+    try:
+        r = httpx.request(method, url, headers={"Authorization": f"Bearer {token}"},
+                          json=body, timeout=_TIMEOUT)
+    except Exception as exc:
+        logger.warning("budget %s failed (%s: %s)", method, type(exc).__name__, exc)
+        return {"ok": False, "status": 502, "error": f"Budget API call failed: {exc}"}
+    if r.status_code < 300:
+        with _cache_lock:  # force the next read to re-fetch the fresh list
+            _cache.pop("budgets_live_raw", None)
+        try:
+            data = r.json() if r.content else {}
+        except Exception:
+            data = {}
+        logger.info("budget %s ok by actor=%s (budget_id=%s)", method, actor, budget_id or "<new>")
+        return {"ok": True, "budget": data.get("budget", data)}
+    try:
+        msg = r.json().get("message", r.text)
+    except Exception:
+        msg = r.text
+    logger.warning("budget %s rejected %s by actor=%s: %s", method, r.status_code, actor, msg)
+    return {"ok": False, "status": r.status_code, "error": msg}
+
+
+def get_budget_raw(budget_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch one budget's full (unflattened) object from the account API — used by
+    the edit flow so updates preserve filters / extra alerts the list view drops.
+    Returns None when unavailable."""
+    tok = _account_sp_token()
+    if not tok:
+        return None
+    token, account_id, host = tok
+    try:
+        r = httpx.get(
+            f"{host}/api/2.1/accounts/{account_id}/budgets/{budget_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=_TIMEOUT,
+        )
+        r.raise_for_status()
+        j = r.json() or {}
+        return j.get("budget", j)
+    except Exception as exc:
+        logger.warning("get budget raw failed (%s: %s)", type(exc).__name__, exc)
+        return None
+
+
+def create_budget(budget_obj: Dict[str, Any], actor: str = "") -> Dict[str, Any]:
+    """Create a new account budget. Note: accounts cap at 1000 active budgets — a
+    full account returns ok=False with a 429/RESOURCE_EXHAUSTED message."""
+    return _budget_write("POST", None, budget_obj, actor)
+
+
+def update_budget(budget_id: str, budget_obj: Dict[str, Any], actor: str = "") -> Dict[str, Any]:
+    """Update an existing account budget (full replace of the mutable fields)."""
+    return _budget_write("PUT", budget_id, budget_obj, actor)
+
+
+def delete_budget(budget_id: str, actor: str = "") -> Dict[str, Any]:
+    """Delete an account budget. Irreversible — the API layer gates this to account
+    admins and the UI requires explicit confirmation."""
+    return _budget_write("DELETE", budget_id, None, actor)
+
+
 def get_uag_budget_status(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Budget configuration inventory from `uag_budget_status` (sourced from the
-    account Budgets API, /api/2.1/accounts/{id}/budgets).
+    """Budget configuration inventory from the account Budgets API.
+
+    Prefers a live on-demand fetch when ``budget_sp_secret_scope`` is configured
+    (account SP creds); otherwise reads the workflow-synced `uag_budget_status`
+    Lakebase table.
 
     Read-only: surfaces each native budget's cap thresholds, whether it *enforces*
     (BLOCK_USAGE) vs only *alerts* (email), its filter, and AI-relevance — the
@@ -752,6 +1060,13 @@ def get_uag_budget_status(allowed_workspace_ids: Optional[List[str]] = None) -> 
     empty = {"as_of": None, "totals": {}, "budgets": []}
     if allowed_workspace_ids is not None:
         return empty
+
+    # On-demand path (preferred when an account SP is configured): fresh config
+    # straight from the account Budgets API, no discovery workflow needed.
+    live = _budget_status_live()
+    if live is not None:
+        return live
+
     try:
         # Totals aggregate the FULL table (not the limited list below), so KPIs
         # stay correct on accounts with more budgets than the display cap.

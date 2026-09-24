@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from backend.config import settings
 from backend.services import gateway_service
-from backend.utils.auth import get_current_user, require_admin, UserInfo
+from backend.utils.auth import get_current_user, require_admin, require_account_admin, UserInfo
 from backend.utils.access_scope import get_allowed_workspace_ids
 
 router = APIRouter(prefix="/gateway", tags=["ai-gateway"], dependencies=[Depends(get_current_user)])
@@ -257,6 +257,58 @@ def uag_budget_status(user: UserInfo = Depends(get_current_user)):
     enforcement stays platform-side. Empty when the workflow had no account
     credentials to read the (account-scoped) API."""
     return gateway_service.get_uag_budget_status(allowed_workspace_ids=get_allowed_workspace_ids(user))
+
+
+# ── Budget management (write) ──────────────────────────────────────────
+# These mutate account-level budgets via the account SP. They are hard-gated to
+# verified account admins (require_account_admin) regardless of the app's access
+# mode, and every mutation is logged with the acting user. Deletes are
+# irreversible; the UI additionally requires an explicit confirmation.
+
+class BudgetWrite(BaseModel):
+    display_name: str
+    # Passed through to the account Budgets API. Each alert:
+    #   {time_period, trigger_type, quantity_type, quantity_threshold,
+    #    action_configurations:[{action_type, target}]}
+    alert_configurations: List[dict]
+    filter: dict = {}
+
+
+def _budget_result(result: dict):
+    """Turn a service {ok/error/status} into a response, raising HTTP errors so the
+    frontend sees the real status (e.g. 429 when the account is at its budget cap)."""
+    if not result.get("ok"):
+        raise HTTPException(status_code=result.get("status", 400),
+                            detail=result.get("error", "Budget operation failed"))
+    return result
+
+
+@router.get("/uag-budgets/{budget_id}")
+def get_uag_budget(budget_id: str, user: UserInfo = Depends(require_account_admin)):
+    """Full (unflattened) budget object for the edit form. Account admin only."""
+    raw = gateway_service.get_budget_raw(budget_id)
+    if raw is None:
+        raise HTTPException(status_code=404, detail="Budget not found or unavailable")
+    return raw
+
+
+@router.post("/uag-budgets")
+def create_uag_budget(body: BudgetWrite, user: UserInfo = Depends(require_account_admin)):
+    """Create an account budget. Account admin only. Note: accounts cap at 1000
+    active budgets — a full account returns 429."""
+    return _budget_result(gateway_service.create_budget(body.model_dump(), actor=user.username))
+
+
+@router.put("/uag-budgets/{budget_id}")
+def update_uag_budget(budget_id: str, body: BudgetWrite, user: UserInfo = Depends(require_account_admin)):
+    """Update an account budget. Account admin only."""
+    return _budget_result(gateway_service.update_budget(budget_id, body.model_dump(), actor=user.username))
+
+
+@router.delete("/uag-budgets/{budget_id}")
+def delete_uag_budget(budget_id: str, user: UserInfo = Depends(require_account_admin)):
+    """Delete an account budget. Account admin only; irreversible."""
+    return _budget_result(gateway_service.delete_budget(budget_id, actor=user.username))
 
 
 @router.get("/uag-mcp-tools")
