@@ -1,0 +1,407 @@
+<title>Agent Control Plane Architecture</title>
+<meta name="description" content="Databricks-branded architecture of the Agent Control Plane, from account-wide sources to the single pane of glass." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=IBM+Plex+Mono:wght@400;500&display=swap" />
+
+<style>
+  :root {
+    color-scheme: light dark;
+
+    --ground:   #ffffff;
+    --panel:    #ffffff;
+    --band-app: #fbf3f1;   /* warm off-white — experience band */
+    --band-gov: #eef4fa;   /* faint steel-blue — governance/data bands */
+    --band-src: #f7f5f2;   /* warm neutral — sources band */
+    --ink:      #0b2026;   /* Databricks deep navy */
+    --muted:    #1b5162;   /* teal, secondary text */
+    --faint:    #6d8a92;   /* tertiary */
+    --hair:     #e4e0d9;   /* tile borders on light */
+    --hair-2:   #d7d2c9;
+    --accent:   #ff5f46;   /* Databricks orange-red */
+    --accent-ink:#c53b25;  /* accent text that holds on white */
+    --blue:     #2272b4;   /* governance/data outline */
+    --crimson:  #98102a;   /* experience-band outline */
+    --shadow:   0 1px 2px rgba(11,32,38,.06), 0 8px 24px -12px rgba(11,32,38,.14);
+
+    --maxw: 1080px;
+    --radius: 16px;
+    --radius-sm: 11px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #06141a;
+      --panel:    #0e252c;
+      --band-app: #16232b;
+      --band-gov: #0d222c;
+      --band-src: #0b1e25;
+      --ink:      #eaf1f0;
+      --muted:    #9fbcc6;
+      --faint:    #6f929d;
+      --hair:     #1d3a43;
+      --hair-2:   #24444e;
+      --accent:   #ff6f58;
+      --accent-ink:#ff8a76;
+      --blue:     #4aa3e6;
+      --crimson:  #f07089;
+      --shadow:   0 1px 2px rgba(0,0,0,.35), 0 10px 30px -14px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:   #06141a;
+    --panel:    #0e252c;
+    --band-app: #16232b;
+    --band-gov: #0d222c;
+    --band-src: #0b1e25;
+    --ink:      #eaf1f0;
+    --muted:    #9fbcc6;
+    --faint:    #6f929d;
+    --hair:     #1d3a43;
+    --hair-2:   #24444e;
+    --accent:   #ff6f58;
+    --accent-ink:#ff8a76;
+    --blue:     #4aa3e6;
+    --crimson:  #f07089;
+    --shadow:   0 1px 2px rgba(0,0,0,.35), 0 10px 30px -14px rgba(0,0,0,.6);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+    font-optical-sizing: auto;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.4;
+  }
+
+  .wrap {
+    max-width: var(--maxw);
+    margin: 0 auto;
+    padding: clamp(28px, 5vw, 64px) clamp(18px, 4vw, 44px) 64px;
+  }
+
+  /* ── Header ─────────────────────────────────────────── */
+  header { margin-bottom: clamp(26px, 4vw, 40px); }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font: 500 12px/1 "DM Sans", sans-serif;
+    letter-spacing: .16em; text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 16px;
+  }
+  .eyebrow .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+  h1 {
+    font: 700 clamp(30px, 5vw, 46px)/1.02 "DM Sans", sans-serif;
+    letter-spacing: -0.02em; text-wrap: balance;
+    margin: 0 0 14px;
+  }
+  .tagline {
+    display: flex; flex-wrap: wrap; gap: 8px 14px;
+    font: 600 clamp(15px, 2.2vw, 19px)/1 "DM Sans", sans-serif;
+    color: var(--ink); margin: 0 0 14px;
+  }
+  .tagline span { display: inline-flex; align-items: center; gap: 14px; }
+  .tagline span::after { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+  .tagline span:last-child::after { display: none; }
+  .lede {
+    max-width: 62ch; margin: 0;
+    font: 400 clamp(14px, 1.7vw, 16px)/1.55 "DM Sans", sans-serif;
+    color: var(--muted);
+  }
+
+  /* ── Layer stack ────────────────────────────────────── */
+  .stack { display: flex; flex-direction: column; gap: 12px; position: relative; }
+
+  .layer {
+    display: grid;
+    grid-template-columns: 178px 1fr;
+    gap: clamp(12px, 2vw, 22px);
+    align-items: stretch;
+  }
+  .layer-label { padding: 14px 4px 14px 0; }
+  .layer-label .n {
+    font: 500 11px/1 "IBM Plex Mono", monospace;
+    color: var(--accent-ink); letter-spacing: .08em; display: block; margin-bottom: 8px;
+  }
+  .layer-label h2 {
+    font: 600 clamp(15px, 2vw, 17px)/1.15 "DM Sans", sans-serif;
+    letter-spacing: -0.01em; margin: 0 0 4px; text-wrap: balance;
+  }
+  .layer-label p { font: 400 12.5px/1.4 "DM Sans", sans-serif; color: var(--muted); margin: 0; }
+
+  .band {
+    border: 1.5px solid var(--hair);
+    border-radius: var(--radius);
+    background: var(--band-src);
+    padding: 16px;
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  }
+  .band.app { background: var(--band-app); border-color: color-mix(in srgb, var(--crimson) 42%, transparent); }
+  .band.gov { background: var(--band-gov); border-color: color-mix(in srgb, var(--blue) 42%, transparent); }
+
+  /* ── Product tiles ──────────────────────────────────── */
+  .tile {
+    display: flex; align-items: center; gap: 11px;
+    background: var(--panel);
+    border: 1px solid var(--hair);
+    border-radius: var(--radius-sm);
+    padding: 11px 14px 11px 11px;
+    box-shadow: var(--shadow);
+    transition: transform .16s ease, box-shadow .16s ease;
+    min-width: 0;
+  }
+  .tile:hover { transform: translateY(-2px); box-shadow: 0 4px 10px rgba(11,32,38,.10), 0 18px 34px -16px rgba(11,32,38,.28); }
+  .tile .glyph {
+    flex: 0 0 auto; width: 34px; height: 34px; border-radius: 9px;
+    display: grid; place-items: center;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent-ink);
+  }
+  .tile .glyph svg { width: 19px; height: 19px; display: block; }
+  .tile .tx { min-width: 0; }
+  .tile .name { font: 600 14px/1.15 "DM Sans", sans-serif; letter-spacing: -0.01em; }
+  .tile .sub  { font: 400 11.5px/1.25 "DM Sans", sans-serif; color: var(--muted); margin-top: 2px; }
+  .tile.grow { flex: 1 1 190px; }
+
+  /* app hero tile spans + carries the feature chips */
+  .apptile { flex: 1 1 100%; align-items: flex-start; flex-direction: column; gap: 12px; padding: 15px 16px; }
+  .apptile .head { display: flex; align-items: center; gap: 11px; width: 100%; }
+  .apptile .glyph { background: color-mix(in srgb, var(--crimson) 14%, transparent); color: var(--crimson); }
+  .apptile .meta { margin-left: auto; font: 500 11px/1 "IBM Plex Mono", monospace; color: var(--faint); letter-spacing: .02em; }
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; }
+  .chip {
+    font: 500 12px/1 "DM Sans", sans-serif;
+    color: var(--ink);
+    background: color-mix(in srgb, var(--ground) 55%, var(--band-app));
+    border: 1px solid var(--hair-2);
+    border-radius: 999px; padding: 6px 11px;
+  }
+  .chip.genie { border-color: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--accent-ink); }
+
+  /* mono source labels inside the system-tables tile */
+  .srcnames { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 5px; }
+  .srcnames code {
+    font: 400 10.5px/1 "IBM Plex Mono", monospace;
+    color: var(--muted);
+    background: color-mix(in srgb, var(--ink) 6%, transparent);
+    border-radius: 5px; padding: 3px 5px;
+  }
+
+  /* ── Flow connectors between layers ─────────────────── */
+  .flow {
+    grid-column: 2; justify-self: start; margin-left: 26px;
+    display: flex; align-items: center; gap: 8px;
+    height: 8px;
+  }
+  .flow .rail { width: 2px; height: 22px; background: linear-gradient(var(--accent), color-mix(in srgb, var(--accent) 25%, transparent)); border-radius: 2px; }
+  .flow .cap { font: 500 10.5px/1 "IBM Plex Mono", monospace; color: var(--accent-ink); letter-spacing: .04em; }
+
+  /* ── Foundation strip ───────────────────────────────── */
+  .foundation {
+    margin-top: 14px;
+    grid-column: 1 / -1;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px;
+    border: 1.5px dashed var(--hair-2);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    color: var(--muted);
+    font: 500 13px/1 "DM Sans", sans-serif;
+  }
+  .foundation .lead { color: var(--ink); font-weight: 600; }
+  .foundation .sep { color: var(--faint); }
+
+  footer {
+    margin-top: 30px; padding-top: 16px;
+    border-top: 1px solid var(--hair);
+    display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center;
+    font: 400 12px/1.4 "DM Sans", sans-serif; color: var(--faint);
+  }
+  footer .k { color: var(--muted); font-weight: 500; }
+
+  @media (max-width: 720px) {
+    .layer { grid-template-columns: 1fr; gap: 8px; }
+    .layer-label { padding-bottom: 2px; }
+    .flow { grid-column: 1; margin-left: 6px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .tile { transition: none; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow"><span class="dot"></span>Databricks Data Intelligence Platform</p>
+    <h1>Agent Control Plane</h1>
+    <p class="tagline"><span>Discover</span><span>Govern</span><span>Observe</span><span>Attribute</span></p>
+    <p class="lede">A single pane of glass over every AI agent, endpoint, and knowledge base running across your Databricks account — built entirely on platform primitives. A scheduled workflow reads account-wide sources into Lakebase; the app serves them back in milliseconds.</p>
+  </header>
+
+  <div class="stack">
+
+    <!-- Layer 1 — Experience -->
+    <section class="layer">
+      <div class="layer-label">
+        <span class="n">01 · EXPERIENCE</span>
+        <h2>Single pane of glass</h2>
+        <p>What platform &amp; ML teams see</p>
+      </div>
+      <div class="band app">
+        <div class="tile apptile">
+          <div class="head">
+            <span class="glyph" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+            </span>
+            <div class="tx">
+              <div class="name">Agent Control Plane app</div>
+              <div class="sub">React + FastAPI · served as a Databricks App with OBO auth</div>
+            </div>
+            <span class="meta">databricks apps</span>
+          </div>
+          <div class="chips">
+            <span class="chip">Governance</span>
+            <span class="chip">Agents</span>
+            <span class="chip">Unity Gateway</span>
+            <span class="chip">Knowledge Bases</span>
+            <span class="chip">Observability</span>
+            <span class="chip">Tools</span>
+            <span class="chip">Workspaces</span>
+            <span class="chip">Admin</span>
+            <span class="chip genie">Ask Genie</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="layer"><div class="flow"><span class="rail"></span><span class="cap">reads ↑ (&lt;100 ms)</span></div></div>
+
+    <!-- Layer 2 — Fast reads -->
+    <section class="layer">
+      <div class="layer-label">
+        <span class="n">02 · FAST READS</span>
+        <h2>Cached read store</h2>
+        <p>Sub-100 ms dashboard reads</p>
+      </div>
+      <div class="band">
+        <div class="tile grow">
+          <span class="glyph" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5.5" rx="7.5" ry="3"/><path d="M4.5 5.5v13c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-13"/><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"/></svg>
+          </span>
+          <div class="tx"><div class="name">Lakebase</div><div class="sub">Serverless Postgres — the app's cache tables</div></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="layer"><div class="flow"><span class="rail"></span><span class="cap">sync ↑ (every 30 min)</span></div></div>
+
+    <!-- Layer 3 — Discovery pipeline -->
+    <section class="layer">
+      <div class="layer-label">
+        <span class="n">03 · DISCOVERY</span>
+        <h2>Scheduled pipeline</h2>
+        <p>Materialize + snapshot, every 30 min</p>
+      </div>
+      <div class="band">
+        <div class="tile grow">
+          <span class="glyph" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A8 8 0 0 1 19 8"/><path d="M20 18.5A8 8 0 0 1 5 16"/><path d="M19 3v5h-5"/><path d="M5 21v-5h5"/></svg>
+          </span>
+          <div class="tx"><div class="name">Databricks Workflows</div><div class="sub">15 discovery tasks · Asset Bundles</div></div>
+        </div>
+        <div class="tile grow">
+          <span class="glyph" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4.5-8 4.5-8-4.5L12 3Z"/><path d="M4 12l8 4.5 8-4.5"/><path d="M4 16.5 12 21l8-4.5"/></svg>
+          </span>
+          <div class="tx"><div class="name">Delta tables</div><div class="sub">Discovery output → synced to Lakebase</div></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="layer"><div class="flow"><span class="rail"></span><span class="cap">governed by ↓</span></div></div>
+
+    <!-- Layer 4 — Governance -->
+    <section class="layer">
+      <div class="layer-label">
+        <span class="n">04 · GOVERNANCE</span>
+        <h2>Control &amp; cost</h2>
+        <p>The auth boundary, account-wide</p>
+      </div>
+      <div class="band gov">
+        <div class="tile grow">
+          <span class="glyph" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5 4.5 5.5v6c0 5 3.4 8.3 7.5 10 4.1-1.7 7.5-5 7.5-10v-6L12 2.5Z"/><path d="m8.7 12 2.3 2.3L15.5 10"/></svg>
+          </span>
+          <div class="tx"><div class="name">Unity Catalog</div><div class="sub">Access · lineage · the one auth boundary</div></div>
+        </div>
+        <div class="tile grow">
+          <span class="glyph" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="2.4"/><circle cx="18" cy="6.5" r="2.4"/><circle cx="18" cy="17.5" r="2.4"/><path d="M8.2 11 15.8 7.2M8.2 13l7.6 3.8"/></svg>
+          </span>
+          <div class="tx"><div class="name">Unity Gateway</div><div class="sub">Routing metrics, guardrails, budgets, model services</div></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="layer"><div class="flow"><span class="rail"></span><span class="cap">discovers ↑</span></div></div>
+
+    <!-- Layer 5 — Sources -->
+    <section class="layer">
+      <div class="layer-label">
+        <span class="n">05 · SOURCES</span>
+        <h2>Account-wide signal</h2>
+        <p>System tables + platform APIs</p>
+      </div>
+      <div class="band">
+        <div class="tile grow" style="flex-basis:100%">
+          <span class="glyph" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M3 14.5h18M9 9v11"/></svg>
+          </span>
+          <div class="tx">
+            <div class="name">System Tables</div>
+            <div class="srcnames">
+              <code>system.serving.*</code><code>system.billing.usage</code><code>system.ai_gateway.usage</code><code>system.mlflow.*</code><code>system.access.audit</code><code>system.access.workspaces_latest</code>
+            </div>
+          </div>
+        </div>
+        <div class="tile grow">
+          <span class="glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17V7l6 4 3-5 3 5 6-4v10"/><path d="M3 21h18"/></svg></span>
+          <div class="tx"><div class="name">MLflow</div><div class="sub">Experiments, runs &amp; traces</div></div>
+        </div>
+        <div class="tile grow">
+          <span class="glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="8" rx="4"/><circle cx="8" cy="12" r="1.6"/><circle cx="16" cy="12" r="1.6"/></svg></span>
+          <div class="tx"><div class="name">Model Serving</div><div class="sub">Endpoints &amp; inference logs</div></div>
+        </div>
+        <div class="tile grow">
+          <span class="glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span>
+          <div class="tx"><div class="name">AI Search</div><div class="sub">Vector indexes &amp; knowledge bases</div></div>
+        </div>
+        <div class="tile grow">
+          <span class="glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3c1 2.5 3.5 5 6 6-2.5 1-5 3.5-6 6-1-2.5-3.5-5-6-6 2.5-1 5-3.5 6-6Z"/></svg></span>
+          <div class="tx"><div class="name">Genie</div><div class="sub">Natural-language data rooms</div></div>
+        </div>
+        <div class="tile grow">
+          <span class="glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 7 3 12l5 5M16 7l5 5-5 5M14 4l-4 16"/></svg></span>
+          <div class="tx"><div class="name">REST APIs</div><div class="sub">Apps · budgets · UC model services</div></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="foundation">
+      <span class="lead">Open foundation</span>
+      <span>Any cloud <span class="sep">·</span> AWS · Azure · GCP</span>
+      <span class="sep">|</span>
+      <span>Delta &amp; open formats</span>
+      <span class="sep">|</span>
+      <span>governed end-to-end by Unity Catalog</span>
+    </div>
+
+  </div>
+
+  <footer>
+    <span class="k">Agent Control Plane</span>
+    <span>·</span>
+    <span>reads only Lakebase on the request path — system tables are touched only by the scheduled discovery workflow</span>
+  </footer>
+</div>
