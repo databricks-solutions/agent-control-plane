@@ -302,14 +302,20 @@ In the **account console** (`https://accounts.<cloud>/`, e.g.
    restrict which scopes a client may request; if `all-apis` isn't assigned, the
    token exchange fails with
    `403 access_denied: Scopes 'all-apis' are not assigned to the client`.
-4. Give it account access to **read** budgets — and, for create/edit/delete, to
-   **manage** them. The simplest path is to make it an **account admin**; for
-   least privilege, grant only the account budget/usage permissions your account
-   exposes.
+4. Give it the **account-admin** role. This is effectively **required**, not just
+   "simplest": the SP must *read* budgets, *write* them (for create/edit/delete),
+   **and** read the account SCIM `Users` API (for the admin check below), and
+   Databricks exposes no account role narrower than account-admin that covers all
+   three. Assign it in the account console (the SP → **Account admin**, or add it
+   to the account **admins** group). The SP stays dedicated to this app and is
+   deletable anytime.
 
-> The app also uses this SP to resolve a caller's **account-admin** status (the
-> account SCIM `Users` API is likewise account-scoped), which is what gates
-> budget *writes*. `all-apis` + account-admin covers that lookup too.
+> **This SP also powers the "Account Admin" badge and gates budget writes.** The
+> app resolves whether the caller is an account admin by querying the account
+> SCIM `Users` API (account-scoped) with *this* SP — the caller's workspace OBO
+> token can't reach it. Until the SP is configured with the account-admin role,
+> every user (even a real account admin) shows as **Workspace Admin only**, no
+> Account Admin badge appears, and budget create/edit/delete is blocked.
 
 ### 10.2 Store the credentials in a secret scope
 
