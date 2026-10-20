@@ -391,16 +391,101 @@ _LLM_CLIENT_LIBS = (
     "openai", "anthropic", "databricks-openai", "langchain", "databricks-langchain",
     "litellm", "mistralai", "cohere",
 )
-_APP_CLASSES = ("agent_app", "agent_frontend_app", "ai_enabled_app", "regular_app")
+_APP_CLASSES = ("agent_app", "agent_frontend_app", "candidate_agent_app",
+                "ai_enabled_app", "regular_app")
+
+# Resource types (declared in the app spec) that act as agent *tools* — their
+# presence alongside an LLM is a structural agent signal (Tier 2). Genie = NL→SQL
+# data tool; job = workflow/tool; vector_search = RAG retrieval.
+_AGENT_TOOL_RESOURCE_TYPES = {
+    "genie_space", "genie", "job", "vector_search_index", "vector_search",
+    "uc_function", "function",
+}
+_AGENTIC_NAME_RE = re.compile(
+    r"agent|assistant|copilot|chatbot|\brag\b|genai|\bbot\b", re.IGNORECASE)
+# A serving-endpoint name that denotes retrieval (embeddings / reranker) — pairing one
+# with an LLM endpoint is a RAG-agent architecture signal.
+_RETRIEVAL_ENDPOINT_RE = re.compile(
+    r"embed|bge|gte|arctic-embed|minilm|e5-|nomic|rerank", re.IGNORECASE)
 
 
 def _app_class_to_type(app_class):
-    """Map an app_class to the back-compat `type`. Only true agent apps persist."""
-    if app_class in ("agent_app", "agent_frontend_app"):
+    """Map an app_class to the back-compat `type`. Confirmed + candidate agent apps all
+    map to `custom_app` so they flow through the same app-agent plumbing in the backend
+    (permissions, operations); the agent-vs-candidate distinction lives in `workload_class`
+    + `confidence`, not in `type`."""
+    if app_class in ("agent_app", "agent_frontend_app", "candidate_agent_app"):
         return "custom_app"
     if app_class == "unknown":
         return "app_unknown"      # distinct from serving `unknown`; not persisted
     return app_class               # ai_enabled_app / regular_app — not persisted
+
+
+def _parse_app_resources(resources):
+    """Parse an app's declared resources into (resources_out, features) — shared by
+    local (`_build_app_record`) and audit (`discover_apps_from_audit_logs`) discovery so
+    both score through the same multi-signal taxonomy. `features` carries the Tier 1/2
+    signals: serving-endpoint names, MLflow experiment id, and the set of resource types
+    (for tool/orchestration signals)."""
+    out = []
+    feat = {"endpoint_names": [], "experiment_id": None, "resource_types": []}
+    for r in (resources or []):
+        if not isinstance(r, dict):
+            continue
+        # The resource type is the sole key that isn't metadata.
+        rtype = next((k for k in r.keys()
+                      if k not in ("name", "description", "permission")), "")
+        entry = {"name": r.get("name", ""), "type": rtype}
+        nested = r.get(rtype) if rtype else None
+        if rtype == "serving_endpoint" and isinstance(nested, dict) and nested.get("name"):
+            entry["endpoint_name"] = nested["name"]
+            feat["endpoint_names"].append(nested["name"])
+        elif rtype == "experiment" and isinstance(nested, dict):
+            feat["experiment_id"] = nested.get("experiment_id") or nested.get("id")
+        if rtype:
+            feat["resource_types"].append(rtype)
+        out.append(entry)
+    return out, feat
+
+
+def _agent_runtime_experiments(window_days=90):
+    """Set of MLflow experiment ids with agent *runtime* activity, account-wide —
+    the union of `agentEvaluation` monitoring (scheduled scorers / review apps /
+    assessments) and `mlflowTrace` trace search (traces logged against an
+    experiment). An app whose experiment resource is in this set is a confirmed
+    agent (Tier 1). Fail-open → empty set. (Trace-search experiments overlap the
+    eval set heavily; the union is a cheap superset, never smaller.)"""
+    exps = set()
+    try:
+        rows = spark.sql(f"""
+            SELECT DISTINCT COALESCE(
+                       request_params['experiment_id'],
+                       get_json_object(request_params['review_app'], '$.experiment_id')
+                   ) AS experiment_id
+            FROM system.access.audit
+            WHERE service_name = 'agentEvaluation'
+              AND event_date >= CURRENT_DATE - {int(window_days)}
+              AND COALESCE(request_params['experiment_id'],
+                           get_json_object(request_params['review_app'], '$.experiment_id')) IS NOT NULL
+        """).collect()
+        exps |= {str(r.experiment_id) for r in rows if r.experiment_id}
+    except Exception as e:
+        print(f"  Agent-eval experiments unavailable (fail-open): {e}")
+    try:
+        rows = spark.sql(f"""
+            SELECT DISTINCT get_json_object(request_params['locations'],
+                              '$[0].mlflow_experiment.experiment_id') AS experiment_id
+            FROM system.access.audit
+            WHERE service_name = 'mlflowTrace'
+              AND action_name IN ('searchUCTraces', 'searchUCTracesLongRunning')
+              AND event_date >= CURRENT_DATE - {int(window_days)}
+              AND get_json_object(request_params['locations'],
+                     '$[0].mlflow_experiment.experiment_id') IS NOT NULL
+        """).collect()
+        exps |= {str(r.experiment_id) for r in rows if r.experiment_id}
+    except Exception as e:
+        print(f"  Agent-trace experiments unavailable (fail-open): {e}")
+    return exps
 
 
 _EXPORT_TIMEOUT = 8.0  # short — many source files are absent / cross-ws ACL-blocked
@@ -486,22 +571,11 @@ def _build_app_record(app, ws_id, source, base, headers, read_source=True):
         "sp_client_id": app.get("service_principal_client_id", "") or "",
     }
 
-    resource_endpoint = ""
-    resources = app.get("resources") or []
-    if resources:
-        config_dict["resources"] = []
-        for r in resources:
-            r_entry = {"name": r.get("name", ""), "description": r.get("description", "")}
-            for rtype in ("serving_endpoint", "sql_warehouse", "experiment", "secret"):
-                if rtype in r:
-                    r_entry["type"] = rtype
-                    if rtype == "serving_endpoint":
-                        nested = r.get("serving_endpoint") or {}
-                        if isinstance(nested, dict) and nested.get("name"):
-                            r_entry["endpoint_name"] = nested["name"]
-                            resource_endpoint = resource_endpoint or nested["name"]
-                    break
-            config_dict["resources"].append(r_entry)
+    resources_out, app_features = _parse_app_resources(app.get("resources") or [])
+    resource_endpoint = app_features["endpoint_names"][0] if app_features["endpoint_names"] else ""
+    if resources_out:
+        config_dict["resources"] = resources_out
+    config_dict["app_features"] = app_features
 
     # Stage 3: read the app's own source (workspace-local; fail-open if unreadable).
     signals = (_read_app_signals(base, headers, app.get("default_source_code_path", ""))
@@ -786,12 +860,23 @@ def enrich_unknown_with_behavior(agents, window_days=30):
 
 
 def resolve_apps(agents, window_days=30):
-    """Finalize app classification: link frontends to backing genai_agent endpoints
-    and apply the app service-principal behavioral signal. Runs after serving
+    """Finalize app classification via the multi-signal taxonomy. Runs after serving
     classification (so the genai_agent set is final). Mutates `agents` in place.
 
-    Precedence: source agent_app > endpoint-link (agent_frontend_app) > LLM-use
-    (ai_enabled_app) > regular_app > unknown. "Uses an LLM" never promotes to agent.
+    Each app is scored over an ensemble of account-wide signals, not a single
+    endpoint-class check (which misses app-native agents). The verdict carries a
+    confidence and the evidence that decided it (in `raw_signals`), and is upgradeable.
+
+      agent_app (high)          : source-detected frameworks, OR an experiment resource
+                                  under agentEvaluation monitoring (confirmed, app-native)
+      agent_frontend_app (high) : fronts a genai_agent serving endpoint (UI over a known agent)
+      candidate_agent_app (med) : structural signals (multi-endpoint orchestration, Genie/
+                                  job/vector tools, experiment resource) — review queue
+      ai_enabled_app (low)      : a lone plain-LLM endpoint with no other agent signal
+      regular_app / unknown     : no serving endpoint and no signal
+
+    "Uses an LLM" alone never promotes to agent; an agent-looking NAME alone never does
+    either (it only tips a structural candidate).
     """
     apps = []
     for a in agents:
@@ -806,6 +891,7 @@ def resolve_apps(agents, window_days=30):
 
     agent_eps = {(str(a.get("workspace_id", "")), a.get("endpoint_name", ""))
                  for a in agents if a.get("workload_class") == "genai_agent"}
+    runtime_exps = _agent_runtime_experiments()   # experiments w/ agent eval or trace activity (Tier 1)
 
     # App-SP behavioral: which app service principals call serving endpoints w/ tokens.
     llm_sps = set()
@@ -828,20 +914,79 @@ def resolve_apps(agents, window_days=30):
     counts = {}
     for a, cfg in apps:
         ws = str(a.get("workspace_id", ""))
-        le = a.get("linked_endpoint") or ""
+        feat = cfg.get("app_features") or {}
+        ep_names = feat.get("endpoint_names") or ([cfg.get("linked_endpoint")] if cfg.get("linked_endpoint") else [])
+        rtypes = set(feat.get("resource_types") or [])
+        exp_id = feat.get("experiment_id")
         spid = cfg.get("sp_client_id")
         sp_llm = bool(spid) and spid in llm_sps
         cur = a.get("workload_class")
+        name_blob = f"{a.get('name', '')} {a.get('description', '')}"
 
+        valid_eps = [e for e in ep_names if e]
+        fronts_agent = any((ws, ep) in agent_eps for ep in valid_eps)
+        exp_confirmed = bool(exp_id) and str(exp_id) in runtime_exps
+        # Endpoint architecture: retrieval (embedding/reranker) + LLM = RAG; ≥2 LLMs = router.
+        retrieval_eps = [e for e in valid_eps if _RETRIEVAL_ENDPOINT_RE.search(e)]
+        llm_eps = [e for e in valid_eps if not _RETRIEVAL_ENDPOINT_RE.search(e)]
+        has_retrieval = bool(retrieval_eps) or bool(rtypes & {"vector_search_index", "vector_search"})
+        rag_wiring = has_retrieval and bool(llm_eps)
+        router_wiring = len(llm_eps) >= 2
+
+        # Collect evidence (which signals fired), then decide by precedence.
+        evidence = []
         if cur == "agent_app":
+            evidence.append("app_source")                 # T1: source frameworks (local only)
+        if exp_confirmed:
+            evidence.append("experiment_runtime")         # T1: eval/trace activity on its experiment
+        if fronts_agent:
+            evidence.append("fronts_genai_agent")          # T1: UI over a known agent
+        if rag_wiring:
+            evidence.append("rag_wiring")                 # strong architecture: retrieval + LLM
+        if router_wiring:
+            evidence.append("router_wiring")              # strong architecture: multi-LLM
+        if len(valid_eps) > 1:
+            evidence.append("multi_endpoint")             # T2: orchestration
+        if exp_id:
+            evidence.append("experiment_resource")        # T2: agent tracing
+        if rtypes & {"genie_space", "genie"}:
+            evidence.append("genie_tool")                 # T2: data tool
+        if "job" in rtypes:
+            evidence.append("job_tool")                   # T2: workflow tool
+        if rtypes & {"vector_search_index", "vector_search"}:
+            evidence.append("vector_rag")                 # T2: RAG retrieval
+        name_agentic = bool(_AGENTIC_NAME_RE.search(name_blob))
+        if name_agentic:
+            evidence.append("agentic_name")               # T4: weak prior
+
+        # Structural / architecture signals are *inferential* (not direct proof) → they
+        # drive the med-confidence candidate queue, never a high-confidence agent_app.
+        # High confidence (agent_app) is reserved for direct evidence: source frameworks,
+        # an eval/trace-monitored experiment, or a genai_agent endpoint link.
+        has_candidate_signal = (
+            rag_wiring or router_wiring
+            or any(e in evidence for e in
+                   ("multi_endpoint", "experiment_resource", "genie_tool", "job_tool", "vector_rag"))
+            or (name_agentic and valid_eps))
+
+        if "app_source" in evidence or exp_confirmed:
             final = "agent_app"
-        elif le and (ws, le) in agent_eps:
+            a["confidence"], a["classified_by"] = "high", (
+                "app_source" if "app_source" in evidence else "experiment_runtime")
+        elif fronts_agent:
             final = "agent_frontend_app"
             a["confidence"], a["classified_by"] = "high", "endpoint_link"
-        elif cur == "ai_enabled_app" or sp_llm:
+        elif has_candidate_signal:
+            final = "candidate_agent_app"
+            a["confidence"], a["classified_by"] = "med", (
+                "architecture_rag" if rag_wiring else
+                "architecture_router" if router_wiring else "multi_signal")
+        elif cur == "ai_enabled_app" or sp_llm or valid_eps:
             final = "ai_enabled_app"
             if sp_llm and cur != "ai_enabled_app":
                 a["confidence"], a["classified_by"] = "med", "behavior_sp_tokens"
+            else:
+                a["confidence"], a["classified_by"] = "low", "llm_use"
         elif cur == "regular_app":
             final = "regular_app"
         else:
@@ -849,9 +994,17 @@ def resolve_apps(agents, window_days=30):
 
         a["workload_class"] = final
         a["type"] = _app_class_to_type(final)
-        a["uses_llm"] = final in ("agent_app", "agent_frontend_app", "ai_enabled_app") or sp_llm
+        a["uses_llm"] = final in ("agent_app", "agent_frontend_app", "candidate_agent_app",
+                                  "ai_enabled_app") or sp_llm
+        # Record the signals that decided this verdict (auditable + upgradeable).
+        try:
+            rs = json.loads(a.get("raw_signals") or "{}")
+        except Exception:
+            rs = {}
+        rs["app_evidence"] = evidence
+        a["raw_signals"] = json.dumps(rs)
         counts[final] = counts.get(final, 0) + 1
-    print(f"  Apps resolved: {counts} (from {len(apps)} apps)")
+    print(f"  Apps resolved (multi-signal): {counts} (from {len(apps)} apps)")
 
 
 def apply_model_classification(agents):
@@ -913,7 +1066,16 @@ def apply_model_classification(agents):
 
 
 def discover_genie_from_audit_logs() -> List[Dict[str, Any]]:
-    """Discover Genie Spaces across workspaces via audit logs."""
+    """Discover live Genie Spaces across workspaces via audit logs.
+
+    Excludes spaces whose latest lifecycle event is a trash/delete (soft-deleted
+    and not restored). Genie logs no explicit restore action, so a space coming
+    back out of Trash shows up only as a later create/update — hence
+    *latest-event-wins*: a space is dropped only when its last trash is at or
+    after its last create/update. This is re-evaluated every run, so it tracks
+    deletions (and restores) live at the discovery cadence. Spaces with zero
+    conversations (created but unused, yet live) are intentionally kept. Bounded
+    to the last 90 days of create/update activity (same window as before)."""
     agents = []
     try:
         rows = spark.sql("""
@@ -929,6 +1091,14 @@ def discover_genie_from_audit_logs() -> List[Dict[str, Any]]:
                     workspace_id,
                     user_identity.email AS creator_email,
                     event_time,
+                    -- Latest create/update time per space (same scan, no extra pass).
+                    -- Compared against the last trash below for latest-event-wins.
+                    MAX(event_time) OVER (
+                        PARTITION BY COALESCE(
+                            request_params['space_id'],
+                            get_json_object(response.result, '$.space_id')
+                        )
+                    ) AS last_cu,
                     ROW_NUMBER() OVER (
                         PARTITION BY COALESCE(
                             request_params['space_id'],
@@ -956,6 +1126,21 @@ def discover_genie_from_audit_logs() -> List[Dict[str, Any]]:
                   AND event_date >= CURRENT_DATE - 90
                   AND request_params['space_id'] IS NOT NULL
                 GROUP BY 1
+            ),
+            -- Latest trash/delete per space. Latest-event-wins: a space is excluded
+            -- only when its last trash is at/after its last create/update (still in
+            -- Trash); a restore+edit after a trash keeps it (last_cu wins).
+            trashed AS (
+                SELECT
+                    request_params['space_id'] AS space_id,
+                    MAX(event_time) AS last_trash
+                FROM system.access.audit
+                WHERE service_name IN ('aibiGenie', 'genie')
+                  AND action_name IN ('genieTrashSpace', 'trashSpace')
+                  AND event_date >= CURRENT_DATE - 90
+                  AND response.status_code = '200'
+                  AND request_params['space_id'] IS NOT NULL
+                GROUP BY 1
             )
             SELECT
                 m.space_id, m.display_name, m.table_ids, m.warehouse_id,
@@ -963,7 +1148,9 @@ def discover_genie_from_audit_logs() -> List[Dict[str, Any]]:
                 u.conversation_count, u.unique_users, u.last_active
             FROM space_meta m
             LEFT JOIN usage u ON m.space_id = u.space_id
+            LEFT JOIN trashed t ON m.space_id = t.space_id
             WHERE m.rn = 1 AND m.space_id IS NOT NULL AND LENGTH(m.space_id) > 10
+              AND (t.last_trash IS NULL OR t.last_trash < m.last_cu)
             ORDER BY COALESCE(u.last_active, m.event_time) DESC
         """).collect()
 
@@ -1013,10 +1200,160 @@ def discover_genie_from_audit_logs() -> List[Dict[str, Any]]:
         print(f"  ERROR querying audit logs for Genie: {e}")
     return agents
 
+
+def discover_apps_from_audit_logs() -> List[Dict[str, Any]]:
+    """Discover app-served agents across all workspaces via audit logs.
+
+    Account-wide replacement for the per-workspace SP fan-out
+    (`discover_apps_cross_workspace`), which needs the discovery SP registered as
+    an OAuth client in every workspace and otherwise yields zero cross-workspace
+    coverage. The `apps` service logs to `system.access.audit` account-wide, and
+    the create/update actions carry the full app spec in `request_params['app']`
+    — including `resources[].serving_endpoint`, the same endpoint link the live
+    `GET /api/2.0/apps` exposed. So apps are discovered + classified account-wide
+    with no fan-out and no SP propagation (same pattern as the Genie audit source).
+
+    Scope: apps whose latest create/update spec declares a `serving_endpoint` OR an
+    MLflow `experiment` resource (agent candidates). `resolve_apps()` scores the class
+    afterward via the multi-signal taxonomy — fronting a `genai_agent` →
+    `agent_frontend_app`; an experiment under agent-eval monitoring or source-detected
+    frameworks → `agent_app`; structural signals (multi-endpoint, Genie/job/vector
+    tools) → `candidate_agent_app`; a lone plain LLM with no other signal →
+    `ai_enabled_app`.
+
+    Lifecycle: latest-event-wins on `deleteApp` — an app is excluded only when its
+    last delete is at/after its last create/update (same rule as Genie trash).
+    Spec actions carry `request_params['app']` (full JSON); `deleteApp` carries
+    `request_params['name']`.
+
+    Window: bounded to the last 90 days of create/update activity — a *cross-workspace*
+    app untouched for >90d drops out (the known retention-window limitation the persistent
+    inventory plan fixes; not a regression — the fan-out this replaces had zero cross-ws
+    coverage). Local-workspace apps are unaffected: `discover_apps()` still enumerates them
+    live via `GET /api/2.0/apps` every run.
+    """
+    agents = []
+    try:
+        rows = spark.sql("""
+            WITH app_spec AS (
+                SELECT
+                    workspace_id,
+                    get_json_object(request_params['app'], '$.name') AS app_name,
+                    request_params['app'] AS spec,
+                    user_identity.email AS creator,
+                    event_time,
+                    -- Latest create/update time per app (same scan), compared to the
+                    -- last delete below for latest-event-wins.
+                    MAX(event_time) OVER (
+                        PARTITION BY workspace_id, get_json_object(request_params['app'], '$.name')
+                    ) AS last_cu,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY workspace_id, get_json_object(request_params['app'], '$.name')
+                        ORDER BY event_time DESC
+                    ) AS rn
+                FROM system.access.audit
+                WHERE service_name = 'apps'
+                  AND action_name IN ('createApp', 'createUpdate', 'updateApp')
+                  AND event_date >= CURRENT_DATE - 90
+                  AND response.status_code = '200'
+                  AND get_json_object(request_params['app'], '$.name') IS NOT NULL
+                  AND get_json_object(request_params['app'], '$.name') != ''
+                -- NB: the resource filter is applied in the OUTER query on the rn=1
+                -- (latest) spec — filtering here would corrupt ROW_NUMBER, letting an
+                -- older spec win when the newest update removed the resource.
+            ),
+            -- Latest delete per app. Latest-event-wins: an app is excluded only when
+            -- its last delete is at/after its last create/update (a later redeploy /
+            -- spec edit keeps it, mirroring the Genie trash rule). deleteApp keys the
+            -- app via request_params['name'].
+            trashed AS (
+                SELECT
+                    workspace_id,
+                    request_params['name'] AS app_name,
+                    MAX(event_time) AS last_trash
+                FROM system.access.audit
+                WHERE service_name = 'apps'
+                  AND action_name = 'deleteApp'
+                  AND event_date >= CURRENT_DATE - 90
+                  AND response.status_code = '200'
+                  AND request_params['name'] IS NOT NULL
+                GROUP BY 1, 2
+            )
+            SELECT s.workspace_id, s.app_name, s.spec, s.creator, s.event_time
+            FROM app_spec s
+            LEFT JOIN trashed t
+              ON s.workspace_id = t.workspace_id AND s.app_name = t.app_name
+            WHERE s.rn = 1
+              AND (t.last_trash IS NULL OR t.last_trash < s.last_cu)
+              -- Keep only if the LATEST spec still declares a serving_endpoint / experiment
+              -- resource (applied post-ROW_NUMBER so a stale older spec can't slip through).
+              AND (s.spec LIKE '%serving_endpoint%' OR s.spec LIKE '%experiment_id%')
+            ORDER BY s.event_time DESC
+        """).collect()
+
+        for r in rows:
+            ws = str(r.workspace_id or "")
+            name = str(r.app_name or "")
+            if not name:
+                continue
+
+            # Parse the app spec → resources + multi-signal features (shared parser).
+            try:
+                spec = json.loads(r.spec) if r.spec else {}
+            except (json.JSONDecodeError, TypeError):
+                spec = {}
+            resources_out, app_features = _parse_app_resources(spec.get("resources") or [])
+            resource_endpoint = app_features["endpoint_names"][0] if app_features["endpoint_names"] else ""
+
+            config_dict = {
+                "url": "",
+                "app_id": "",
+                "deployment_type": "databricks_app",
+                "deployment_method": "app",
+                "sp_client_id": "",
+                "resources": resources_out,
+                "app_features": app_features,
+            }
+            if resource_endpoint:
+                config_dict["linked_endpoint"] = resource_endpoint
+
+            # Candidate app record — classified "unknown" here; resolve_apps() promotes
+            # it to agent_frontend_app when the linked endpoint is a genai_agent.
+            agents.append({
+                "agent_id": _make_id(name, ws),
+                "workspace_id": ws,
+                "name": name,
+                "type": _app_class_to_type("unknown"),
+                "endpoint_name": name,
+                "endpoint_status": "ACTIVE",
+                "model_name": "",
+                "served_entity_name": "",
+                "creator": str(r.creator or ""),
+                "description": "",
+                "config": json.dumps(config_dict),
+                "source": "apps_audit",
+                "is_extensive": True,
+                "workload_class": "unknown",
+                "subtype": None,
+                "framework": None,
+                "interface_task": None,
+                "uses_llm": None,
+                "linked_endpoint": resource_endpoint or None,
+                "confidence": "low",
+                "classified_by": "insufficient_signal",
+                "classifier_version": _CLASSIFIER_VERSION,
+                "raw_signals": json.dumps({"source_readable": False, "from": "apps_audit"}),
+            })
+
+        print(f"  App-served agents (audit logs): {len(agents)} candidate apps w/ serving-endpoint links")
+    except Exception as e:
+        print(f"  ERROR querying audit logs for apps: {e}")
+    return agents
+
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Cross-Workspace App Discovery (API Enumeration)
+# MAGIC ## Cross-Workspace App Discovery (API Enumeration — legacy, replaced by audit logs)
 
 # COMMAND ----------
 
@@ -1228,7 +1565,10 @@ print("=" * 60)
 all_agents = []
 all_agents.extend(discover_serving_endpoints())
 all_agents.extend(discover_apps())
-all_agents.extend(discover_apps_cross_workspace())
+# Cross-workspace apps via account-wide audit logs (replaces the per-workspace SP
+# fan-out, which yields ~0 coverage unless the SP is propagated to every workspace).
+# discover_apps_cross_workspace() is kept defined for optional propagated-SP use.
+all_agents.extend(discover_apps_from_audit_logs())
 all_agents.extend(discover_genie_spaces())
 all_agents.extend(discover_from_system_tables())
 all_agents.extend(discover_genie_from_audit_logs())
@@ -1261,7 +1601,7 @@ print(f"After persist filter: {len(all_agents)} rows")
 # Deduplicate: prefer API > system_table > audit_log sources.
 # For agents with the same agent_id, keep the best source.
 # Also deduplicate by (name, workspace_id) keeping the best source.
-_SOURCE_PRIORITY = {"api": 0, "user_api": 1, "cross_workspace_api": 2, "system_table": 3, "audit_log": 4}
+_SOURCE_PRIORITY = {"api": 0, "user_api": 1, "cross_workspace_api": 2, "system_table": 3, "audit_log": 4, "apps_audit": 5}
 
 def _source_rank(a):
     return _SOURCE_PRIORITY.get(a.get("source", ""), 99)
@@ -1290,7 +1630,7 @@ final = []
 for a in by_name_ws.values():
     ep = a.get("endpoint_name", "")
     ws = a.get("workspace_id", "")
-    if ep and a.get("type") != "genie_space" and a.get("type") != "custom_app":
+    if ep and a.get("type") not in ("genie_space", "custom_app"):
         key = (ep, ws)
         if key not in by_endpoint_ws or _source_rank(a) < _source_rank(by_endpoint_ws[key]):
             by_endpoint_ws[key] = a
