@@ -24,9 +24,29 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from backend.config import get_databricks_host, settings
+from backend.database import execute_query
 from backend.utils.auth import get_current_user, require_user, UserInfo
 
 logger = logging.getLogger(__name__)
+
+
+def _resolved_space_id() -> str:
+    """Genie space id, resolved with precedence:
+      1. GENIE_SPACE_ID env (explicit pin — wins), then
+      2. the workflow-provisioned id in billing_cache_meta (setup_genie_space task).
+    So a deployment auto-picks up the space the discovery workflow creates, with no
+    redeploy, while an explicit env pin still overrides. Fail-open → "" (tab hidden)."""
+    sid = (settings.genie_space_id or "").strip()
+    if sid:
+        return sid
+    try:
+        rows = execute_query(
+            "SELECT value_text FROM billing_cache_meta WHERE cache_key = 'genie_space_id'")
+        if rows and rows[0].get("value_text"):
+            return str(rows[0]["value_text"]).strip()
+    except Exception:
+        pass
+    return ""
 
 router = APIRouter(prefix="/genie", tags=["genie"], dependencies=[Depends(get_current_user)])
 
@@ -39,7 +59,7 @@ def _require_genie_enabled() -> None:
 
 
 def _space_id_or_503() -> str:
-    sid = (settings.genie_space_id or "").strip()
+    sid = _resolved_space_id()
     if not sid:
         raise HTTPException(status_code=503, detail="Genie space not configured (GENIE_SPACE_ID unset)")
     return sid
@@ -89,7 +109,7 @@ def _proxy(
 def get_space_info() -> dict:
     """Space metadata for the frontend (used for "open in new tab" link)."""
     _require_genie_enabled()
-    space_id = (settings.genie_space_id or "").strip()
+    space_id = _resolved_space_id()
     if not space_id:
         return {"available": False, "space_id": None, "space_url": None}
     host = get_databricks_host()

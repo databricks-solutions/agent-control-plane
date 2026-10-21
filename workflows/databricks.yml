@@ -47,6 +47,12 @@ variables:
   narrow_test_workspace_id:
     default: ""
     description: "If set, observability discovery only fans out to this single workspace_id. Use during SP rollout testing; leave empty for full fan-out."
+  genie_space_id:
+    default: ""
+    description: "Explicit Genie space pin for the app's Ask Genie tab. Leave empty to let the setup_genie_space task auto-provision one over the discovered tables and record it in billing_cache_meta (the app then resolves it dynamically). Set it to a hand-curated space id to pin that space and skip auto-provisioning."
+  genie_share_group:
+    default: "users"
+    description: "Group granted CAN_RUN on the auto-provisioned Genie space so app users can query it via OBO. Empty = don't share (only the creator/admins can query)."
   llm_classifier_endpoint:
     default: "databricks-claude-sonnet-5-5"
     description: "Foundation-model serving endpoint used by 12_classify_models (LLM tier) to classify the long tail of empty-task model names. Chosen by benchmark (30 real prod names vs an opus-5-5 reference): sonnet-5-5 scored 100% family / 93% subtype agreement with reliable JSON — small/cheap models (gpt-5-mini 50%, nano 60%) and OSS/reasoning models (gpt-oss, qwen, gemini-flash: unparseable JSON) were materially worse. Caching makes it a ~one-time backfill (~$1 for ~1,700 models), so accuracy > per-token price. Endpoints are per-workspace; leave empty to disable the LLM tier (artifact + regex + compute_type only)."
@@ -247,6 +253,24 @@ resources:
               lakebase_database: ${var.lakebase_database}
               lakebase_instance: ${var.lakebase_instance}
               lakebase_endpoint_path: ${var.lakebase_endpoint_path}
+          environment_key: default
+
+        - task_key: setup_genie_space
+          description: "Auto-provision the 'Agent Control Plane Analytics' Genie space over the discovered Delta tables and record its id in billing_cache_meta so the app's Ask Genie tab appears with no manual setup/redeploy. Idempotent (create-or-update), self-healing, best-effort (never fails the run)."
+          depends_on:
+            - task_key: sync_to_lakebase
+          notebook_task:
+            notebook_path: ./17_setup_genie_space.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              warehouse_id: ${var.warehouse_id}
+              lakebase_dns: ${var.lakebase_dns}
+              lakebase_database: ${var.lakebase_database}
+              lakebase_instance: ${var.lakebase_instance}
+              lakebase_endpoint_path: ${var.lakebase_endpoint_path}
+              genie_space_id: ${var.genie_space_id}
+              genie_share_group: ${var.genie_share_group}
           environment_key: default
 
       environments:
