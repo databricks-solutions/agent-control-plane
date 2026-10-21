@@ -159,6 +159,7 @@ _CLASS_TO_TYPE = {
     "llm": "llm",
     "multimodal": "multimodal",
     "traditional_ml": "ml_model",
+    "deep_learning": "ml_model",   # non-LLM neural models (CV / speech / bio / NLP)
     "unknown": "unknown",
 }
 
@@ -1007,14 +1008,19 @@ def resolve_apps(agents, window_days=30):
     print(f"  Apps resolved (multi-signal): {counts} (from {len(apps)} apps)")
 
 
+_ARTIFACT_SIGNALS = ("flavor", "loader", "signature")
+
+
 def apply_model_classification(agents):
-    """Serving Stage 3 (consumer): upgrade unresolved serving rows from the
-    `model_classification` side-channel table (produced by 12_classify_models).
+    """Serving Stage 3 (consumer): upgrade dormant serving rows from the unified
+    `model_classification` side-channel table (produced by 12_classify_models, which
+    classifies by artifact → name regex → LLM → compute_type).
 
     Decoupled + fail-open + upgrade-only: no-op if the table is absent/empty, never
-    overrides a high-confidence task/tile/feedback verdict, and only touches the
-    dormant `unknown` (and behavioral-medium) serving customs. The authoritative
-    artifact read happens in the producer, never here. Mutates `agents` in place.
+    overrides a high-confidence task/tile/feedback verdict, and only touches the dormant
+    `unknown` (and behavioral-medium) serving customs. Carries `subtype` and records the
+    deciding tier in `classified_by` (`artifact` | `name_regex` | `name_llm` |
+    `compute_type`). Mutates `agents` in place.
     """
     table = f"{CATALOG}.{SCHEMA}.model_classification"
     try:
@@ -1022,9 +1028,9 @@ def apply_model_classification(agents):
             print("  Stage 3: model_classification not present yet (no-op)")
             return
         rows = spark.sql(f"""
-            SELECT model_full_name, workload_class, framework, confidence
+            SELECT model_full_name, workload_class, subtype, framework, confidence, source_signal
             FROM {table}
-            WHERE probe_status = 'resolved' AND workload_class != 'unknown'
+            WHERE workload_class IS NOT NULL AND workload_class != 'unknown'
             QUALIFY ROW_NUMBER() OVER (
                 PARTITION BY model_full_name
                 ORDER BY CASE confidence WHEN 'high' THEN 0 WHEN 'med' THEN 1 ELSE 2 END
@@ -1034,35 +1040,47 @@ def apply_model_classification(agents):
         print(f"  Stage 3 model_classification unavailable (fail-open): {e}")
         return
 
-    lookup = {r.model_full_name: (r.workload_class, r.framework, r.confidence) for r in rows}
+    lookup = {r.model_full_name: (r.workload_class, r.subtype, r.framework, r.confidence, r.source_signal)
+              for r in rows}
     if not lookup:
         return
 
     upgraded = 0
     for a in agents:
-        # Don't override settled high-confidence verdicts (task/tile/feedback).
-        if a.get("confidence") == "high" and a.get("classified_by") in (
-                "task", "tile_metadata", "feedback_sibling"):
-            continue
-        if a.get("workload_class") not in ("unknown", "llm", "traditional_ml", "multimodal"):
+        # Don't override settled high-confidence verdicts (task/tile/feedback/behavior).
+        if a.get("confidence") == "high" and (
+                a.get("classified_by") in ("task", "tile_metadata", "feedback_sibling")
+                or str(a.get("classified_by") or "").startswith("behavior")):
             continue
         hit = lookup.get(a.get("model_name") or "")
         if not hit:
             continue
-        wc, fw, conf = hit
-        # Ignore stale/unrecognized producer verdicts (e.g. an older classifier's
-        # cached class) — leave the row as Stage 1/2 classified it.
-        if wc not in ("genai_agent", "llm", "multimodal", "traditional_ml"):
+        wc, sub, fw, conf, src = hit
+        if wc not in ("genai_agent", "llm", "multimodal", "traditional_ml", "deep_learning"):
             continue
+        cur = a.get("workload_class")
+        if src in _ARTIFACT_SIGNALS:
+            # Artifact is authoritative — may refine the dormant tail + behavioral-medium customs.
+            if cur not in ("unknown", "llm", "traditional_ml", "multimodal"):
+                continue
+        else:
+            # Name/LLM/compute_type are heuristic — only fill genuinely-`unknown` rows; never
+            # downgrade a Stage-1/2 verdict (e.g. a behavioral llm/high to traditional_ml/low).
+            if cur != "unknown":
+                continue
         a["workload_class"] = wc
-        a["type"] = _workload_to_type(wc, None)
+        if wc == "genai_agent":
+            # LLM flagged this empty-task model as an agent; its ML `subtype` doesn't apply.
+            a["type"], a["subtype"] = "custom_agent", None
+        else:
+            a["type"], a["subtype"] = _workload_to_type(wc, None), (sub or a.get("subtype"))
         a["framework"] = fw or a.get("framework")
-        a["confidence"] = conf or "high"
-        a["classified_by"] = "artifact"
+        a["confidence"] = conf or "low"
+        a["classified_by"] = "artifact" if src in _ARTIFACT_SIGNALS else (src or "artifact")
         if wc in ("llm", "multimodal"):
             a["uses_llm"] = True
         upgraded += 1
-    print(f"  Stage 3 artifact: upgraded {upgraded} rows ({len(lookup)} resolved models in table)")
+    print(f"  Stage 3: upgraded {upgraded} rows ({len(lookup)} classified models in table)")
 
 
 def discover_genie_from_audit_logs() -> List[Dict[str, Any]]:
@@ -1583,8 +1601,9 @@ enrich_unknown_with_behavior(all_agents)
 # classification so the genai_agent set is complete).
 resolve_apps(all_agents)
 
-# Stage 3: upgrade dormant `unknown` serving rows from the model_classification
-# side-channel (fail-open, no-op until 12_classify_models has populated it).
+# Stage 3: upgrade dormant `unknown` serving rows from the unified model_classification
+# side-channel (artifact → name regex → LLM → compute_type). Fail-open, no-op until
+# 12_classify_models has populated it.
 apply_model_classification(all_agents)
 
 # Pre-filter classification distribution (the Stage-1 flip diff vs the old taxonomy)
