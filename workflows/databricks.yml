@@ -47,6 +47,9 @@ variables:
   narrow_test_workspace_id:
     default: ""
     description: "If set, observability discovery only fans out to this single workspace_id. Use during SP rollout testing; leave empty for full fan-out."
+  llm_classifier_endpoint:
+    default: "databricks-claude-sonnet-5-5"
+    description: "Foundation-model serving endpoint used by 12_classify_models (LLM tier) to classify the long tail of empty-task model names. Chosen by benchmark (30 real prod names vs an opus-5-5 reference): sonnet-5-5 scored 100% family / 93% subtype agreement with reliable JSON — small/cheap models (gpt-5-mini 50%, nano 60%) and OSS/reasoning models (gpt-oss, qwen, gemini-flash: unparseable JSON) were materially worse. Caching makes it a ~one-time backfill (~$1 for ~1,700 models), so accuracy > per-token price. Endpoints are per-workspace; leave empty to disable the LLM tier (artifact + regex + compute_type only)."
 
 resources:
   jobs:
@@ -165,12 +168,13 @@ resources:
           environment_key: default
 
         - task_key: classify_models
-          description: "Serving Stage 3: probe MLflow artifact (flavor/loader/signature) for empty-task custom models → model_classification (Delta). Decoupled side-channel — discover_agents reads it fail-open + upgrade-only, never waits on it."
+          description: "Serving Stage 3: classify empty-task custom models → model_classification (Delta) via a tiered classifier — MLflow artifact (flavor/loader/signature) → name regex → LLM (small FM endpoint) → compute_type. Decoupled side-channel — discover_agents reads it fail-open + upgrade-only, never waits on it; cached per (model,version)."
           notebook_task:
             notebook_path: ./12_classify_models.py
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              llm_endpoint: ${var.llm_classifier_endpoint}
           environment_key: default
 
         - task_key: discover_budgets
