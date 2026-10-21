@@ -12,7 +12,46 @@ class TestGenieSpaceInfo:
             assert r.status_code == 404
 
     def test_returns_available_false_when_no_space_id(self, app_client):
-        with patch("backend.api.genie.settings") as mock_settings:
+        with patch("backend.api.genie.settings") as mock_settings, \
+             patch("backend.api.genie.execute_query", return_value=[]):
+            mock_settings.feature_genie_enabled = True
+            mock_settings.genie_space_id = ""
+            r = app_client.get("/api/v1/genie/space-info")
+            assert r.status_code == 200
+            assert r.json() == {"available": False, "space_id": None, "space_url": None}
+
+    def test_space_info_uses_cache_meta_when_env_empty(self, app_client):
+        """Env pin empty → resolve the workflow-provisioned id from billing_cache_meta
+        (the PR's core behavior: no redeploy needed). value is stripped."""
+        host = "https://fevm-serverless-b4nc10.cloud.databricks.com"
+        with patch("backend.api.genie.settings") as mock_settings, \
+             patch("backend.api.genie.get_databricks_host", return_value=host), \
+             patch("backend.api.genie.execute_query", return_value=[{"value_text": " abc123 "}]):
+            mock_settings.feature_genie_enabled = True
+            mock_settings.genie_space_id = ""
+            r = app_client.get("/api/v1/genie/space-info")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["available"] is True
+            assert body["space_id"] == "abc123"
+            assert body["space_url"] == f"{host}/genie/rooms/abc123"
+
+    def test_env_pin_overrides_cache_meta(self, app_client):
+        """An explicit GENIE_SPACE_ID wins over the meta table (execute_query not consulted)."""
+        host = "https://x.cloud.databricks.com"
+        with patch("backend.api.genie.settings") as mock_settings, \
+             patch("backend.api.genie.get_databricks_host", return_value=host), \
+             patch("backend.api.genie.execute_query", side_effect=AssertionError("should not be called")):
+            mock_settings.feature_genie_enabled = True
+            mock_settings.genie_space_id = "pinned-id"
+            r = app_client.get("/api/v1/genie/space-info")
+            assert r.status_code == 200
+            assert r.json()["space_id"] == "pinned-id"
+
+    def test_space_info_unavailable_when_cache_query_raises(self, app_client):
+        """The meta-table lookup fails open → available:false, not a 500."""
+        with patch("backend.api.genie.settings") as mock_settings, \
+             patch("backend.api.genie.execute_query", side_effect=Exception("db down")):
             mock_settings.feature_genie_enabled = True
             mock_settings.genie_space_id = ""
             r = app_client.get("/api/v1/genie/space-info")
