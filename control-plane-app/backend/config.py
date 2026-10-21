@@ -32,8 +32,13 @@ class Settings(BaseSettings):
     # For local dev, set CORS_ORIGINS=http://localhost:3000,http://localhost:5173 in .env
     cors_origins: List[str] = []
 
-    # Feature flags — default OFF, flip via env var to dark-launch into prod.
-    feature_genie_enabled: bool = False
+    # Feature flags.
+    # Genie Ask is ON by default; it is still gated on a reachable space — the tab
+    # only renders when a GENIE_SPACE_ID is configured (get_space_info →
+    # available=False otherwise), so "on by default" means "on wherever a space is
+    # set" and shows nothing where one isn't. Set FEATURE_GENIE_ENABLED=false to
+    # force it off regardless of a configured space.
+    feature_genie_enabled: bool = True
 
     # OBO (On-Behalf-Of user auth). Default ON: the app expects Databricks Apps
     # to forward each caller's ``x-forwarded-access-token`` and enforces per-user

@@ -84,7 +84,7 @@ env:
   - name: DATABRICKS_ACCOUNT_ID
     value: "${DATABRICKS_ACCOUNT_ID:-}"
   - name: FEATURE_GENIE_ENABLED
-    value: "${FEATURE_GENIE_ENABLED:-false}"
+    value: "${FEATURE_GENIE_ENABLED:-true}"
   - name: GENIE_SPACE_ID
     value: "${GENIE_SPACE_ID:-}"
   - name: BUDGET_SP_SECRET_SCOPE
