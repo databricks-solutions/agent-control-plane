@@ -248,16 +248,48 @@ def _get_host() -> str:
     return host
 
 
+_workspace_id_cache: Optional[str] = None
+
+
 def _get_workspace_id() -> str:
-    """Get the numeric workspace ID from the notebook context."""
+    """Get the numeric workspace ID of the current workspace.
+
+    The notebook-context ``orgId`` tag is not readable on serverless compute,
+    so also try the cluster usage tag and the ``x-databricks-org-id`` response
+    header before the host-hash fallback. A hash fallback stores API-sourced
+    rows under a workspace_id that matches no other source, which breaks
+    dedup against audit-log rows and hides them from workspace-scoped users.
+    """
+    global _workspace_id_cache
+    if _workspace_id_cache:
+        return _workspace_id_cache
+
+    org_id = ""
     try:
         ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
         org_id = ctx.tags().get("orgId").getOrElse(lambda: "")
-        if org_id:
-            return str(org_id)
     except Exception:
         pass
+    if not org_id:
+        try:
+            org_id = spark.conf.get("spark.databricks.clusterUsageTags.orgId", "")
+        except Exception:
+            pass
+    if not org_id:
+        try:
+            resp = httpx.get(
+                f"{_get_host()}/api/2.0/preview/scim/v2/Me",
+                headers=_get_headers(), timeout=_REST_TIMEOUT,
+            )
+            org_id = resp.headers.get("x-databricks-org-id", "")
+        except Exception as e:
+            print(f"  WARNING: could not read x-databricks-org-id: {e}")
+    if org_id:
+        _workspace_id_cache = str(org_id)
+        return _workspace_id_cache
+
     # Fallback: hash the host
+    print("  WARNING: workspace ID unresolved — falling back to a host hash")
     return hashlib.sha256(_get_host().encode()).hexdigest()[:16]
 
 # COMMAND ----------
@@ -1625,12 +1657,40 @@ _SOURCE_PRIORITY = {"api": 0, "user_api": 1, "cross_workspace_api": 2, "system_t
 def _source_rank(a):
     return _SOURCE_PRIORITY.get(a.get("source", ""), 99)
 
+_GENIE_USAGE_KEYS = ("conversation_count", "unique_users", "tables", "warehouse_id")
+
+def _merge_genie_usage(keep, drop):
+    """Carry audit-log usage stats onto the Genie row that wins dedup.
+
+    The Genie list API has the real title but no conversation/user counts;
+    the audit-log row has the counts but only a placeholder name.
+    """
+    if keep.get("type") != "genie_space" or drop.get("type") != "genie_space":
+        return
+    try:
+        keep_cfg = json.loads(keep.get("config") or "{}")
+        drop_cfg = json.loads(drop.get("config") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return
+    for k in _GENIE_USAGE_KEYS:
+        if k in drop_cfg and k not in keep_cfg:
+            keep_cfg[k] = drop_cfg[k]
+    keep["config"] = json.dumps(keep_cfg)
+    if not keep.get("description") and drop.get("description"):
+        keep["description"] = drop["description"]
+
 # First pass: dedup by agent_id (keeps best source)
 by_id = {}
 for a in all_agents:
     aid = a["agent_id"]
-    if aid not in by_id or _source_rank(a) < _source_rank(by_id[aid]):
+    prev = by_id.get(aid)
+    if prev is None:
         by_id[aid] = a
+    elif _source_rank(a) < _source_rank(prev):
+        _merge_genie_usage(a, prev)
+        by_id[aid] = a
+    else:
+        _merge_genie_usage(prev, a)
 
 # Second pass: dedup by (name, workspace_id) keeping best source.
 # This eliminates duplicate names across discovery sources (e.g. an agent

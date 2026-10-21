@@ -79,6 +79,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   var so they aren't silently dropped.
 
 ### Fixed
+- **Genie spaces on serverless keep their real title and workspace.** On
+  serverless compute `01_discover_agents` couldn't read the notebook-context
+  `orgId`, so `_get_workspace_id()` fell back to a hash of the host URL and every
+  API-sourced row (e.g. `/api/2.0/genie/spaces`) was stored under that phantom
+  `workspace_id`. Those rows never deduped against the audit-log rows for the
+  same space, so each space appeared twice — titled, under a fake workspace, and
+  as `Genie Space <id>` under the real one — and `strict`-mode users only saw
+  the placeholder. The ID is now also resolved from
+  `spark.databricks.clusterUsageTags.orgId` and the `x-databricks-org-id` header
+  (SCIM `/Me`) before the hash fallback, and when the Genie API row wins dedup it
+  keeps the audit-log usage stats (`conversation_count`, `unique_users`,
+  `tables`, `warehouse_id`).
 - **Workspace admins no longer see "No workspace access".** `get_allowed_workspace_ids`
   resolved a non-account-admin's scope solely from the `workspace_admins` cache
   (populated via the account permission-assignments API). When that cache is empty
