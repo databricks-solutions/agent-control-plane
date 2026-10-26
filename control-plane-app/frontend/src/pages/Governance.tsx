@@ -165,7 +165,7 @@ export default function GovernancePage() {
         <div>
           <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Governance</h2>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Cost attribution from Databricks system tables, token usage & guardrails
+            Cost attribution and token usage from Databricks system tables
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -185,7 +185,7 @@ export default function GovernancePage() {
               onClick={() => refreshMutation.mutate(90)}
               disabled={refreshMutation.isPending || cacheStatus?.is_refreshing}
               className="p-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 transition-colors"
-              title="Updates the shared cache, not only the selected workspace"
+              title="Reload the latest synced data. Billing is recomputed by the discovery workflow every 30 min (system.billing.usage itself lags ~24h)."
             >
               <RefreshCw className={`w-4 h-4 ${refreshMutation.isPending ? 'animate-spin text-blue-500' : 'text-gray-500 dark:text-gray-400'}`} />
             </button>
@@ -292,7 +292,7 @@ function OverviewTab({ data, loading }: { data?: BillingPageData; loading: boole
         />
         <KpiCard
           title="Avg Daily Cost"
-          value={fmtCost(avgDailyCost)}
+          value={loading ? '…' : fmtCost(avgDailyCost)}
         />
       </div>
 
@@ -328,7 +328,7 @@ function OverviewTab({ data, loading }: { data?: BillingPageData; loading: boole
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Cost by SKU / Provider</CardTitle>
+            <CardTitle className="text-base">Cost by SKU</CardTitle>
           </CardHeader>
           <CardContent>
             {providerPieData.length ? (

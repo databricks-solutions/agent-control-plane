@@ -2,7 +2,6 @@ import { useState, useMemo, Fragment } from 'react'
 import { useQueryClient, useIsFetching } from '@tanstack/react-query'
 import {
   useAgentsFull,
-  useRecentRequests,
   useAllPrincipals,
   useResourcePermissions,
   useGrantPermission,
@@ -92,7 +91,6 @@ export default function AdminPage() {
   const { data: allAgents } = useAllAgentsMerged()
   const { data: discoveryStatus } = useDiscoveryStatus()
   const { data: gatewayEndpoints } = useEndpointsWithPermissions()
-  const { data: recentData } = useRecentRequests(100)
   const { data: principals, isLoading: principalsLoading } = useAllPrincipals(analyticsDays)
   const grantMutation = useGrantPermission()
   const revokeMutation = useRevokePermission()
@@ -106,7 +104,6 @@ export default function AdminPage() {
   const setAccessMode = useSetAccessMode()
   const syncAgents = useSyncAgents()
 
-  const requests = recentData?.data || []
 
   /* ── user analytics hook ────────────────────────────────────── */
   const { data: analyticsData } = useUserAnalyticsPageData(analyticsDays)
@@ -219,21 +216,14 @@ export default function AdminPage() {
     return Array.from(map.values())
   }, [agents])
 
-  /* ── derive users (from recent requests) ────────────────────── */
-  const users = useMemo(() => {
-    const map = new Map<string, { userId: string; requestCount: number; agents: Set<string>; lastSeen: string }>()
-    requests.forEach((r: any) => {
-      if (!r.user_id) return
-      const entry = map.get(r.user_id) || { userId: r.user_id, requestCount: 0, agents: new Set<string>(), lastSeen: '' }
-      entry.requestCount++
-      if (r.agent_id) entry.agents.add(r.agent_id)
-      if (!entry.lastSeen || r.timestamp > entry.lastSeen) entry.lastSeen = r.timestamp
-      map.set(r.user_id, entry)
-    })
-    return Array.from(map.values())
-      .map(u => ({ ...u, agents: Array.from(u.agents) }))
-      .sort((a, b) => b.requestCount - a.requestCount)
-  }, [requests])
+  /* ── derive users (account-wide serving usage, user_analytics_daily) ─ */
+  // Previously derived from request_logs, which nothing writes — so it was always empty.
+  const users = useMemo(() => topUsers.map((u: any) => ({
+    userId: String(u.user_id || ''),
+    requestCount: Number(u.request_count || 0),
+    agents: (u.agent_list || []) as string[],
+    lastSeen: String(u.last_active || ''),
+  })).filter(u => u.userId), [topUsers])
 
   /* ── resource options for dropdown ──────────────────────────── */
   const resourceOptions = useMemo(() => {
@@ -364,8 +354,7 @@ export default function AdminPage() {
     if (k === 'request_count') return Number(r.request_count || 0)
     if (k === 'agents_used') return Number(r.agents_used || 0)
     if (k === 'total_tokens') return Number(r.total_tokens || 0)
-    if (k === 'total_cost') return Number(r.total_cost || 0)
-    if (k === 'avg_latency_ms') return Number(r.avg_latency_ms || 0)
+    if (k === 'total_cost') return r.total_cost == null ? -1 : Number(r.total_cost)
     if (k === 'last_active') return r.last_active || ''
     return ''
   }), [filteredUaUsers, uaUserSort.sort])
@@ -549,7 +538,7 @@ export default function AdminPage() {
               <Card>
                 <CardHeader><CardTitle className="text-base">Users / Consumers</CardTitle></CardHeader>
                 <CardContent>
-                  <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">Identities that have interacted with agents (from recent requests)</p>
+                  <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">Identities that queried serving endpoints in the selected period (account-wide)</p>
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead><tr className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
@@ -1024,8 +1013,7 @@ export default function AdminPage() {
                     <SortableHeader label="Requests" sortKey="request_count" current={uaUserSort.sort} onToggle={uaUserSort.toggle} align="right" />
                     <SortableHeader label="Agents" sortKey="agents_used" current={uaUserSort.sort} onToggle={uaUserSort.toggle} align="right" />
                     <SortableHeader label="Tokens" sortKey="total_tokens" current={uaUserSort.sort} onToggle={uaUserSort.toggle} align="right" />
-                    <SortableHeader label="Cost" sortKey="total_cost" current={uaUserSort.sort} onToggle={uaUserSort.toggle} align="right" />
-                    <SortableHeader label="Avg Latency" sortKey="avg_latency_ms" current={uaUserSort.sort} onToggle={uaUserSort.toggle} align="right" />
+                    <SortableHeader label="Attributed Cost" sortKey="total_cost" current={uaUserSort.sort} onToggle={uaUserSort.toggle} align="right" />
                     <SortableHeader label="Last Active" sortKey="last_active" current={uaUserSort.sort} onToggle={uaUserSort.toggle} />
                     <th className="pb-2 font-medium">Agent List</th>
                   </tr></thead>
@@ -1036,13 +1024,12 @@ export default function AdminPage() {
                         <td className="py-2.5 text-right font-medium">{fmtNumber(u.request_count)}</td>
                         <td className="py-2.5 text-right">{u.agents_used}</td>
                         <td className="py-2.5 text-right">{fmtNumber(u.total_tokens)}</td>
-                        <td className="py-2.5 text-right">{fmtCost(u.total_cost)}</td>
-                        <td className="py-2.5 text-right">{u.avg_latency_ms ? `${Math.round(u.avg_latency_ms)}ms` : '—'}</td>
+                        <td className="py-2.5 text-right" title={u.total_cost == null ? 'No Unity Gateway-attributed spend (legacy endpoint traffic is not attributed per user)' : undefined}>{u.total_cost == null ? '—' : fmtCost(u.total_cost)}</td>
                         <td className="py-2.5 text-xs text-gray-500 dark:text-gray-400">{u.last_active ? new Date(u.last_active).toLocaleDateString() : '—'}</td>
                         <td className="py-2.5"><div className="flex flex-wrap gap-1">{u.agent_list.slice(0, 3).map((a: string) => (<Badge key={a} variant="default" className="text-xs">{a}</Badge>))}{u.agent_list.length > 3 && (<Badge variant="info" className="text-xs">+{u.agent_list.length - 3}</Badge>)}</div></td>
                       </tr>
                     ))}
-                    {sortedUaUsers.length === 0 && (<tr><td colSpan={8} className="py-8 text-center text-gray-400">No user data available</td></tr>)}
+                    {sortedUaUsers.length === 0 && (<tr><td colSpan={7} className="py-8 text-center text-gray-400">No user data available</td></tr>)}
                   </tbody>
                 </table>
               </div>

@@ -1587,7 +1587,7 @@ with kb_billing_conn.cursor() as cur:
             print(f"  DDL warning: {e}")
     kb_billing_conn.commit()
 
-# Sync from Delta (populated by 07_discover_kb_billing task)
+# Sync from Delta (populated by 03_discover_knowledge_bases task)
 print(f"▸ Syncing KB billing from Delta: {KB_BILLING_DELTA} ...")
 try:
     with kb_billing_conn.cursor() as cur:

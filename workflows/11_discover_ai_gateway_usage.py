@@ -172,36 +172,78 @@ UAG_FALLBACK_SCHEMA = StructType([
 
 # COMMAND ----------
 
+_RATE_LIMIT_BACKOFF_S = (30, 60, 120)
+# Whether the most recent _execute_sql call FAILED (vs succeeded with 0 rows). A
+# failed query returns [] like an empty one, so each block consults this before
+# overwriting its table — see _empty_or_keep.
+_LAST_QUERY_FAILED = False
+_KEPT_PREVIOUS: List[str] = []
+
+
+def _is_rate_limited(msg: str) -> bool:
+    m = (msg or "").upper()
+    return "429" in m or "REQUEST_LIMIT_EXCEEDED" in m or "TOO MANY REQUESTS" in m
+
+
 def _execute_sql(sql: str) -> List[Dict[str, Any]]:
+    global _LAST_QUERY_FAILED
+    _LAST_QUERY_FAILED = True  # cleared only on success
     if not WAREHOUSE_ID:
         print("  No warehouse ID")
         return []
     w = WorkspaceClient()
     body = {"warehouse_id": WAREHOUSE_ID, "statement": sql,
             "wait_timeout": "50s", "disposition": "INLINE", "format": "JSON_ARRAY"}
-    try:
-        resp = w.api_client.do("POST", "/api/2.0/sql/statements", body=body)
-    except Exception as exc:
-        print(f"  SQL failed: {exc}")
-        return []
-    status = resp.get("status", {}).get("state", "")
-    sid = resp.get("statement_id", "")
-    if status in ("PENDING", "RUNNING") and sid:
-        for _ in range(20):
-            time.sleep(3)
-            try:
-                resp = w.api_client.do("GET", f"/api/2.0/sql/statements/{sid}")
-            except Exception:
+    # system.ai_gateway.usage is served over Delta Sharing; under org-wide UC load a
+    # statement can fail with 429 / UC_REQUEST_LIMIT_EXCEEDED. Transient → back off
+    # and resubmit before giving up.
+    for attempt in range(len(_RATE_LIMIT_BACKOFF_S) + 1):
+        try:
+            resp = w.api_client.do("POST", "/api/2.0/sql/statements", body=body)
+        except Exception as exc:
+            if attempt < len(_RATE_LIMIT_BACKOFF_S) and _is_rate_limited(str(exc)):
+                print(f"  rate-limited on submit; retrying in {_RATE_LIMIT_BACKOFF_S[attempt]}s")
+                time.sleep(_RATE_LIMIT_BACKOFF_S[attempt])
                 continue
-            status = resp.get("status", {}).get("state", "")
-            if status not in ("PENDING", "RUNNING"):
-                break
+            print(f"  SQL failed: {exc}")
+            return []
+        status = resp.get("status", {}).get("state", "")
+        sid = resp.get("statement_id", "")
+        if status in ("PENDING", "RUNNING") and sid:
+            for _ in range(20):
+                time.sleep(3)
+                try:
+                    resp = w.api_client.do("GET", f"/api/2.0/sql/statements/{sid}")
+                except Exception:
+                    continue
+                status = resp.get("status", {}).get("state", "")
+                if status not in ("PENDING", "RUNNING"):
+                    break
+        msg = str(resp.get("status", {}).get("error", {}).get("message", ""))
+        if status == "FAILED" and attempt < len(_RATE_LIMIT_BACKOFF_S) and _is_rate_limited(msg):
+            print(f"  rate-limited (429); retrying in {_RATE_LIMIT_BACKOFF_S[attempt]}s")
+            time.sleep(_RATE_LIMIT_BACKOFF_S[attempt])
+            continue
+        break
     if status != "SUCCEEDED":
-        err = resp.get("status", {}).get("error", {})
-        print(f"  SQL {status}: {err.get('message', '')[:300]}")
+        print(f"  SQL {status}: {msg[:300]}")
         return []
+    _LAST_QUERY_FAILED = False
     cols = [c["name"] for c in resp.get("manifest", {}).get("schema", {}).get("columns", [])]
     return [dict(zip(cols, row)) for row in resp.get("result", {}).get("data_array", [])]
+
+
+def _empty_or_keep(schema, table: str) -> None:
+    """Called when a block got no rows. If the query genuinely returned 0 rows,
+    overwrite with an empty table (truthful). If it FAILED (or raised), keep the
+    previous snapshot instead — one transient error must not blank a dashboard
+    card and fail the smoke check. On a first run (no table yet) write the empty
+    table anyway so downstream sync/smoke find it."""
+    if _LAST_QUERY_FAILED and spark.catalog.tableExists(table):
+        _KEPT_PREVIOUS.append(table.split(".")[-1])
+        print(f"  ↺ query failed — keeping previous snapshot of {table}")
+        return
+    spark.createDataFrame([], schema).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(table)
 
 # COMMAND ----------
 
@@ -255,7 +297,7 @@ if rows_raw:
             for r in rows_raw]
     spark.createDataFrame(rows, UAG_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_TABLE)
 else:
-    spark.createDataFrame([], UAG_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_TABLE)
+    _empty_or_keep(UAG_SCHEMA, UAG_TABLE)
 print(f"✅ Wrote {len(rows_raw)} rows to {UAG_TABLE}")
 
 # COMMAND ----------
@@ -336,7 +378,7 @@ if bd_rows:
             for r in bd_rows]
     spark.createDataFrame(rows, UAG_BREAKDOWN_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_BREAKDOWN_TABLE)
 else:
-    spark.createDataFrame([], UAG_BREAKDOWN_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_BREAKDOWN_TABLE)
+    _empty_or_keep(UAG_BREAKDOWN_SCHEMA, UAG_BREAKDOWN_TABLE)
 print(f"✅ Wrote {len(bd_rows)} rows to {UAG_BREAKDOWN_TABLE}")
 
 # COMMAND ----------
@@ -366,7 +408,7 @@ if ts_rows_raw:
             for r in ts_rows_raw]
     spark.createDataFrame(rows, UAG_TIMESERIES_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_TIMESERIES_TABLE)
 else:
-    spark.createDataFrame([], UAG_TIMESERIES_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_TIMESERIES_TABLE)
+    _empty_or_keep(UAG_TIMESERIES_SCHEMA, UAG_TIMESERIES_TABLE)
 print(f"✅ Wrote {len(ts_rows_raw)} rows to {UAG_TIMESERIES_TABLE}")
 
 # COMMAND ----------
@@ -404,7 +446,7 @@ if ca_rows_raw:
             for r in ca_rows_raw]
     spark.createDataFrame(rows, UAG_CODING_AGENT_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_CODING_AGENT_TABLE)
 else:
-    spark.createDataFrame([], UAG_CODING_AGENT_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_CODING_AGENT_TABLE)
+    _empty_or_keep(UAG_CODING_AGENT_SCHEMA, UAG_CODING_AGENT_TABLE)
 print(f"✅ Wrote {len(ca_rows_raw)} rows to {UAG_CODING_AGENT_TABLE}")
 
 # COMMAND ----------
@@ -441,7 +483,7 @@ if mcp_rows_raw:
             for r in mcp_rows_raw]
     spark.createDataFrame(rows, UAG_MCP_TOOL_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_MCP_TOOL_TABLE)
 else:
-    spark.createDataFrame([], UAG_MCP_TOOL_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_MCP_TOOL_TABLE)
+    _empty_or_keep(UAG_MCP_TOOL_SCHEMA, UAG_MCP_TOOL_TABLE)
 print(f"✅ Wrote {len(mcp_rows_raw)} rows to {UAG_MCP_TOOL_TABLE}")
 
 # COMMAND ----------
@@ -489,7 +531,7 @@ if gr_rows_raw:
             for r in gr_rows_raw]
     spark.createDataFrame(rows, UAG_GUARDRAIL_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_GUARDRAIL_TABLE)
 else:
-    spark.createDataFrame([], UAG_GUARDRAIL_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_GUARDRAIL_TABLE)
+    _empty_or_keep(UAG_GUARDRAIL_SCHEMA, UAG_GUARDRAIL_TABLE)
 print(f"✅ Wrote {len(gr_rows_raw)} rows to {UAG_GUARDRAIL_TABLE}")
 
 # COMMAND ----------
@@ -525,7 +567,7 @@ if th_rows_raw:
             for r in th_rows_raw]
     spark.createDataFrame(rows, UAG_THROTTLING_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_THROTTLING_TABLE)
 else:
-    spark.createDataFrame([], UAG_THROTTLING_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_THROTTLING_TABLE)
+    _empty_or_keep(UAG_THROTTLING_SCHEMA, UAG_THROTTLING_TABLE)
 print(f"✅ Wrote {len(th_rows_raw)} rows to {UAG_THROTTLING_TABLE}")
 
 # COMMAND ----------
@@ -568,12 +610,12 @@ if fb_rows_raw:
             for r in fb_rows_raw]
     spark.createDataFrame(rows, UAG_FALLBACK_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_FALLBACK_TABLE)
 else:
-    spark.createDataFrame([], UAG_FALLBACK_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_FALLBACK_TABLE)
+    _empty_or_keep(UAG_FALLBACK_SCHEMA, UAG_FALLBACK_TABLE)
 print(f"✅ Wrote {len(fb_rows_raw)} rows to {UAG_FALLBACK_TABLE}")
 
 # COMMAND ----------
 
-result = {"status": "success", "uag_endpoint_rows": len(rows_raw), "uag_breakdown_rows": len(bd_rows),
+result = {"status": "success", "kept_previous": _KEPT_PREVIOUS, "uag_endpoint_rows": len(rows_raw), "uag_breakdown_rows": len(bd_rows),
           "uag_mcp_tool_rows": len(mcp_rows_raw), "uag_guardrail_rows": len(gr_rows_raw),
           "uag_timeseries_rows": len(ts_rows_raw), "uag_coding_agent_rows": len(ca_rows_raw),
           "uag_throttling_rows": len(th_rows_raw), "uag_fallback_rows": len(fb_rows_raw),

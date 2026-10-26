@@ -34,6 +34,7 @@ import {
   useAppConfig,
   useRefreshGateway,
   useCurrentUser,
+  useSeesAccountWide,
 } from '@/api/hooks'
 import { RefreshButton } from '@/components/RefreshButton'
 import { formatAsOf } from '@/lib/formatters'
@@ -82,6 +83,16 @@ const baseTabs = [
 ] as const
 
 /** Compact USD formatter for budget caps/spend (matches the Governance style). */
+/** Empty-state copy for account-wide views the server suppresses for scoped users —
+ *  so "no data" isn't misread as "no traffic". */
+function RestrictedNotice() {
+  return (
+    <div className="py-12 text-center text-gray-400 dark:text-gray-500">
+      This view is account-wide, so it's only shown to account admins (or when the app's access mode is <em>open</em>).
+    </div>
+  )
+}
+
 function fmtCost(v: number): string {
   if (v >= 1000) return `$${(v / 1000).toFixed(1)}k`
   if (v >= 1) return `$${v.toFixed(2)}`
@@ -126,7 +137,7 @@ export default function AIGatewayPage() {
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
             Manage, monitor and govern serving endpoints across your workspace&nbsp;
             <a
-              href="https://docs.databricks.com/aws/en/ai-gateway/overview-beta"
+              href="https://docs.databricks.com/aws/en/ai-gateway/"
               target="_blank"
               rel="noopener noreferrer"
               className="text-blue-600 hover:underline inline-flex items-center gap-0.5"
@@ -262,6 +273,7 @@ type BudgetRow = UagBudgetStatus['budgets'][number]
 function BudgetsTab() {
   const { data, isLoading } = useUagBudgetStatus()
   const { data: user } = useCurrentUser()
+  const seesAccountWide = useSeesAccountWide()
   const canManage = !!user?.is_account_admin
   const budgets = data?.budgets ?? []
   const totals = data?.totals ?? {}
@@ -340,6 +352,8 @@ function BudgetsTab() {
           )}
           {isLoading ? (
             <div className="py-12 text-center text-gray-400 dark:text-gray-500">Loading…</div>
+          ) : !hasData && seesAccountWide === false ? (
+            <RestrictedNotice />
           ) : !hasData ? (
             <div className="py-12 text-center text-gray-400 dark:text-gray-500">
               No budgets found — either none are configured in this account, or the app has no
@@ -943,6 +957,7 @@ function EndpointInventorySection() {
 
 function UagV2Section() {
   const { data: uag, isLoading } = useUagV2Usage()
+  const seesAccountWide = useSeesAccountWide()
   const uagSort = useSort('request_count', 'desc')
   const [uagPage, setUagPage] = useState(0)
   const [uagPageSize, setUagPageSize] = useState(10)
@@ -980,9 +995,11 @@ function UagV2Section() {
         <CardContent>
           {isLoading ? (
             <div className="py-12 text-center text-gray-400 dark:text-gray-500">Loading…</div>
+          ) : !hasData && seesAccountWide === false ? (
+            <RestrictedNotice />
           ) : !hasData ? (
             <div className="py-12 text-center text-gray-400 dark:text-gray-500">
-              No Unity Gateway usage yet — either no gateway-routed traffic in this workspace, or the discovery workflow hasn't synced <code>system.ai_gateway.usage</code> yet.
+              No Unity Gateway usage yet — either no gateway-routed traffic in this account, or the discovery workflow hasn't synced <code>system.ai_gateway.usage</code> yet.
             </div>
           ) : (
             <>
@@ -1499,6 +1516,7 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(10)
   const { sort, toggle } = useSort('name', 'asc')
+  const seesAccountWide = useSeesAccountWide()
 
   // Usage data
   const { data: summary, isLoading: usageLoading } = useGatewayUsageSummary(days)
@@ -1617,7 +1635,7 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
                   <SortableHeader label="Name" sortKey="name" current={sort} onToggle={toggle} />
                   <SortableHeader label="Task" sortKey="task" current={sort} onToggle={toggle} />
                   <SortableHeader label="Status" sortKey="state" current={sort} onToggle={toggle} />
-                  <SortableHeader label="Unity Gateway" sortKey="ai_gateway" current={sort} onToggle={toggle} />
+                  <SortableHeader label="Endpoint AI Gateway" sortKey="ai_gateway" current={sort} onToggle={toggle} />
                   <SortableHeader label="Creator" sortKey="creator" current={sort} onToggle={toggle} />
                   <SortableHeader label="Served Entities" sortKey="served_entities" current={sort} onToggle={toggle} />
                 </tr>
@@ -1743,7 +1761,7 @@ function OverviewSection({ endpoints, overview, workspaceUrl, loading, searchQue
                   </tr>
                 ))}
                 {sortedUsage.length === 0 && (
-                  <tr><td colSpan={7} className="py-8 text-center text-gray-400 dark:text-gray-500">{usageLoading ? 'Loading…' : 'No usage data'}</td></tr>
+                  <tr><td colSpan={7} className="py-8 text-center text-gray-400 dark:text-gray-500">{usageLoading ? 'Loading…' : seesAccountWide === false ? 'Account-wide usage is only shown to account admins' : 'No usage data'}</td></tr>
                 )}
               </tbody>
             </table>
@@ -2436,7 +2454,7 @@ function RateLimitsAndGuardrailsSection() {
         </CardHeader>
         <CardContent>
           <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
-            Rate limits configured via Unity Gateway on serving endpoints.
+            Rate limits configured on serving endpoints via the legacy (per-endpoint) AI Gateway.
           </p>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -2478,7 +2496,7 @@ function RateLimitsAndGuardrailsSection() {
         </CardHeader>
         <CardContent>
           <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
-            Safety guardrails configured via Unity Gateway to protect inputs and outputs.
+            Safety guardrails configured on serving endpoints via the legacy (per-endpoint) AI Gateway.
           </p>
           {guardrails && guardrails.length > 0 ? (
             <div className="space-y-4">

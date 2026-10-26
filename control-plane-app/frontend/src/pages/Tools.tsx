@@ -172,7 +172,7 @@ export default function ToolsPage() {
                 <KpiCard title="Total Tools" value={overview?.total_tools || 0} format="number" />
                 <KpiCard title="MCP Servers" value={overview?.mcp_servers || 0} format="number" />
                 <KpiCard title="UC Functions" value={overview?.uc_functions || 0} format="number" />
-                <KpiCard title="Tool Calls (traces)" value={toolUsage?.length || 0} format="number" />
+                <KpiCard title="Traced Tool Calls" value={(toolUsage || []).reduce((s: number, t: any) => s + Number(t.call_count || 0), 0)} format="number" />
               </div>
 
               {/* All-tools table */}

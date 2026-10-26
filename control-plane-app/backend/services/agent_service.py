@@ -150,20 +150,103 @@ def get_agent_metrics(
     hours: int = 24,
     allowed_workspace_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Get performance metrics for an agent."""
-    if not get_agent_by_id(agent_id, allowed_workspace_ids=allowed_workspace_ids):
-        return {}
-    query = """
-        SELECT 
-            COUNT(*) as request_count,
-            AVG(latency_ms) as avg_latency,
-            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms) as p50_latency,
-            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) as p95_latency,
-            COUNT(*) FILTER (WHERE status_code >= 400) * 100.0 / NULLIF(COUNT(*), 0) as error_rate,
-            SUM(cost_usd) as total_cost
-        FROM request_logs
-        WHERE agent_id = %s
-          AND timestamp >= NOW() - (INTERVAL '1 hour' * %s)
+    """Performance metrics for an agent, keyed by its serving endpoint.
+
+    Built from tables the discovery workflow actually populates. (This used to
+    read ``request_logs``, which nothing writes, so the card was always empty.)
+
+    Endpoint names are unique only *within* a workspace (e.g. foundation-model
+    endpoint names repeat across every workspace), so every number is scoped to
+    the agent's own workspace:
+      - requests:  billing_token_daily  (system.serving.endpoint_usage) — by workspace_id
+      - cost:      billing_serving_daily (system.billing.usage)         — by workspace_id
+      - error rate / p50 / p95 latency: gateway_usage_daily and uag_usage_summary
+        have NO workspace_id, so they're used only when the endpoint name exists in
+        exactly one workspace; otherwise None rather than a cross-workspace blend.
+        Latency is also only present for Unity Gateway-routed endpoints (30d).
+    Tables are day-grain, so the window is ``hours`` rounded up to whole days.
+    A metric with no trustworthy source is None (rendered "—"), never a fake 0.
     """
-    result = execute_one(query, (agent_id, hours))
-    return dict(result) if result else {}
+    agent = get_agent_by_id(agent_id, allowed_workspace_ids=allowed_workspace_ids)
+    if not agent:
+        return {}
+    days = max(1, -(-hours // 24))
+    endpoint = getattr(agent, "endpoint_name", None)
+    out: Dict[str, Any] = {
+        "endpoint_name": endpoint, "workspace_id": None, "window_days": days,
+        "request_count": None, "error_count": None, "error_rate": None,
+        "p50_latency": None, "p95_latency": None, "total_cost": None,
+    }
+    if not endpoint:
+        return out
+
+    def _one(sql: str, params: tuple) -> Dict[str, Any]:
+        try:
+            row = execute_one(sql, params)
+            return dict(row) if row else {}
+        except Exception:
+            return {}  # table not synced yet → leave the metric as None
+
+    # Agent's workspace: discovered agents carry it; registry agents live in the
+    # deploy workspace.
+    ws = _one("SELECT workspace_id FROM discovered_agents WHERE agent_id = %s", (agent_id,)).get("workspace_id")
+    if not ws:
+        try:
+            from backend.services.billing_service import get_current_workspace_id
+            ws = get_current_workspace_id()
+        except Exception:
+            ws = None
+    ws = str(ws) if ws else None
+    out["workspace_id"] = ws
+
+    if ws:
+        usage = _one(
+            """SELECT SUM(request_count) AS req FROM billing_token_daily
+               WHERE workspace_id = %s AND endpoint_name = %s AND usage_date >= CURRENT_DATE - %s""",
+            (ws, endpoint, days),
+        )
+        if usage.get("req") is not None:
+            out["request_count"] = int(usage["req"] or 0)
+        cost = _one(
+            """SELECT SUM(total_cost_usd) AS cost FROM billing_serving_daily
+               WHERE workspace_id = %s AND endpoint_name = %s AND usage_date >= CURRENT_DATE - %s""",
+            (ws, endpoint, days),
+        )
+        if cost.get("cost") is not None:
+            out["total_cost"] = float(cost["cost"])
+
+    # Only trust the workspace-less tables when the name provably can't collide:
+    # it must appear in exactly one workspace, and that workspace must be this
+    # agent's. (0 rows = unknown, not "unique" — the tables sync independently.)
+    # Uniqueness is checked across serving_endpoints_inventory (every current
+    # endpoint in every workspace, traffic or not) AND billing_token_daily (recent
+    # usage, incl. since-deleted endpoints), so an idle same-named endpoint
+    # elsewhere still counts as a collision.
+    # TODO(phase B): carry workspace_id into gateway_usage_daily / uag_usage_summary
+    # and filter on it directly instead of this guard.
+    owner = _one(
+        """SELECT COUNT(DISTINCT workspace_id) AS n, MIN(workspace_id) AS w FROM (
+               SELECT workspace_id FROM billing_token_daily WHERE endpoint_name = %s
+               UNION
+               SELECT workspace_id FROM serving_endpoints_inventory WHERE endpoint_name = %s
+           ) s""",
+        (endpoint, endpoint),
+    )
+    if ws and owner.get("n") is not None and int(owner["n"]) == 1 and str(owner.get("w")) == ws:
+        errs = _one(
+            """SELECT SUM(request_count) AS req, SUM(error_count) AS err FROM gateway_usage_daily
+               WHERE endpoint_name = %s AND usage_date >= CURRENT_DATE - %s""",
+            (endpoint, days),
+        )
+        if errs.get("req"):
+            err = int(errs.get("err") or 0)
+            out["error_count"] = err
+            out["error_rate"] = round(err * 100.0 / int(errs["req"]), 2)
+        lat = _one(
+            "SELECT p50_latency_ms, p95_latency_ms FROM uag_usage_summary WHERE endpoint_name = %s",
+            (endpoint,),
+        )
+        if lat.get("p95_latency_ms"):
+            out["p50_latency"] = float(lat.get("p50_latency_ms") or 0) or None
+            out["p95_latency"] = float(lat["p95_latency_ms"])
+    return out

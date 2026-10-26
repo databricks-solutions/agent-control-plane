@@ -25,7 +25,8 @@ def _get_user_kpis(days: int) -> Dict[str, Any]:
                 COUNT(DISTINCT CASE WHEN usage_date >= CURRENT_DATE - INTERVAL '7 days' THEN requester END) AS active_users_7d,
                 COUNT(DISTINCT requester) AS active_users_period,
                 COALESCE(SUM(request_count), 0) AS total_requests,
-                COALESCE(SUM(total_tokens), 0) AS total_tokens
+                COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                COUNT(DISTINCT endpoint_name) AS unique_agents
                FROM user_analytics_daily
                WHERE usage_date >= CURRENT_DATE - INTERVAL '%s days'""",
             (days,),
@@ -35,17 +36,37 @@ def _get_user_kpis(days: int) -> Dict[str, Any]:
         rows = []
     if not rows:
         return {"active_users_24h": 0, "active_users_7d": 0, "active_users_period": 0,
-                "total_requests": 0, "unique_agents": 0, "total_tokens": 0, "total_cost": 0}
+                "total_requests": 0, "unique_agents": 0, "total_tokens": 0, "total_cost": None}
     r = rows[0]
+    costs = _get_user_costs(days)
     return {
         "active_users_24h": int(r.get("active_users_24h") or 0),
         "active_users_7d": int(r.get("active_users_7d") or 0),
         "active_users_period": int(r.get("active_users_period") or 0),
         "total_requests": int(r.get("total_requests") or 0),
-        "unique_agents": 0,
+        "unique_agents": int(r.get("unique_agents") or 0),
         "total_tokens": int(r.get("total_tokens") or 0),
-        "total_cost": 0,
+        "total_cost": round(sum(costs.values()), 2) if costs else None,
     }
+
+
+def _get_user_costs(days: int) -> Dict[str, float]:
+    """Actual per-user serving cost, keyed by user, from billing_user_cost_daily
+    (system.billing.usage rows attributed via Unity Gateway: identity_metadata.run_by
+    + usage_metadata.ai_gateway.endpoint_id). Only gateway-routed traffic is
+    attributed, so users of legacy-only endpoints have no entry. {} if unavailable."""
+    try:
+        rows = execute_query(
+            """SELECT run_by, SUM(total_cost_usd) AS cost
+               FROM billing_user_cost_daily
+               WHERE usage_date >= CURRENT_DATE - INTERVAL '%s days' AND run_by <> ''
+               GROUP BY run_by""",
+            (days,),
+        )
+    except Exception as exc:
+        logger.warning("User cost cache read failed: %s", exc)
+        return {}
+    return {str(r["run_by"]).lower(): float(r.get("cost") or 0) for r in rows if r.get("run_by")}
 
 
 def _get_top_users(days: int, limit: int = 50) -> List[Dict[str, Any]]:
@@ -56,7 +77,8 @@ def _get_top_users(days: int, limit: int = 50) -> List[Dict[str, Any]]:
                       SUM(request_count) AS request_count,
                       COUNT(DISTINCT endpoint_name) AS agents_used,
                       SUM(total_tokens) AS total_tokens,
-                      MAX(usage_date) AS last_active
+                      MAX(usage_date) AS last_active,
+                      ARRAY_AGG(DISTINCT endpoint_name) AS agent_list
                FROM user_analytics_daily
                WHERE usage_date >= CURRENT_DATE - INTERVAL '%s days'
                GROUP BY requester ORDER BY request_count DESC LIMIT %s""",
@@ -65,16 +87,19 @@ def _get_top_users(days: int, limit: int = 50) -> List[Dict[str, Any]]:
     except Exception as exc:
         logger.warning("Top users cache read failed: %s", exc)
         rows = []
+    costs = _get_user_costs(days)
+    # No latency: system.serving.endpoint_usage (the source of user_analytics_daily)
+    # has no latency column, so the field was a hardcoded 0. Dropped rather than faked.
     return [
         {
             "user_id": r.get("user_id", ""),
             "request_count": int(r.get("request_count") or 0),
             "agents_used": int(r.get("agents_used") or 0),
             "total_tokens": int(r.get("total_tokens") or 0),
-            "total_cost": 0,
-            "avg_latency_ms": 0,
+            # None = not attributed (legacy-only traffic), distinct from a real $0.
+            "total_cost": costs.get(str(r.get("user_id", "")).lower()),
             "last_active": str(r.get("last_active", "")),
-            "agent_list": [],
+            "agent_list": sorted(a for a in (r.get("agent_list") or []) if a),
         }
         for r in rows
     ]
@@ -165,7 +190,7 @@ def _get_requests_per_user_distribution(days: int) -> List[Dict[str, Any]]:
 
 _EMPTY_PAGE_DATA: Dict[str, Any] = {
     "kpis": {"active_users_24h": 0, "active_users_7d": 0, "active_users_period": 0,
-             "total_requests": 0, "unique_agents": 0, "total_tokens": 0, "total_cost": 0},
+             "total_requests": 0, "unique_agents": 0, "total_tokens": 0, "total_cost": None},
     "top_users": [],
     "heatmap": [],
     "daily_active_users": [],
