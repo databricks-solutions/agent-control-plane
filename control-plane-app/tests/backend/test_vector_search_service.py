@@ -110,3 +110,154 @@ class TestLakebaseInstancesScope:
             from backend.services.vector_search_service import get_lakebase_instances
             result = get_lakebase_instances(allowed_workspace_ids=None)
             assert result == [{"instance_name": "x"}]
+
+
+class TestDiscoverLakebaseMerge:
+    """discover_lakebase_instances must list BOTH the Provisioned and Autoscaling
+    APIs and dedup by uid (gh #73 — Autoscaling-only workspaces were invisible)."""
+
+    class _FakeApi:
+        def do(self, method, path):
+            if path == "/api/2.0/database/instances":
+                return {"database_instances": [
+                    {"name": "prov", "uid": "u1", "state": "AVAILABLE"}]}
+            if path.startswith("/api/2.0/postgres/projects"):
+                return {"projects": [
+                    {"uid": "u1", "project_id": "prov", "status": {}},  # dup of Provisioned
+                    {"uid": "u2", "project_id": "auto", "create_time": "2026-01-01T00:00:00Z",
+                     "status": {"display_name": "auto", "pg_version": 16, "owner": "me",
+                                "default_endpoint_settings": {
+                                    "autoscaling_limit_min_cu": 8.0,
+                                    "autoscaling_limit_max_cu": 16.0}}},
+                ]}  # no next_page_token → single page
+            return {}
+
+    class _FakeClient:
+        api_client = None
+
+    def test_merges_and_dedups_by_uid(self):
+        client = self._FakeClient()
+        client.api_client = self._FakeApi()
+        with patch("backend.services.vector_search_service._get_workspace_client", return_value=client):
+            from backend.services.vector_search_service import discover_lakebase_instances
+            result = discover_lakebase_instances()
+        uids = [r.get("uid") for r in result]
+        assert uids == ["u1", "u2"]  # Provisioned first, Autoscaling dup dropped
+        auto = next(r for r in result if r["uid"] == "u2")
+        assert auto["name"] == "auto"
+        assert auto["capacity"] == "CU_8-16"
+        assert auto["pg_version"] == "PG_VERSION_16"
+        assert auto["creator"] == "me"
+
+    def test_autoscaling_only_still_discovers(self):
+        class AutoOnlyApi:
+            def do(self, method, path):
+                if path == "/api/2.0/database/instances":
+                    return {"database_instances": []}  # Provisioned API empty (Azure case)
+                if path.startswith("/api/2.0/postgres/projects"):
+                    return {"projects": [{"uid": "u9", "project_id": "only",
+                                          "status": {"display_name": "only"}}]}
+                return {}
+        client = self._FakeClient()
+        client.api_client = AutoOnlyApi()
+        with patch("backend.services.vector_search_service._get_workspace_client", return_value=client):
+            from backend.services.vector_search_service import discover_lakebase_instances
+            result = discover_lakebase_instances()
+        assert len(result) == 1 and result[0]["uid"] == "u9"
+
+    def test_autoscaling_paginates(self):
+        """page1 carries next_page_token=t1; page2 is fetched at ?page_token=t1,
+        and projects from BOTH pages end up in the result."""
+        class PagedApi:
+            def do(self, method, path):
+                if path == "/api/2.0/database/instances":
+                    return {"database_instances": []}
+                if path == "/api/2.0/postgres/projects":
+                    return {"projects": [{"uid": "p1", "project_id": "a", "status": {}}],
+                            "next_page_token": "t1"}
+                if path == "/api/2.0/postgres/projects?page_token=t1":
+                    return {"projects": [{"uid": "p2", "project_id": "b", "status": {}}]}
+                return {}
+        client = self._FakeClient()
+        client.api_client = PagedApi()
+        with patch("backend.services.vector_search_service._get_workspace_client", return_value=client):
+            from backend.services.vector_search_service import discover_lakebase_instances
+            result = discover_lakebase_instances()
+        assert sorted(r["uid"] for r in result) == ["p1", "p2"]
+
+    def test_non_advancing_cursor_stops(self):
+        """A cursor that never changes must not loop — the projects path is hit
+        exactly twice (initial page + one repeat that trips the guard)."""
+        calls = {"n": 0}
+
+        class StuckApi:
+            def do(self, method, path):
+                if path == "/api/2.0/database/instances":
+                    return {"database_instances": []}
+                if path.startswith("/api/2.0/postgres/projects"):
+                    calls["n"] += 1
+                    return {"projects": [{"uid": f"x{calls['n']}", "status": {}}],
+                            "next_page_token": "same"}
+                return {}
+        client = self._FakeClient()
+        client.api_client = StuckApi()
+        with patch("backend.services.vector_search_service._get_workspace_client", return_value=client):
+            from backend.services.vector_search_service import discover_lakebase_instances
+            discover_lakebase_instances()
+        assert calls["n"] == 2
+
+    def test_null_max_cu_does_not_abort(self):
+        """A present-but-null autoscaling_limit_max_cu must not raise/abort the
+        whole scan (gh #74-review): capacity falls back to the min value."""
+        class NullMaxApi:
+            def do(self, method, path):
+                if path == "/api/2.0/database/instances":
+                    return {"database_instances": []}
+                if path.startswith("/api/2.0/postgres/projects"):
+                    return {"projects": [
+                        {"uid": "n1", "project_id": "bad", "status": {
+                            "default_endpoint_settings": {
+                                "autoscaling_limit_min_cu": 4.0,
+                                "autoscaling_limit_max_cu": None}}},
+                        {"uid": "n2", "project_id": "good", "status": {}},
+                    ]}
+                return {}
+        client = self._FakeClient()
+        client.api_client = NullMaxApi()
+        with patch("backend.services.vector_search_service._get_workspace_client", return_value=client):
+            from backend.services.vector_search_service import discover_lakebase_instances
+            result = discover_lakebase_instances()
+        uids = [r["uid"] for r in result]
+        assert uids == ["n1", "n2"]  # both survive; first record didn't abort the loop
+        bad = next(r for r in result if r["uid"] == "n1")
+        assert bad["capacity"] == "CU_4-4"  # max fell back to min
+
+    def test_httpx_fallback_when_no_client(self):
+        """With no WorkspaceClient, both APIs are fetched via httpx and merged."""
+        class Resp:
+            def __init__(self, payload):
+                self._p = payload
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self._p
+
+        def fake_get(url, headers=None, timeout=None):
+            if url == "https://h/api/2.0/database/instances":
+                return Resp({"database_instances": [{"name": "prov", "uid": "u1"}]})
+            if url == "https://h/api/2.0/postgres/projects":
+                return Resp({"projects": [{"uid": "u2", "project_id": "auto", "status": {}}]})
+            return Resp({})
+
+        with patch("backend.services.vector_search_service._get_workspace_client", return_value=None), \
+             patch("backend.services.vector_search_service.get_databricks_host", return_value="https://h"), \
+             patch("backend.services.vector_search_service.get_databricks_headers", return_value={}), \
+             patch("httpx.get", side_effect=fake_get) as mock_get:
+            from backend.services.vector_search_service import discover_lakebase_instances
+            result = discover_lakebase_instances()
+        urls = [c.args[0] for c in mock_get.call_args_list]
+        assert "https://h/api/2.0/database/instances" in urls
+        assert "https://h/api/2.0/postgres/projects" in urls
+        assert sorted(r["uid"] for r in result) == ["u1", "u2"]

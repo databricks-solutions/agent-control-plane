@@ -2,6 +2,7 @@
 import logging
 import json as _json
 from typing import List, Dict, Any, Optional
+from urllib.parse import quote
 
 from backend.config import _get_workspace_client, get_databricks_host, get_databricks_headers, find_serverless_warehouse_id
 from backend.database import execute_query, execute_update
@@ -608,23 +609,90 @@ def get_lakebase_instances(allowed_workspace_ids: Optional[List[str]] = None) ->
         return []
 
 
+def _normalize_lb_project(p: Dict[str, Any]) -> Dict[str, Any]:
+    """Map an Autoscaling `/postgres/projects` record into the Provisioned
+    instance dict shape (so both API sources yield the same keys)."""
+    st = p.get("status", {}) or {}
+    lim = st.get("default_endpoint_settings", {}) or {}
+    min_cu = lim.get("autoscaling_limit_min_cu")
+    cap = ""
+    if min_cu is not None:
+        # max may be absent OR present-but-null — fall back to min in both cases
+        # (a bare dict default only covers the missing-key case, so int(None) would raise).
+        max_cu = lim.get("autoscaling_limit_max_cu") or min_cu
+        cap = f"CU_{int(min_cu)}-{int(max_cu)}"
+    return {
+        # Use the UNIQUE project_id (not the free-form display_name) — this becomes
+        # lakebase_instances.instance_name, a PRIMARY KEY, so a non-unique name would
+        # let two backends overwrite each other's row.
+        "name": p.get("project_id") or p.get("name", "").split("/")[-1] or st.get("display_name", ""),
+        "uid": p.get("uid", ""),
+        "state": "AVAILABLE",  # projects API has no simple state; presence ⇒ live
+        "capacity": cap,
+        "pg_version": f"PG_VERSION_{st.get('pg_version')}" if st.get("pg_version") else "",
+        "read_write_dns": "",  # not in the projects list response (needs a branch/endpoint call)
+        "read_only_dns": "",
+        "creator": st.get("owner", ""),
+        "creation_time": p.get("create_time", ""),
+    }
+
+
 def discover_lakebase_instances() -> List[Dict[str, Any]]:
-    """Discover Lakebase instances via REST API (used by refresh button)."""
+    """Discover Lakebase backends via REST, across BOTH the Provisioned
+    (``/database/instances``) and Autoscaling (``/postgres/projects``) APIs,
+    merged + deduped by uid. Autoscaling-only workspaces expose nothing under
+    the Provisioned API (gh #73); Provisioned entries are richer so they win on
+    a uid collision. Used by the refresh button."""
     import httpx
     w = _get_workspace_client()
-    try:
+
+    def _get(path: str) -> Dict[str, Any]:
         if w:
-            resp = w.api_client.do("GET", "/api/2.0/database/instances")
-        else:
-            base = get_databricks_host()
-            r = httpx.get(f"{base}/api/2.0/database/instances",
-                          headers=get_databricks_headers(), timeout=_TIMEOUT)
-            r.raise_for_status()
-            resp = r.json()
-        return resp.get("database_instances", [])
+            return w.api_client.do("GET", path)
+        base = get_databricks_host()
+        r = httpx.get(f"{base}{path}", headers=get_databricks_headers(), timeout=_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    # Provisioned instances (preferred — richer fields).
+    try:
+        for inst in _get("/api/2.0/database/instances").get("database_instances", []):
+            out.append(inst)
+            if inst.get("uid"):
+                seen.add(inst["uid"])
     except Exception as exc:
-        logger.warning("Lakebase instance discovery failed: %s", exc)
-        return []
+        logger.warning("Provisioned Lakebase discovery failed: %s", exc)
+
+    # Autoscaling projects (normalized into the Provisioned dict shape).
+    page = None
+    try:
+        for _ in range(50):  # hard page cap — defends against a non-advancing cursor
+            path = "/api/2.0/postgres/projects" + (f"?page_token={quote(page, safe='')}" if page else "")
+            resp = _get(path)
+            projects = resp.get("projects", [])
+            if not projects:
+                break
+            for p in projects:
+                if p.get("uid") in seen:
+                    continue  # same backend already listed as Provisioned
+                try:
+                    out.append(_normalize_lb_project(p))
+                except Exception as exc:  # one malformed record must not drop the rest
+                    logger.warning("Skipped a Lakebase project record: %s", exc)
+                    continue
+                if p.get("uid"):
+                    seen.add(p["uid"])
+            nxt = resp.get("next_page_token")
+            if not nxt or nxt == page:  # cursor didn't advance → stop
+                break
+            page = nxt
+    except Exception as exc:
+        logger.warning("Autoscaling Lakebase discovery failed: %s", exc)
+
+    return out
 
 
 def get_lakebase_cost_summary(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
