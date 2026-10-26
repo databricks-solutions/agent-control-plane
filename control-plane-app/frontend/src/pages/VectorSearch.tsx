@@ -526,7 +526,8 @@ function VectorSearchTab({ days, setDays, selectedWsIds }: { days: number; setDa
   const readyCount = safeIndexDetails.filter((i: any) => i.ready).length
   const totalSnapshots = safeHealthHistory.length
   const onlineSnapshots = safeHealthHistory.filter((h: any) => h.status === 'ONLINE').length
-  const uptimePct = totalSnapshots > 0 ? Math.round((onlineSnapshots / totalSnapshots) * 100) : 100
+  // No snapshots → unknown, not a reassuring 100%.
+  const uptimePct: number | null = totalSnapshots > 0 ? Math.round((onlineSnapshots / totalSnapshots) * 100) : null
 
   const pagedHealth = safeHealthHistory.slice(healthPage * healthPageSize, (healthPage + 1) * healthPageSize)
 
@@ -694,7 +695,7 @@ function VectorSearchTab({ days, setDays, selectedWsIds }: { days: number; setDa
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <KpiCard title="Total Indexed Rows" value={totalRows} format="number" />
         <KpiCard title="Ready Indexes" value={readyCount} format="number" />
-        <KpiCard title="Endpoint Uptime" value={uptimePct} format="percentage" />
+        <KpiCard title="Endpoint Uptime" value={uptimePct ?? "—"} format={uptimePct === null ? undefined : "percentage"} />
         <KpiCard title="Health Snapshots" value={totalSnapshots} format="number" />
       </div>
 

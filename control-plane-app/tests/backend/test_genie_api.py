@@ -84,3 +84,24 @@ class TestGenieSpaceInfo:
             assert body["available"] is False
             assert body["space_id"] == "01f15..."
             assert body["space_url"] is None
+
+
+class TestGenieProxyErrors:
+    def test_upstream_error_keeps_status_instead_of_200(self, app_client):
+        """Regression: a 4xx/5xx from Genie was returned as HTTP 200, so the overlay
+        polled undefined ids for 90s and showed 'took too long'."""
+        class Resp:
+            status_code = 403
+            text = "forbidden"
+            def json(self):
+                return {"error_code": "PERMISSION_DENIED", "message": "no access to space"}
+
+        with patch("backend.api.genie.settings") as s, \
+             patch("backend.api.genie.get_databricks_host", return_value="https://h"), \
+             patch("backend.api.genie.httpx.request", return_value=Resp()):
+            s.feature_genie_enabled = True
+            s.genie_space_id = "sp1"
+            r = app_client.post("/api/v1/genie/conversations", json={"content": "hi"},
+                                headers={"x-forwarded-access-token": "tok"})
+        assert r.status_code == 403
+        assert "no access to space" in r.json()["detail"]

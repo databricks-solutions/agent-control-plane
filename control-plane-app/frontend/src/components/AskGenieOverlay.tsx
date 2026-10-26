@@ -380,6 +380,8 @@ export default function AskGenieOverlay({ open, setOpen }: AskGenieOverlayProps)
         const r = await genieFollowUp(cid, q, controller.signal)
         mid = r.id ?? r.message_id ?? ''
       }
+      // Fail fast instead of polling undefined ids until the 90s timeout.
+      if (!cid || !mid) throw new Error('Genie did not return a conversation/message id')
       const finalMsg = await pollMessage(cid!, mid, controller.signal)
       const parsed = parseAttachments(finalMsg)
       // Only fetch query-result when Genie actually wrote SQL.

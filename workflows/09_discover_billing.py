@@ -179,6 +179,14 @@ USER_COST_SCHEMA = StructType([
 
 # COMMAND ----------
 
+_RATE_LIMIT_BACKOFF_S = (30, 60, 120)
+
+
+def _is_rate_limited(msg: str) -> bool:
+    m = (msg or "").upper()
+    return "429" in m or "REQUEST_LIMIT_EXCEEDED" in m or "TOO MANY REQUESTS" in m
+
+
 def _execute_sql(sql: str) -> List[Dict[str, Any]]:
     """Run SQL via the Statement Execution API with EXTERNAL_LINKS disposition
     so large result sets (e.g. the all-products query that returns ~800k rows)
@@ -201,22 +209,37 @@ def _execute_sql(sql: str) -> List[Dict[str, Any]]:
         "disposition": "EXTERNAL_LINKS",
         "format": "JSON_ARRAY",
     }
-    try:
-        resp = w.api_client.do("POST", "/api/2.0/sql/statements", body=body)
-    except Exception as exc:
-        raise RuntimeError(f"SQL submission failed: {exc}") from exc
-    status = resp.get("status", {}).get("state", "")
-    sid = resp.get("statement_id", "")
-    if status in ("PENDING", "RUNNING") and sid:
-        for _ in range(40):  # ~2 min total
-            time.sleep(3)
-            try:
-                resp = w.api_client.do("GET", f"/api/2.0/sql/statements/{sid}")
-            except Exception:
+    # System tables are served over Delta Sharing; under org-wide UC load a statement
+    # can fail with HTTP 429 / UC_REQUEST_LIMIT_EXCEEDED. That's transient, so back
+    # off and resubmit (30s, 60s, 120s) instead of failing the whole task. Any other
+    # failure still raises below.
+    for attempt in range(len(_RATE_LIMIT_BACKOFF_S) + 1):
+        try:
+            resp = w.api_client.do("POST", "/api/2.0/sql/statements", body=body)
+        except Exception as exc:
+            if attempt < len(_RATE_LIMIT_BACKOFF_S) and _is_rate_limited(str(exc)):
+                print(f"  rate-limited on submit; retrying in {_RATE_LIMIT_BACKOFF_S[attempt]}s")
+                time.sleep(_RATE_LIMIT_BACKOFF_S[attempt])
                 continue
-            status = resp.get("status", {}).get("state", "")
-            if status not in ("PENDING", "RUNNING"):
-                break
+            raise RuntimeError(f"SQL submission failed: {exc}") from exc
+        status = resp.get("status", {}).get("state", "")
+        sid = resp.get("statement_id", "")
+        if status in ("PENDING", "RUNNING") and sid:
+            for _ in range(40):  # ~2 min total
+                time.sleep(3)
+                try:
+                    resp = w.api_client.do("GET", f"/api/2.0/sql/statements/{sid}")
+                except Exception:
+                    continue
+                status = resp.get("status", {}).get("state", "")
+                if status not in ("PENDING", "RUNNING"):
+                    break
+        msg = str(resp.get("status", {}).get("error", {}).get("message", ""))
+        if status == "FAILED" and attempt < len(_RATE_LIMIT_BACKOFF_S) and _is_rate_limited(msg):
+            print(f"  rate-limited (429); retrying in {_RATE_LIMIT_BACKOFF_S[attempt]}s")
+            time.sleep(_RATE_LIMIT_BACKOFF_S[attempt])
+            continue
+        break
     if status != "SUCCEEDED":
         err = resp.get("status", {}).get("error", {})
         # Promote to a task failure. Returning [] silently here is what masked

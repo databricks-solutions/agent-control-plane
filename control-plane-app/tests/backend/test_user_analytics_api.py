@@ -81,3 +81,44 @@ class TestUserAnalyticsPageDataScope:
 
         mock_kpis.assert_not_called()
         assert result["principals"] == []
+
+
+class TestUserAnalyticsNoFakeZeros:
+    """Regression: cost / latency / agents were hardcoded 0 and agent_list []."""
+
+    def test_top_users_cost_from_attribution_and_agent_list(self):
+        from backend.api import user_analytics as ua
+
+        rows = [
+            {"user_id": "Alice@x.com", "request_count": 10, "agents_used": 2, "total_tokens": 100,
+             "last_active": "2026-10-25", "agent_list": ["ep-b", None, "ep-a"]},
+            {"user_id": "bob@x.com", "request_count": 5, "agents_used": 1, "total_tokens": 50,
+             "last_active": "2026-10-24", "agent_list": ["ep-a"]},
+        ]
+        with patch.object(ua, "execute_query", side_effect=[rows, [{"run_by": "alice@x.com", "cost": 12.5}]]):
+            out = ua._get_top_users(30)
+
+        alice, bob = out
+        assert alice["total_cost"] == 12.5          # matched case-insensitively
+        assert alice["agent_list"] == ["ep-a", "ep-b"]  # real list, nulls dropped, sorted
+        assert bob["total_cost"] is None            # not attributed ≠ $0
+        assert "avg_latency_ms" not in alice        # no source → no fake 0
+
+    def test_kpis_unique_agents_and_unattributed_cost(self):
+        from backend.api import user_analytics as ua
+
+        kpi_row = [{"active_users_24h": 1, "active_users_7d": 2, "active_users_period": 3,
+                    "total_requests": 9, "total_tokens": 90, "unique_agents": 4}]
+        with patch.object(ua, "execute_query", side_effect=[kpi_row, []]):
+            k = ua._get_user_kpis(30)
+        assert k["unique_agents"] == 4
+        assert k["total_cost"] is None
+
+    def test_cost_lookup_failure_degrades_to_unattributed(self):
+        from backend.api import user_analytics as ua
+
+        rows = [{"user_id": "a@x.com", "request_count": 1, "agents_used": 1, "total_tokens": 1,
+                 "last_active": "", "agent_list": []}]
+        with patch.object(ua, "execute_query", side_effect=[rows, Exception("table missing")]):
+            out = ua._get_top_users(30)
+        assert out[0]["total_cost"] is None

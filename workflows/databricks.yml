@@ -73,6 +73,9 @@ resources:
 
       tasks:
         - task_key: discover_agents
+          # Absorb transient failures (UC 429 rate limits on system tables, serverless pip blips).
+          max_retries: 2
+          min_retry_interval_millis: 120000
           description: "Discover agents from APIs + system tables → Delta table"
           notebook_task:
             notebook_path: ./01_discover_agents.py
@@ -83,6 +86,9 @@ resources:
           environment_key: default
 
         - task_key: discover_observability
+          # Absorb transient failures (UC 429 rate limits on system tables, serverless pip blips).
+          max_retries: 2
+          min_retry_interval_millis: 120000
           description: "Tier 1: discover local-workspace MLflow traces (default backend) via REST → Delta. Cross-workspace fan-out is parked (Tier 3); see enable_cross_workspace_rest_fanout."
           notebook_task:
             notebook_path: ./04_discover_observability.py
@@ -102,6 +108,9 @@ resources:
           environment_key: default
 
         - task_key: discover_knowledge_bases
+          # Absorb transient failures (UC 429 rate limits on system tables, serverless pip blips).
+          max_retries: 2
+          min_retry_interval_millis: 120000
           description: "Discover Vector Search + Lakebase + billing costs → Delta"
           notebook_task:
             notebook_path: ./03_discover_knowledge_bases.py
@@ -112,6 +121,9 @@ resources:
           environment_key: default
 
         - task_key: discover_user_analytics
+          # Absorb transient failures (UC 429 rate limits on system tables, serverless pip blips).
+          max_retries: 2
+          min_retry_interval_millis: 120000
           description: "Query system.serving.endpoint_usage for user activity → Delta"
           notebook_task:
             notebook_path: ./05_discover_user_analytics.py
@@ -122,6 +134,9 @@ resources:
           environment_key: default
 
         - task_key: discover_gateway_usage
+          # Absorb transient failures (UC 429 rate limits on system tables, serverless pip blips).
+          max_retries: 2
+          min_retry_interval_millis: 120000
           description: "Query system.serving.endpoint_usage for Unity Gateway usage → Delta"
           notebook_task:
             notebook_path: ./06_discover_gateway_usage.py
@@ -132,6 +147,9 @@ resources:
           environment_key: default
 
         - task_key: discover_uc_otel_traces
+          # Absorb transient failures (UC 429 rate limits on system tables, serverless pip blips).
+          max_retries: 2
+          min_retry_interval_millis: 120000
           description: "Discover UC-stored MLflow OTel traces account-wide via SQL (Tier 2b) → Delta"
           notebook_task:
             notebook_path: ./07_discover_uc_otel_traces.py
@@ -142,6 +160,9 @@ resources:
           environment_key: default
 
         - task_key: discover_gateway_inference_logs
+          # Absorb transient failures (UC 429 rate limits on system tables, serverless pip blips).
+          max_retries: 2
+          min_retry_interval_millis: 120000
           description: "Discover Unity Gateway / Model Serving inference-log payload tables account-wide via SQL (Tier 2a) → Delta"
           notebook_task:
             notebook_path: ./08_discover_gateway_inference_logs.py
@@ -153,6 +174,9 @@ resources:
           environment_key: default
 
         - task_key: discover_billing
+          # Absorb transient failures (UC 429 rate limits on system tables, serverless pip blips).
+          max_retries: 2
+          min_retry_interval_millis: 120000
           description: "Query system.billing.usage + system.serving.endpoint_usage for serving cost / token / per-user / all-product daily aggregates → Delta. Replaces the in-app refresh that used to run on app startup."
           notebook_task:
             notebook_path: ./09_discover_billing.py
@@ -164,6 +188,9 @@ resources:
           environment_key: default
 
         - task_key: discover_ai_gateway_usage
+          # Absorb transient failures (UC 429 rate limits on system tables, serverless pip blips).
+          max_retries: 2
+          min_retry_interval_millis: 120000
           description: "Query system.ai_gateway.usage (v2 Unity Gateway, ~20-min fresh) for a per-endpoint usage summary incl. cached tokens + latency/TTFB → Delta. Additive to billing (cost) and serving.endpoint_usage (broad)."
           notebook_task:
             notebook_path: ./11_discover_ai_gateway_usage.py
@@ -174,6 +201,9 @@ resources:
           environment_key: default
 
         - task_key: classify_models
+          # Absorb transient failures (UC 429 rate limits on system tables, serverless pip blips).
+          max_retries: 2
+          min_retry_interval_millis: 120000
           description: "Serving Stage 3: classify empty-task custom models → model_classification (Delta) via a tiered classifier — MLflow artifact (flavor/loader/signature) → name regex → LLM (small FM endpoint) → compute_type. Decoupled side-channel — discover_agents reads it fail-open + upgrade-only, never waits on it; cached per (model,version)."
           notebook_task:
             notebook_path: ./12_classify_models.py
@@ -184,6 +214,9 @@ resources:
           environment_key: default
 
         - task_key: discover_budgets
+          # Absorb transient failures (UC 429 rate limits on system tables, serverless pip blips).
+          max_retries: 2
+          min_retry_interval_millis: 120000
           description: "Read the account Budgets API (/api/2.1/accounts/{id}/budgets) → Delta (uag_budget_status). Read-only config inventory: cap thresholds, enforce (BLOCK_USAGE) vs alert-only, filter, AI-relevance. Needs account-SP creds in discovery_sp_secret_scope; degrades to empty otherwise."
           notebook_task:
             notebook_path: ./13_discover_budgets.py
@@ -196,6 +229,9 @@ resources:
           environment_key: default
 
         - task_key: discover_endpoint_inventory
+          # Absorb transient failures (UC 429 rate limits on system tables, serverless pip blips).
+          max_retries: 2
+          min_retry_interval_millis: 120000
           description: "Account-wide served-entity inventory from system.serving.served_entities → Delta (serving_endpoints_inventory). Read-only fleet view across all workspaces in the metastore."
           notebook_task:
             notebook_path: ./14_discover_endpoint_inventory.py
@@ -205,6 +241,9 @@ resources:
           environment_key: default
 
         - task_key: discover_model_services
+          # Absorb transient failures (UC 429 rate limits on system tables, serverless pip blips).
+          max_retries: 2
+          min_retry_interval_millis: 120000
           description: "v3 Unity Gateway UC model services via UC REST (run-as metastore admin — the list endpoint the app's OBO/SP identities can't reach) → Delta (model_services_inventory)."
           notebook_task:
             notebook_path: ./15_discover_model_services.py
@@ -214,6 +253,9 @@ resources:
           environment_key: default
 
         - task_key: sync_to_lakebase
+          # Absorb transient failures (UC 429 rate limits on system tables, serverless pip blips).
+          max_retries: 2
+          min_retry_interval_millis: 120000
           description: "Sync all discovery data (Delta → Lakebase) + system table billing"
           depends_on:
             - task_key: discover_agents

@@ -39,6 +39,15 @@ export interface CurrentUser {
   current_workspace_id: string | null
 }
 
+/** True when the server serves this user account-wide data (allowed scope = all).
+ *  Account-wide views (system.ai_gateway.*, budgets, serving usage) are suppressed
+ *  server-side for everyone else, so an empty view for a scoped user means
+ *  "restricted", not "no traffic". Mirrors backend/utils/access_scope.py. */
+export function useSeesAccountWide(): boolean | undefined {
+  const { data } = useCurrentUser()
+  return data ? data.allowed_workspace_count === null : undefined
+}
+
 export function useCurrentUser() {
   return useQuery({
     queryKey: ['current-user'],
@@ -163,20 +172,6 @@ export function useAgentsWithPermissions() {
   })
 }
 
-export function useUpdateAgent() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: async ({ agentId, update }: { agentId: string; update: any }) => {
-      const { data } = await apiClient.put(`/agents/${agentId}`, update)
-      return data
-    },
-    onSuccess: (_, { agentId }) => {
-      queryClient.invalidateQueries({ queryKey: ['agent', agentId] })
-      queryClient.invalidateQueries({ queryKey: ['agents'] })
-    },
-  })
-}
-
 // Requests
 export function useRecentRequests(limit = 20) {
   return useQuery({
@@ -189,70 +184,8 @@ export function useRecentRequests(limit = 20) {
   })
 }
 
-export function useRequests(filters: any) {
-  return useQuery({
-    queryKey: ['requests', filters],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/requests', { params: filters })
-      return data
-    },
-  })
-}
-
 // KPIs
-export function useKPIs() {
-  return useQuery({
-    queryKey: ['kpis'],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/kpis/overview')
-      return data
-    },
-    refetchInterval: 10000, // Refetch every 10 seconds
-  })
-}
-
 // Analytics
-export function usePerformanceMetrics(days = 30) {
-  return useQuery({
-    queryKey: ['analytics', 'performance', days],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/analytics/performance', { params: { days } })
-      return data
-    },
-  })
-}
-
-export function useUsageMetrics(days = 30) {
-  return useQuery({
-    queryKey: ['analytics', 'usage', days],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/analytics/usage', { params: { days } })
-      return data
-    },
-  })
-}
-
-export function useCostMetrics(days = 30) {
-  return useQuery({
-    queryKey: ['analytics', 'cost', days],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/analytics/cost', { params: { days } })
-      return data
-    },
-  })
-}
-
-export function useHealthMetrics() {
-  return useQuery({
-    queryKey: ['analytics', 'health'],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/analytics/health')
-      return data
-    },
-    refetchInterval: 10000,
-  })
-}
-
 // Health
 export function useHealthStatus() {
   return useQuery({
@@ -407,72 +340,6 @@ export function useMlflowTraceDetail(requestId: string | null, workspaceId?: str
 
 // ── Gateway inference logs (Tier 2a) ──────────────────────────────
 
-export function useGatewayLogs(windowDays?: number | null, sourceTable?: string | null) {
-  return useQuery({
-    queryKey: ['gateway-logs', 'list', windowDays, sourceTable],
-    queryFn: async () => {
-      const params: Record<string, string> = {}
-      if (windowDays) params.window_days = String(windowDays)
-      if (sourceTable) params.source_table = sourceTable
-      const { data } = await apiClient.get('/gateway-logs', { params })
-      return data as any[]
-    },
-  })
-}
-
-export function useGatewayLogSources() {
-  return useQuery({
-    queryKey: ['gateway-logs', 'sources'],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/gateway-logs/sources')
-      return data as any[]
-    },
-  })
-}
-
-export function useGatewayLogTimeseries(
-  windowDays: number,
-  sourceTable?: string | null,
-  bucket: 'hour' | 'day' = 'hour',
-) {
-  return useQuery({
-    queryKey: ['gateway-logs', 'timeseries', windowDays, sourceTable, bucket],
-    queryFn: async () => {
-      const params: Record<string, string> = {
-        window_days: String(windowDays),
-        bucket,
-      }
-      if (sourceTable) params.source_table = sourceTable
-      const { data } = await apiClient.get('/gateway-logs/timeseries', { params })
-      return data as Array<{
-        bucket: string
-        source_table: string
-        requests: number
-        errors: number
-        p50_ms: number | null
-        p95_ms: number | null
-        avg_ms: number | null
-        input_tokens: number
-        output_tokens: number
-        total_tokens: number
-      }>
-    },
-  })
-}
-
-export function useGatewayLogDetail(sourceTable: string | null, requestId: string | null) {
-  return useQuery({
-    queryKey: ['gateway-logs', 'detail', sourceTable, requestId],
-    queryFn: async () => {
-      const { data } = await apiClient.get(
-        `/gateway-logs/${encodeURIComponent(sourceTable!)}/${encodeURIComponent(requestId!)}`
-      )
-      return data
-    },
-    enabled: !!sourceTable && !!requestId,
-  })
-}
-
 export function useMlflowModels(workspaceId?: string | null) {
   return useQuery({
     queryKey: ['mlflow', 'models', workspaceId],
@@ -556,28 +423,6 @@ export function useGatewayPageData(options?: { enabled?: boolean }) {
     },
     staleTime: GW_STALE,
     enabled: options?.enabled ?? true,
-  })
-}
-
-export function useGatewayOverview() {
-  return useQuery({
-    queryKey: ['gateway', 'overview'],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/gateway/overview')
-      return data
-    },
-    staleTime: GW_STALE,
-  })
-}
-
-export function useGatewayEndpoints() {
-  return useQuery({
-    queryKey: ['gateway', 'endpoints'],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/gateway/endpoints')
-      return data
-    },
-    staleTime: GW_STALE,
   })
 }
 
@@ -1121,18 +966,6 @@ export function useGatewayMetrics(hours = 24) {
 
 // ── Discovered Agents (cross-workspace) ─────────────────────────
 
-export function useDiscoveredAgents(workspaceId?: string | null) {
-  return useQuery({
-    queryKey: ['agents', 'discovered', workspaceId],
-    queryFn: async () => {
-      const params: any = {}
-      if (workspaceId) params.workspace_id = workspaceId
-      const { data } = await apiClient.get('/agents/discovered', { params })
-      return data as any[]
-    },
-  })
-}
-
 export function useAllAgentsMerged(workspaceId?: string | null) {
   return useQuery({
     queryKey: ['agents', 'all-merged', workspaceId],
@@ -1455,99 +1288,6 @@ export function useBillingRefresh() {
   })
 }
 
-export function useBillingCurrentWorkspace() {
-  return useQuery({
-    queryKey: ['billing', 'current-workspace'],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/billing/current-workspace')
-      return data as { workspace_id: string | null }
-    },
-    staleTime: 300_000, // 5 min — workspace ID doesn't change
-  })
-}
-
-export function useBillingWorkspaces(days = 30) {
-  return useQuery({
-    queryKey: ['billing', 'workspaces', days],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/billing/workspaces', { params: { days } })
-      return data as Array<{ workspace_id: string; total_dbus: string; endpoint_count: string }>
-    },
-  })
-}
-
-export function useBillingServingSummary(days = 30, workspaceId?: string | null) {
-  return useQuery({
-    queryKey: ['billing', 'serving-summary', days, workspaceId],
-    queryFn: async () => {
-      const params: any = { days }
-      if (workspaceId) params.workspace_id = workspaceId
-      const { data } = await apiClient.get('/billing/serving/summary', { params })
-      return data
-    },
-  })
-}
-
-export function useBillingServingTrend(days = 30, workspaceId?: string | null) {
-  return useQuery({
-    queryKey: ['billing', 'serving-trend', days, workspaceId],
-    queryFn: async () => {
-      const params: any = { days }
-      if (workspaceId) params.workspace_id = workspaceId
-      const { data } = await apiClient.get('/billing/serving/trend', { params })
-      return data as any[]
-    },
-  })
-}
-
-export function useBillingServingBySku(days = 30, workspaceId?: string | null) {
-  return useQuery({
-    queryKey: ['billing', 'serving-by-sku', days, workspaceId],
-    queryFn: async () => {
-      const params: any = { days }
-      if (workspaceId) params.workspace_id = workspaceId
-      const { data } = await apiClient.get('/billing/serving/by-sku', { params })
-      return data as any[]
-    },
-  })
-}
-
-export function useBillingServingTokens(days = 30, workspaceId?: string | null) {
-  return useQuery({
-    queryKey: ['billing', 'serving-tokens', days, workspaceId],
-    queryFn: async () => {
-      const params: any = { days }
-      if (workspaceId) params.workspace_id = workspaceId
-      const { data } = await apiClient.get('/billing/serving/tokens', { params })
-      return data as any[]
-    },
-  })
-}
-
-export function useBillingDailyTokens(days = 30, workspaceId?: string | null) {
-  return useQuery({
-    queryKey: ['billing', 'daily-tokens', days, workspaceId],
-    queryFn: async () => {
-      const params: any = { days }
-      if (workspaceId) params.workspace_id = workspaceId
-      const { data } = await apiClient.get('/billing/serving/daily-tokens', { params })
-      return data as any[]
-    },
-  })
-}
-
-export function useBillingProductCosts(days = 30, workspaceId?: string | null) {
-  return useQuery({
-    queryKey: ['billing', 'products', days, workspaceId],
-    queryFn: async () => {
-      const params: any = { days }
-      if (workspaceId) params.workspace_id = workspaceId
-      const { data } = await apiClient.get('/billing/products', { params })
-      return data as any[]
-    },
-  })
-}
-
 // ── Serving inventory ───────────────────────────────────────────
 
 export interface QueryableEndpoint {
@@ -1676,17 +1416,6 @@ export function useWorkspacesPageData(days = 30) {
 // Topology
 // refreshKey increments on every manual Refresh — a new key always triggers a fresh fetch.
 // force=true is sent to the backend whenever refreshKey > 0 (any user-triggered rebuild).
-export function useTopology(refreshKey = 0) {
-  return useQuery({
-    queryKey: ['topology', refreshKey],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/topology', { params: { force: refreshKey > 0 } })
-      return data
-    },
-    staleTime: 5 * 60 * 1000,
-  })
-}
-
 // ── Real-time Operations ─────────────────────────────────────────
 
 export interface OperationsAgent {
@@ -1749,28 +1478,6 @@ export function useOperationsStatus() {
       return data as OperationsStatus
     },
     refetchInterval: 30_000, // match 30s backend cache TTL
-  })
-}
-
-export function useOperationsEndpointDetail(endpointName: string | null) {
-  return useQuery({
-    queryKey: ['operations', 'endpoint', endpointName],
-    queryFn: async () => {
-      const { data } = await apiClient.get(`/operations/endpoints/${endpointName}`)
-      return data
-    },
-    enabled: !!endpointName,
-  })
-}
-
-export function useOperationsUsage(hours = 1) {
-  return useQuery({
-    queryKey: ['operations', 'usage', hours],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/operations/usage', { params: { hours } })
-      return data as OperationsUsage
-    },
-    refetchInterval: 30_000,
   })
 }
 
@@ -1860,46 +1567,6 @@ export function useVectorSearchIndexes(endpointName?: string) {
   })
 }
 
-export function useVectorSearchCostSummary(days = 30) {
-  return useQuery({
-    queryKey: ['vector-search', 'cost-summary', days],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/vector-search/cost/summary', { params: { days } })
-      return data as { total_dbus: number; total_cost_usd: number; endpoint_count: number; workspace_count: number; days: number }
-    },
-  })
-}
-
-export function useVectorSearchCostTrend(days = 30) {
-  return useQuery({
-    queryKey: ['vector-search', 'cost-trend', days],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/vector-search/cost/trend', { params: { days } })
-      return Array.isArray(data) ? data : []
-    },
-  })
-}
-
-export function useVectorSearchCostByEndpoint(days = 30) {
-  return useQuery({
-    queryKey: ['vector-search', 'cost-by-endpoint', days],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/vector-search/cost/by-endpoint', { params: { days } })
-      return Array.isArray(data) ? data : []
-    },
-  })
-}
-
-export function useVectorSearchCostByWorkload(days = 30) {
-  return useQuery({
-    queryKey: ['vector-search', 'cost-by-workload', days],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/vector-search/cost/by-workload', { params: { days } })
-      return Array.isArray(data) ? data : []
-    },
-  })
-}
-
 export function useVectorSearchPageData(days = 30) {
   return useQuery({
     queryKey: ['vector-search', 'page-data', days],
@@ -1933,16 +1600,6 @@ export function useVectorSearchHealthHistory(days = 7) {
     queryKey: ['vector-search', 'health-history', days],
     queryFn: async () => {
       const { data } = await apiClient.get('/vector-search/health/history', { params: { days } })
-      return Array.isArray(data) ? data : []
-    },
-  })
-}
-
-export function useVectorSearchCostTrendByWorkload(days = 30) {
-  return useQuery({
-    queryKey: ['vector-search', 'cost-trend-workload', days],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/vector-search/cost/trend-by-workload', { params: { days } })
       return Array.isArray(data) ? data : []
     },
   })

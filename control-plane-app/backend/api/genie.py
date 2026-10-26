@@ -95,11 +95,15 @@ def _proxy(
         logger.warning("Genie proxy failed: %s %s -> %s", method, path, exc)
         raise HTTPException(status_code=502, detail=f"Genie upstream error: {exc}")
     if resp.status_code >= 400:
-        # Bubble up Databricks's error structure so the frontend can show it.
+        # Propagate the upstream status (returning the body alone would ship it as
+        # HTTP 200, and the client would then poll undefined ids until it timed out).
+        # Keep Databricks's message so the frontend can show it.
         try:
-            return resp.json()  # Will be returned with original status
+            body = resp.json()
+            detail = body.get("message") or body.get("error_code") or str(body)[:500]
         except Exception:
-            raise HTTPException(status_code=resp.status_code, detail=resp.text[:500])
+            detail = resp.text[:500]
+        raise HTTPException(status_code=resp.status_code, detail=f"Genie upstream {resp.status_code}: {detail}")
     return resp.json()
 
 
