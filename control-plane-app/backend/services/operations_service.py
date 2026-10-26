@@ -131,11 +131,18 @@ def _classify_app_health(compute_status: str, deployment_status: str) -> str:
 # =====================================================================
 
 def _fetch_usage_metrics(hours: int = 1) -> Dict[str, Dict[str, Any]]:
-    """Fetch per-endpoint usage from system.serving tables (account-wide).
+    """Per-endpoint request/error/latency, account-wide, via the SQL warehouse.
 
-    Uses the SQL Statement Execution API (Databricks system tables),
-    NOT Lakebase, because ``system.serving.endpoint_usage`` only exists
-    on the Databricks SQL warehouse.
+    Request + error counts come from ``system.serving.endpoint_usage`` (the broad
+    per-endpoint serving-usage table). That table has NO latency column — earlier
+    code selected ``execution_time_ms`` here, a column that does not exist, so the
+    whole statement failed with UNRESOLVED_COLUMN and the Operations page silently
+    showed no usage and never wired error rates into health (gh #74).
+
+    Latency is enriched best-effort from ``system.ai_gateway.usage`` (which does have
+    ``latency_ms``) in a separate, fail-open query: endpoints routed through the
+    gateway get avg/p95 latency, while a missing/unreadable gateway table never
+    breaks the error-rate path. Keyed by endpoint_name.
     """
     try:
         rows = _execute_system_sql(f"""
@@ -143,9 +150,6 @@ def _fetch_usage_metrics(hours: int = 1) -> Dict[str, Dict[str, Any]]:
                 se.endpoint_name,
                 COUNT(*) AS request_count,
                 SUM(CASE WHEN u.status_code >= '400' THEN 1 ELSE 0 END) AS error_count,
-                AVG(u.execution_time_ms) AS avg_latency_ms,
-                PERCENTILE(u.execution_time_ms, 0.95) AS p95_latency_ms,
-                PERCENTILE(u.execution_time_ms, 0.99) AS p99_latency_ms,
                 SUM(u.input_token_count + u.output_token_count) AS total_tokens
             FROM system.serving.endpoint_usage u
             JOIN system.serving.served_entities se
@@ -154,10 +158,34 @@ def _fetch_usage_metrics(hours: int = 1) -> Dict[str, Dict[str, Any]]:
             GROUP BY se.endpoint_name
             ORDER BY request_count DESC
         """)
-        return {r["endpoint_name"]: dict(r) for r in rows if r.get("endpoint_name")}
+        metrics = {r["endpoint_name"]: dict(r) for r in rows if r.get("endpoint_name")}
     except Exception as exc:
         logger.warning("Usage metrics fetch failed: %s", exc)
         return {}
+
+    # Enrich with latency from the AI Gateway usage table (has latency_ms). Gateway
+    # coverage is a subset of serving endpoints and the table may be absent on some
+    # accounts, so this is fail-open and only annotates endpoints we already counted.
+    try:
+        lat_rows = _execute_system_sql(f"""
+            SELECT
+                endpoint_name,
+                AVG(latency_ms) AS avg_latency_ms,
+                PERCENTILE(latency_ms, 0.95) AS p95_latency_ms
+            FROM system.ai_gateway.usage
+            WHERE event_time >= current_timestamp() - INTERVAL {hours} HOURS
+              AND endpoint_name IS NOT NULL
+            GROUP BY endpoint_name
+        """)
+        for r in lat_rows:
+            name = r.get("endpoint_name")
+            if name in metrics:
+                metrics[name]["avg_latency_ms"] = r.get("avg_latency_ms")
+                metrics[name]["p95_latency_ms"] = r.get("p95_latency_ms")
+    except Exception as exc:
+        logger.warning("Latency enrichment (ai_gateway.usage) failed: %s", exc)
+
+    return metrics
 
 
 # =====================================================================

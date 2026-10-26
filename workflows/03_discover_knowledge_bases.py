@@ -18,6 +18,7 @@ import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+from urllib.parse import quote
 
 from databricks.sdk import WorkspaceClient
 from pyspark.sql import SparkSession
@@ -189,13 +190,92 @@ print(f"  ✅ {len(vs_indexes)} indexes found")
 # COMMAND ----------
 
 print("▸ Discovering Lakebase instances ...")
-try:
-    lb_resp = w.api_client.do("GET", "/api/2.0/database/instances")
-    lb_instances = lb_resp.get("database_instances", [])
-    print(f"  ✅ {len(lb_instances)} instances found")
-except Exception as exc:
-    print(f"  ⚠️  Lakebase instance discovery failed: {exc}")
-    lb_instances = []
+
+
+def _normalize_lb_project(p: dict) -> dict:
+    """Map an Autoscaling `/postgres/projects` record into the Provisioned
+    instance dict shape (the keys the `lb_rows` builder reads)."""
+    st = p.get("status", {}) or {}
+    lim = st.get("default_endpoint_settings", {}) or {}
+    min_cu = lim.get("autoscaling_limit_min_cu")
+    cap = ""
+    if min_cu is not None:
+        # max may be absent OR present-but-null — fall back to min in both cases
+        # (a bare dict default only covers the missing-key case, so `int(None)` would raise).
+        max_cu = lim.get("autoscaling_limit_max_cu") or min_cu
+        cap = f"CU_{int(min_cu)}-{int(max_cu)}"
+    return {
+        # Use the UNIQUE project_id (not the free-form display_name) — this becomes
+        # lakebase_instances.instance_name, the PRIMARY KEY upserted in 02_sync, so a
+        # non-unique name would silently overwrite another backend's row.
+        "name": p.get("project_id") or p.get("name", "").split("/")[-1] or st.get("display_name", ""),
+        "uid": p.get("uid", ""),
+        "state": "AVAILABLE",  # projects API has no simple state; presence ⇒ live
+        "capacity": cap,
+        "pg_version": f"PG_VERSION_{st.get('pg_version')}" if st.get("pg_version") else "",
+        "read_write_dns": "",  # not in the projects list response (needs a branch/endpoint call)
+        "read_only_dns": "",
+        "creator": st.get("owner", ""),
+        "creation_time": p.get("create_time", ""),
+    }
+
+
+def _discover_lakebase_instances():
+    """List Lakebase via BOTH the Provisioned (`/database/instances`) and the
+    Autoscaling (`/postgres/projects`) APIs, merged + deduped by uid.
+
+    Autoscaling-only workspaces expose nothing under `/database/instances`, so
+    the Provisioned-only path found 0 and the smoke check then failed on an empty
+    `lakebase_instances` table (gh #73). Provisioned entries are richer (DNS,
+    capacity, state), so when the same backend appears under both APIs the
+    Provisioned shape wins and the project is skipped as a duplicate."""
+    out, seen_uids = [], set()
+
+    # Provisioned instances (preferred — richer fields).
+    try:
+        resp = w.api_client.do("GET", "/api/2.0/database/instances")
+        for inst in resp.get("database_instances", []):
+            out.append(inst)
+            if inst.get("uid"):
+                seen_uids.add(inst["uid"])
+        print(f"  ✅ {len(out)} Provisioned instance(s)")
+    except Exception as exc:
+        print(f"  ⚠️  Provisioned instance discovery failed: {exc}")
+
+    # Autoscaling projects (normalized into the Provisioned dict shape).
+    added, page = 0, None
+    try:
+        for _ in range(50):  # hard page cap — defends against a non-advancing cursor
+            path = "/api/2.0/postgres/projects" + (f"?page_token={quote(page, safe='')}" if page else "")
+            resp = w.api_client.do("GET", path)
+            projects = resp.get("projects", [])
+            if not projects:
+                break
+            for p in projects:
+                if p.get("uid") in seen_uids:
+                    continue  # same backend already listed as Provisioned
+                try:
+                    out.append(_normalize_lb_project(p))
+                except Exception as exc:  # one malformed record must not drop the rest
+                    print(f"    ⚠️  skipped a project record: {exc}")
+                    continue
+                if p.get("uid"):
+                    seen_uids.add(p["uid"])
+                added += 1
+            nxt = resp.get("next_page_token")
+            if not nxt or nxt == page:  # cursor didn't advance → stop
+                break
+            page = nxt
+        if added:
+            print(f"  ✅ {added} Autoscaling project(s)")
+    except Exception as exc:
+        print(f"  ⚠️  Autoscaling project discovery failed: {exc}")
+
+    return out
+
+
+lb_instances = _discover_lakebase_instances()
+print(f"  ✅ {len(lb_instances)} Lakebase backend(s) total")
 
 # COMMAND ----------
 
