@@ -4,6 +4,7 @@ import { useQueryClient, useIsFetching } from '@tanstack/react-query'
 import { SortableHeader, useSort, sortRows } from '@/components/SortableTable'
 import {
   useWorkspacesPageData,
+  useWorkspaceDirectory,
   useBillingRefresh,
   useBillingCacheStatus,
   useCurrentUser,
@@ -76,8 +77,10 @@ function fmtNumber(v: number): string {
   return String(Math.round(v))
 }
 
-function shortWs(id: string): string {
+// Prefer the registry name (system.access.workspaces_latest) over the raw id.
+function shortWs(id: string, dir?: Record<string, { name?: string }>): string {
   if (!id) return '—'
+  if (dir?.[id]?.name) return dir[id].name as string
   return id.length > 10 ? `…${id.slice(-6)}` : id
 }
 
@@ -105,6 +108,7 @@ export default function WorkspacesPage() {
   const [days, setDays] = useState(30)
   const [tab, setTab] = useState<TabKey>('overview')
   const [selectedWs, setSelectedWs] = useState<string | null>(null)
+  const { data: wsDir } = useWorkspaceDirectory()
   const [search, setSearch] = useState('')
 
   // Pagination for Overview workspace table
@@ -135,7 +139,7 @@ export default function WorkspacesPage() {
     let list = pageData.workspace_summaries
     if (search) {
       const q = search.toLowerCase()
-      list = list.filter((ws) => ws.workspace_id.toLowerCase().includes(q))
+      list = list.filter((ws) => `${ws.workspace_id} ${wsDir?.[ws.workspace_id]?.name ?? ''}`.toLowerCase().includes(q))
     }
     return list
   }, [pageData?.workspace_summaries, search])
@@ -337,7 +341,7 @@ export default function WorkspacesPage() {
                         stroke={DB_COLORS[i % DB_COLORS.length]}
                         strokeWidth={2}
                         dot={false}
-                        name={`WS ${shortWs(wsId)}`}
+                        name={wsDir?.[wsId]?.name || `WS ${shortWs(wsId)}`}
                       />
                     ))}
                   </RechartsLineChart>
@@ -391,7 +395,7 @@ export default function WorkspacesPage() {
                         >
                           <td className="py-2.5 px-3">
                             <div className="flex items-center gap-2">
-                              <span className="font-mono text-xs font-medium dark:text-gray-200">{ws.workspace_id}</span>
+                              <span className="font-mono text-xs font-medium dark:text-gray-200" title={ws.workspace_id}>{wsDir?.[ws.workspace_id]?.name || ws.workspace_id}</span>
                               {isCurrent && <Badge variant="success" className="text-[10px] px-1.5">Current</Badge>}
                             </div>
                           </td>
@@ -675,6 +679,7 @@ function WorkspaceDetail({
   currentWsId: string | null
   onBack: () => void
 }) {
+  const { data: wsDir } = useWorkspaceDirectory()
   const { summary: s, agents: wsAgents, products, types, endpoints } = ws
   const delta = costDelta(Number(s.serving_cost), Number(s.prev_serving_cost))
 
@@ -727,7 +732,7 @@ function WorkspaceDetail({
       <div>
         <h2 className="text-2xl font-bold dark:text-gray-100 flex items-center gap-2">
           <Building2 className="w-6 h-6 text-red-500" />
-          Workspace {wsId}
+          {wsDir?.[wsId]?.name || `Workspace ${wsId}`}
           {wsId === currentWsId && (
             <Badge variant="success" className="text-xs ml-2">Current</Badge>
           )}
@@ -890,6 +895,7 @@ function WorkspaceDetail({
 /* ── Cost Breakdown Tab ──────────────────────────────────────── */
 
 function CostBreakdownTab({ data }: { data: WorkspacePageData | undefined }) {
+  const { data: wsDir } = useWorkspaceDirectory()
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(10)
   const { sort: costSort, toggle: costToggle } = useSort('serving', 'desc')
@@ -897,13 +903,13 @@ function CostBreakdownTab({ data }: { data: WorkspacePageData | undefined }) {
   const wsCosts = useMemo(() => {
     if (!data?.workspace_summaries) return []
     return data.workspace_summaries.map((ws) => ({
-      workspace: shortWs(ws.workspace_id),
+      workspace: shortWs(ws.workspace_id, wsDir),
       full_id: ws.workspace_id,
       serving: Number(ws.serving_cost),
       total: Number(ws.total_all_product_cost),
       dbus: Number(ws.serving_dbus),
     }))
-  }, [data?.workspace_summaries])
+  }, [data?.workspace_summaries, wsDir])
 
   const costAccessor = useCallback((row: { full_id: string; serving: number; total: number; dbus: number }, key: string) => {
     switch (key) {
@@ -1013,6 +1019,7 @@ function CostBreakdownTab({ data }: { data: WorkspacePageData | undefined }) {
 /* ── Agent Inventory Tab ─────────────────────────────────────── */
 
 function AgentInventoryTab({ data }: { data: WorkspacePageData | undefined }) {
+  const { data: wsDir } = useWorkspaceDirectory()
   const [agentSearch, setAgentSearch] = useState('')
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(10)
@@ -1122,7 +1129,7 @@ function AgentInventoryTab({ data }: { data: WorkspacePageData | undefined }) {
               <tbody>
                 {pagedAgents.map((a, i) => (
                   <tr key={i} className="border-b dark:border-gray-700/50 hover:bg-gray-50 dark:hover:bg-gray-800/40">
-                    <td className="py-2 px-3 font-mono text-xs dark:text-gray-400">{shortWs(a.workspace_id)}</td>
+                    <td className="py-2 px-3 font-mono text-xs dark:text-gray-400">{shortWs(a.workspace_id, wsDir)}</td>
                     <td className="py-2 px-3 font-medium dark:text-gray-200">{a.name}</td>
                     <td className="py-2 px-3">
                       <Badge variant="default" className="text-xs">{a.type?.replace(/_/g, ' ')}</Badge>
@@ -1160,6 +1167,7 @@ function AgentInventoryTab({ data }: { data: WorkspacePageData | undefined }) {
 /* ── Top Endpoints Tab ───────────────────────────────────────── */
 
 function TopEndpointsTab({ data }: { data: WorkspacePageData | undefined }) {
+  const { data: wsDir } = useWorkspaceDirectory()
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(10)
   const { sort: epTabSort, toggle: epTabToggle } = useSort('cost', 'desc')
@@ -1223,7 +1231,7 @@ function TopEndpointsTab({ data }: { data: WorkspacePageData | undefined }) {
               <tbody>
                 {pagedEndpoints.map((ep, i) => (
                   <tr key={i} className="border-b dark:border-gray-700/50 hover:bg-gray-50 dark:hover:bg-gray-800/40">
-                    <td className="py-2 px-3 font-mono text-xs dark:text-gray-400">{shortWs(ep.workspace_id)}</td>
+                    <td className="py-2 px-3 font-mono text-xs dark:text-gray-400">{shortWs(ep.workspace_id, wsDir)}</td>
                     <td className="py-2 px-3 font-mono text-xs font-medium dark:text-gray-200">{ep.endpoint_name}</td>
                     <td className="py-2 px-3 text-right dark:text-gray-300">{fmtCost(Number(ep.total_cost))}</td>
                     <td className="py-2 px-3 text-right dark:text-gray-300">{fmtNumber(Number(ep.total_dbus))}</td>
