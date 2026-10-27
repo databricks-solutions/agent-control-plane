@@ -510,3 +510,23 @@ class TestWorkspaceSelectorScope:
             r = app_client.get("/api/v1/vector-search/lakebase/health?days=14&workspace_ids=ws1,ws2")
         assert r.status_code == 200
         assert fn.call_args.kwargs["allowed_workspace_ids"] == ["ws1", "ws2"]
+
+
+class TestCallersRouteScope:
+    """/usage/callers takes a free-form workspace_id; the caller's allow-list must
+    still bound it (caller identities are sensitive)."""
+
+    def test_no_access_returns_empty_without_query(self, app_client):
+        with patch("backend.api.vector_search.get_allowed_workspace_ids", return_value=[]), \
+             patch(f"{_SVC}.execute_query") as q:
+            r = app_client.get("/api/v1/vector-search/usage/callers?index_name=a.b.c&workspace_id=ws9")
+        assert r.status_code == 200 and r.json() == []
+        q.assert_not_called()
+
+    def test_scoped_caller_is_bounded_by_allow_list(self, app_client):
+        with patch("backend.api.vector_search.get_allowed_workspace_ids", return_value=["ws1"]), \
+             patch(f"{_SVC}.execute_query", return_value=[]) as q:
+            r = app_client.get("/api/v1/vector-search/usage/callers?index_name=a.b.c&workspace_id=ws9")
+        assert r.status_code == 200
+        sql, params = q.call_args[0][0], q.call_args[0][1]
+        assert "ANY(%(ws)s)" in sql and params["ws"] == ["ws1"]

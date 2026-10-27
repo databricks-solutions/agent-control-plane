@@ -105,11 +105,13 @@ def _list_kind(host: str, headers: dict, path: str, key: str):
             body = r.json()
             out.extend(body.get(key, []) or [])
             nxt = body.get("next_page_token")
-            if not nxt or nxt == page_token:
-                break
+            if not nxt:  # the ONLY complete-list signal
+                print(f"  {path}: {len(out)}")
+                return out, True
+            if nxt == page_token:
+                raise RuntimeError("pagination cursor did not advance")
             page_token = nxt
-        print(f"  {path}: {len(out)}")
-        return out, True
+        raise RuntimeError("page cap (200) reached before the last page")
     except Exception as exc:
         print(f"  WARNING: {path} list failed after {len(out)} items ({type(exc).__name__}: {exc}) — discarding partial list")
         return [], False
