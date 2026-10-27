@@ -87,6 +87,7 @@ class TestCostByServiceSavepoint:
 
         def execute(self, sql, params=None):
             self.sql_log.append(" ".join(sql.split()))
+            self.params_log = getattr(self, "params_log", []) + [params]
             self._last = sql
             if self.fail_map and "uag_endpoint_service_map" in sql:
                 raise Exception('relation "uag_endpoint_service_map" does not exist')
@@ -100,7 +101,7 @@ class TestCostByServiceSavepoint:
         def close(self):
             pass
 
-    def _run(self, cur):
+    def _run(self, cur, allowed=None):
         from contextlib import contextmanager
         from unittest.mock import patch, MagicMock
         from backend.services import billing_service as b
@@ -114,7 +115,7 @@ class TestCostByServiceSavepoint:
 
         with patch.object(b.DatabasePool, "get_connection", _conn), \
              patch.object(b, "maybe_refresh_async", lambda *a, **k: None):
-            return b.get_all_page_data(days=30, allowed_workspace_ids=None)
+            return b.get_all_page_data(days=30, allowed_workspace_ids=allowed)
 
     def test_missing_map_table_rolls_back_savepoint_only(self):
         cur = self._Cur(fail_map=True)
@@ -133,3 +134,14 @@ class TestCostByServiceSavepoint:
         out = self._run(cur)
         assert out["cost_by_service"][0]["service_name"] == "system.ai.claude-opus-4-8"
         assert "RELEASE SAVEPOINT svc_cost" in cur.sql_log
+
+
+    def test_scoped_caller_filters_service_cost_by_workspace(self):
+        """A workspace-scoped caller must only see gateway cost for their workspaces."""
+        cur = self._Cur(fail_map=False)
+        self._run(cur, allowed=["ws1"])
+        svc = [(sql, prm) for sql, prm in zip(cur.sql_log, cur.params_log) if "uag_endpoint_service_map" in sql]
+        assert len(svc) == 2
+        for sql, prm in svc:
+            assert "u.workspace_id = ANY(%s)" in sql
+            assert any(p == ["ws1"] for p in (prm or ())), prm

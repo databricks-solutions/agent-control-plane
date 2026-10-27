@@ -2571,12 +2571,12 @@ rm_counts["lakebase_wait_events"] = _mirror_full_refresh(
 
 # COMMAND ----------
 
-# Lakebase cost per project/branch per day (list-price join from the billing workflow).
+# Lakebase cost per project/branch, pre-aggregated per fixed window (7 / 30 / 90 days).
 LB_COST_PROJECT_DELTA = f"{CATALOG}.{SCHEMA}.lakebase_cost_by_project"
 print(f"▸ Syncing {LB_COST_PROJECT_DELTA} → lakebase_cost_by_project ...")
 _ensure_ddl(rm_conn, [
     """CREATE TABLE IF NOT EXISTS lakebase_cost_by_project (
-        usage_date      DATE NOT NULL,
+        window_days     INT NOT NULL,
         workspace_id    TEXT NOT NULL,
         project_id      TEXT NOT NULL,
         branch_id       TEXT DEFAULT '',
@@ -2586,14 +2586,14 @@ _ensure_ddl(rm_conn, [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_lbcp_ws ON lakebase_cost_by_project (workspace_id)",
     "CREATE INDEX IF NOT EXISTS idx_lbcp_project ON lakebase_cost_by_project (project_id)",
-    "CREATE INDEX IF NOT EXISTS idx_lbcp_date ON lakebase_cost_by_project (usage_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_lbcp_window ON lakebase_cost_by_project (window_days)",
 ])
 rm_counts["lakebase_cost_by_project"] = _mirror_full_refresh(
     rm_conn, "lakebase_cost_by_project", LB_COST_PROJECT_DELTA,
     """INSERT INTO lakebase_cost_by_project
-       (usage_date, workspace_id, project_id, branch_id, total_dbus, total_cost_usd, last_synced)
+       (window_days, workspace_id, project_id, branch_id, total_dbus, total_cost_usd, last_synced)
        VALUES %s""",
-    lambda r: (str(r.usage_date), r.workspace_id, r.project_id, r.branch_id or "",
+    lambda r: (int(r.window_days), r.workspace_id, r.project_id, r.branch_id or "",
                float(r.total_dbus or 0), float(r.total_cost_usd or 0), now),
     "Lakebase cost by project",
 )

@@ -93,8 +93,9 @@ _KINDS = [
 
 def _list_kind(host: str, headers: dict, path: str, key: str):
     """List one service kind via REST (run-as identity). Paginated.
-    Returns (items, ok) — ok=False when the call failed, so the caller can
-    tell a failed list from a genuinely empty one."""
+    Returns (items, ok) — ok=False when ANY page failed. A partial list is
+    discarded (returns []), so a mid-pagination error can never be written as if
+    it were the complete inventory."""
     out, page_token = [], None
     try:
         for _ in range(200):  # page cap — defends against a non-advancing cursor
@@ -110,8 +111,8 @@ def _list_kind(host: str, headers: dict, path: str, key: str):
         print(f"  {path}: {len(out)}")
         return out, True
     except Exception as exc:
-        print(f"  WARNING: {path} list failed ({type(exc).__name__}: {exc})")
-        return out, False
+        print(f"  WARNING: {path} list failed after {len(out)} items ({type(exc).__name__}: {exc}) — discarding partial list")
+        return [], False
 
 
 def _rate_limits(cfg: dict) -> list:
@@ -209,17 +210,46 @@ for path, key, stype in _KINDS:
                 ",".join(s.get("supported_api_types", []) or []), s.get("create_time"), now,
             ))
 
-# A failed list must not wipe a good previous inventory (keep the snapshot); an
-# empty-but-successful list is truthful and overwrites. First run → write empty.
-def _write(rows, schema, table, keep_on_failure: bool):
-    if not rows and keep_on_failure and spark.catalog.tableExists(table):
-        print(f"  ↺ list failed — keeping previous snapshot of {table}")
-        return
+# A failed list must never wipe good rows. For each kind whose list failed, carry its
+# rows over from the previous snapshot, so one flaky (e.g. Beta agent-services) call
+# can't drop that kind while the others refresh. Empty-but-successful lists are
+# truthful and overwrite. First run (no previous table) → write what we have.
+_FAILED_TYPES = {stype for path, _, stype in _KINDS if path in failed}
+
+
+def _previous(table: str, schema, where: str = ""):
+    """Previous snapshot rows that still match the current schema's column list."""
+    if not spark.catalog.tableExists(table):
+        return []
+    try:
+        cols = [f.name for f in schema.fields]
+        if set(cols) - set(spark.table(table).columns):
+            print(f"  previous {table} has an older schema — nothing to carry")
+            return []
+        return [tuple(r) for r in spark.sql(f"SELECT {', '.join(cols)} FROM {table} {where}").collect()]
+    except Exception as exc:  # schema drift on an old table → nothing to carry
+        print(f"  could not read previous {table}: {type(exc).__name__}")
+        return []
+
+
+if _FAILED_TYPES:
+    kinds = ", ".join(f"'{t}'" for t in sorted(_FAILED_TYPES))
+    carried = _previous(SERVICES_TABLE, SERVICES_SCHEMA, f"WHERE service_type IN ({kinds})")
+    service_rows += [r[:-1] + (now,) for r in carried]
+    print(f"  ↺ carried over {len(carried)} previous rows for failed kinds: {sorted(_FAILED_TYPES)}")
+if "MODEL_SERVICE" in _FAILED_TYPES:
+    carried_m = _previous(TABLE, SCHEMA_T)
+    model_rows = [r[:-1] + (now,) for r in carried_m]
+    print(f"  ↺ carried over {len(carried_m)} previous model_services_inventory rows")
+
+
+def _write(rows, schema, table):
     spark.createDataFrame(rows, schema).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(table)
     print(f"✅ Wrote {len(rows)} rows to {table}")
 
-_write(service_rows, SERVICES_SCHEMA, SERVICES_TABLE, keep_on_failure=bool(failed) and not service_rows)
-_write(model_rows, SCHEMA_T, TABLE, keep_on_failure="model-services" in failed)
+
+_write(service_rows, SERVICES_SCHEMA, SERVICES_TABLE)
+_write(model_rows, SCHEMA_T, TABLE)
 
 # COMMAND ----------
 

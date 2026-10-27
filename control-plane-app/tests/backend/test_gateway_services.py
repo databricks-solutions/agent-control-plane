@@ -98,3 +98,13 @@ def test_legacy_route_aliases_still_resolve(app_client):
                           ("/api/v1/gateway/uag-v2-timeseries", 2), ("/api/v1/gateway/unity-timeseries", 2)):
             r = app_client.get(path)
             assert r.status_code == 200 and r.json() == {"ok": val}, path
+
+
+def test_services_route_passes_caller_scope(app_client):
+    """Route wiring: a scoped caller's allow-list reaches the service → no traffic."""
+    with patch("backend.api.gateway.get_allowed_workspace_ids", return_value=["ws1"]), \
+         patch("backend.database.execute_query", return_value=[]) as q:
+        r = app_client.get("/api/v1/gateway/services")
+    assert r.status_code == 200
+    assert r.json()["traffic_visible"] is False
+    assert q.call_count == 1  # inventory only — account-wide usage never read

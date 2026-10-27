@@ -555,7 +555,7 @@ LB_WAIT_SCHEMA = StructType([
 ])
 
 LB_COST_PROJECT_SCHEMA = StructType([
-    StructField("usage_date", StringType(), False),
+    StructField("window_days", IntegerType(), False),   # one of LB_COST_WINDOWS
     StructField("workspace_id", StringType(), False),
     StructField("project_id", StringType(), False),
     StructField("branch_id", StringType(), True),
@@ -771,30 +771,42 @@ _n_lb_wait = _write_snapshot(lb_wait_raw, LB_WAIT_SCHEMA, LB_WAIT_TABLE, lambda 
 
 # COMMAND ----------
 
-# Lakebase cost per project/branch per day. Same list-price join as the KB billing
-# block above. Rows without a project_id (serverless SKUs mis-tagged LAKEBASE) are
-# excluded here — they stay in kb_billing_daily for the product total.
-print(f"▸ Querying system.billing.usage LAKEBASE cost by project (last {LB_COST_DAYS}d) ...")
+# Lakebase cost per project/branch, pre-aggregated for fixed windows. A day grain is
+# far too large to mirror on big accounts (~1.08M rows / 90d on the FE account) and the
+# app only ever shows a window total, so store one row per (window, workspace,
+# project, branch) — ~36k rows there. Same list-price join as the KB billing block
+# above. Rows without a project_id (serverless SKUs mis-tagged LAKEBASE) are excluded
+# here — they stay in kb_billing_daily for the product total.
+LB_COST_WINDOWS = sorted({7, 30, LB_COST_DAYS})
+print(f"▸ Querying system.billing.usage LAKEBASE cost by project (windows {LB_COST_WINDOWS}d) ...")
 lb_cost_raw = _spark_rows(f"""
-    SELECT CAST(u.usage_date AS STRING)                              AS usage_date,
-           COALESCE(CAST(u.workspace_id AS STRING), '')              AS workspace_id,
-           u.usage_metadata.project_id                               AS project_id,
-           COALESCE(u.usage_metadata.branch_id, '')                  AS branch_id,
-           ROUND(SUM(u.usage_quantity), 4)                           AS total_dbus,
-           ROUND(SUM(u.usage_quantity *
-               COALESCE(lp.pricing.effective_list.default, lp.pricing.default)
-           ), 4)                                                     AS total_cost_usd
-    FROM system.billing.usage u
-    LEFT JOIN system.billing.list_prices lp
-        ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
-        AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
-    WHERE u.billing_origin_product = 'LAKEBASE'
-      AND u.usage_metadata.project_id IS NOT NULL
-      AND u.usage_date >= current_date() - INTERVAL {LB_COST_DAYS} DAYS
+    WITH daily AS (
+        SELECT u.usage_date,
+               COALESCE(CAST(u.workspace_id AS STRING), '')              AS workspace_id,
+               u.usage_metadata.project_id                               AS project_id,
+               COALESCE(u.usage_metadata.branch_id, '')                  AS branch_id,
+               SUM(u.usage_quantity)                                     AS dbus,
+               SUM(u.usage_quantity *
+                   COALESCE(lp.pricing.effective_list.default, lp.pricing.default)) AS cost
+        FROM system.billing.usage u
+        LEFT JOIN system.billing.list_prices lp
+            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
+            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
+        WHERE u.billing_origin_product = 'LAKEBASE'
+          AND u.usage_metadata.project_id IS NOT NULL
+          AND u.usage_date >= current_date() - INTERVAL {max(LB_COST_WINDOWS)} DAYS
+        GROUP BY 1, 2, 3, 4
+    )
+    SELECT w.window_days, d.workspace_id, d.project_id, d.branch_id,
+           ROUND(SUM(d.dbus), 4) AS total_dbus,
+           ROUND(SUM(d.cost), 4) AS total_cost_usd
+    FROM daily d
+    CROSS JOIN (SELECT explode(array({", ".join(str(x) for x in LB_COST_WINDOWS)})) AS window_days) w
+    WHERE d.usage_date >= current_date() - make_interval(0, 0, 0, w.window_days)
     GROUP BY 1, 2, 3, 4
 """, "Lakebase cost by project")
 _n_lb_cost = _write_snapshot(lb_cost_raw, LB_COST_PROJECT_SCHEMA, LB_COST_PROJECT_TABLE, lambda r: (
-    _s(r["usage_date"]), _s(r["workspace_id"]), _s(r["project_id"]), _s(r["branch_id"]),
+    int(r["window_days"]), _s(r["workspace_id"]), _s(r["project_id"]), _s(r["branch_id"]),
     _f(r["total_dbus"]), _f(r["total_cost_usd"]), now,
 ))
 

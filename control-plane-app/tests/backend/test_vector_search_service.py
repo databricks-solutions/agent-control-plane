@@ -339,6 +339,15 @@ class TestRetrievalMemoryScope:
             get_lakebase_cost_by_project(30, allowed_workspace_ids=["ws1"])
             assert mock_q.call_args[0][0].count("ANY(%(ws)s)") == 2
 
+    def test_cost_by_project_picks_covering_window(self):
+        """Table holds pre-aggregated 7/30/90-day totals; days maps to the smallest covering window."""
+        from backend.services.vector_search_service import get_lakebase_cost_by_project
+        for days, window in ((1, 7), (7, 7), (14, 30), (30, 30), (60, 90), (365, 90)):
+            with patch(f"{_SVC}.execute_query", return_value=[]) as mock_q:
+                get_lakebase_cost_by_project(days, allowed_workspace_ids=None)
+            assert "window_days = %(window)s" in mock_q.call_args[0][0]
+            assert mock_q.call_args[0][1]["window"] == window, days
+
     def test_callers_workspace_filter_is_parameterised(self):
         from backend.services.vector_search_service import get_vs_index_callers
         with patch(f"{_SVC}.execute_query", return_value=[]) as mock_q:

@@ -1091,10 +1091,16 @@ def get_lakebase_wait_events(
     ]
 
 
+_LB_COST_WINDOWS = (7, 30, 90)  # windows workflow 03 pre-aggregates
+
+
 def get_lakebase_cost_by_project(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    """Lakebase $ per project/branch over the window, with names from the health cache."""
+    """Lakebase $ per project/branch over the window, with names from the health cache.
+    The table holds pre-aggregated 7/30/90-day totals; ``days`` picks the smallest
+    window that covers it (capped at 90)."""
     if allowed_workspace_ids is not None and not allowed_workspace_ids:
         return []
+    window = next((w for w in _LB_COST_WINDOWS if w >= days), _LB_COST_WINDOWS[-1])
     ws_c = _ws_pred(allowed_workspace_ids, alias="c")
     ws_n = _ws_pred(allowed_workspace_ids)
     rows = _safe_query(
@@ -1109,10 +1115,10 @@ def get_lakebase_cost_by_project(days: int = 30, allowed_workspace_ids: Optional
                    SUM(c.total_dbus) AS total_dbus, SUM(c.total_cost_usd) AS total_cost_usd
             FROM lakebase_cost_by_project c
             LEFT JOIN names n ON n.project_id = c.project_id AND n.branch_id = c.branch_id
-            {_where(["c.usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s", ws_c])}
+            {_where(["c.window_days = %(window)s", ws_c])}
             GROUP BY c.project_id, c.branch_id
             ORDER BY total_cost_usd DESC LIMIT 50""",
-        {"days": days, "ws": allowed_workspace_ids},
+        {"window": window, "ws": allowed_workspace_ids},
         "lakebase_cost_by_project",
     )
     return [
