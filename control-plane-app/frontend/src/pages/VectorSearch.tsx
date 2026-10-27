@@ -7,6 +7,9 @@ import {
   useVectorSearchIndexDetails,
   useVectorSearchHealthHistory,
   useVectorSearchPageData,
+  useVectorSearchUsageTrend,
+  useVectorSearchIndexUsage,
+  useVectorSearchIndexCallers,
   useKnowledgeBasesOverview,
   useKnowledgeBasesCostTrend,
   useLakebaseInstances,
@@ -14,10 +17,19 @@ import {
   useLakebaseCostTrend,
   useLakebaseCostByWorkspace,
   useLakebaseCostByType,
+  useLakebaseHealth,
+  useLakebaseWaitEvents,
+  useLakebaseCostByProject,
   useKBTopWorkspacesDaily,
   useVSTopWorkspacesDaily,
   useLBTopWorkspacesDaily,
   useWorkspaceDirectory,
+  useSeesAccountWide,
+  type VsIndexUsageRow,
+  type VsIndexCallerRow,
+  type LakebaseHealthRow,
+  type LakebaseWaitEventRow,
+  type LakebaseProjectCostRow,
 } from '@/api/hooks'
 import { apiClient } from '@/api/client'
 import { RefreshButton } from '@/components/RefreshButton'
@@ -26,6 +38,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { KpiCard } from '@/components/KpiCard'
 import { TablePagination } from '@/components/TablePagination'
+import { SortableHeader, useSort, sortRows } from '@/components/SortableTable'
 import { LazyChart } from '@/components/charts/LazyChart'
 import {
   LineChart,
@@ -48,6 +61,7 @@ import {
   ChevronUp,
   ChevronDown,
   Layers,
+  Activity,
 } from 'lucide-react'
 import { DB_GRID, DB_AXIS_TEXT } from '@/lib/brand'
 
@@ -107,9 +121,9 @@ export default function VectorSearchPage() {
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Knowledge Bases</h2>
+          <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Retrieval &amp; Memory</h2>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Vector Search, Lakebase &mdash; performance &amp; cost monitoring
+            Vector Search usage, Lakebase health &amp; cost
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -437,6 +451,516 @@ function OverviewTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
   )
 }
 
+/* ── Retrieval & Memory helpers ─────────────────────────────── */
+
+function formatBytes(v: number): string {
+  if (v >= 1e12) return `${(v / 1e12).toFixed(2)} TB`
+  if (v >= 1e9) return `${(v / 1e9).toFixed(2)} GB`
+  if (v >= 1e6) return `${(v / 1e6).toFixed(1)} MB`
+  if (v >= 1e3) return `${(v / 1e3).toFixed(1)} KB`
+  return `${Math.round(v)} B`
+}
+
+function shortIndexName(full: string): string {
+  return full?.split('.').pop() || full || '—'
+}
+
+/** Service principals show up as bare UUIDs in audit identities. */
+function callerLabel(caller: string): string {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(caller) ? `Service principal ${caller.slice(0, 8)}` : caller
+}
+
+/** Agent Bricks label — derived server-side from the endpoint / index name. */
+function ManagedByBadge({ managedBy }: { managedBy: VsIndexUsageRow['managed_by'] }) {
+  if (!managedBy) return <span className="text-xs text-gray-400">{'—'}</span>
+  const label = managedBy === 'knowledge_assistant' ? 'Knowledge Assistant' : 'Supervisor'
+  return (
+    <Badge variant="info" className="text-[10px] whitespace-nowrap" title="Managed by Agent Bricks">
+      Agent Bricks · {label}
+    </Badge>
+  )
+}
+
+/** Honest empty state: scoped callers only see their workspaces, account-wide needs admin. */
+function UsageEmpty({ seesAccountWide, days, what }: { seesAccountWide: boolean | undefined; days: number; what: string }) {
+  return (
+    <div className="text-center py-10 text-gray-400 dark:text-gray-500 text-sm">
+      {seesAccountWide === false
+        ? `No ${what} for your workspaces in the last ${days} days. Account-wide view requires account admin.`
+        : `No ${what} in the last ${days} days. Usage refreshes with the discovery workflow.`}
+    </div>
+  )
+}
+
+/** Pivot "one series per label" rows by day; keep the topN series by peak value. */
+function pivotByDay<T extends { usage_date: string }>(
+  rows: T[],
+  label: (r: T) => string,
+  value: (r: T) => number,
+  topN = 5,
+) {
+  const peaks: Record<string, number> = {}
+  const byDate: Record<string, Record<string, number | string>> = {}
+  for (const r of rows) {
+    const s = label(r)
+    const v = value(r)
+    peaks[s] = Math.max(peaks[s] ?? 0, v)
+    if (!byDate[r.usage_date]) byDate[r.usage_date] = { date: r.usage_date }
+    byDate[r.usage_date][s] = ((byDate[r.usage_date][s] as number | undefined) ?? 0) + v
+  }
+  const series = Object.entries(peaks)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topN)
+    .map(([k]) => k)
+  const data = Object.values(byDate).sort((a, b) => String(a.date).localeCompare(String(b.date)))
+  return { data, series }
+}
+
+function projectSeriesLabel(r: { project_name: string; project_id: string; branch_name: string }): string {
+  const base = r.project_name || r.project_id || 'unknown'
+  return r.branch_name ? `${base} · ${r.branch_name}` : base
+}
+
+/* ── Vector Search: index usage (Retrieval & Memory) ───────── */
+
+type IndexUsageRow = VsIndexUsageRow & { name: string; total: number; error_rate: number }
+
+function indexUsageAccessor(r: IndexUsageRow, key: string): string | number | null {
+  switch (key) {
+    case 'name': return r.name
+    case 'managed': return r.managed_by ?? ''
+    case 'query_count': return r.query_count
+    case 'error_rate': return r.error_rate
+    case 'peak_daily_callers': return r.peak_daily_callers
+    case 'last_active_date': return r.last_active_date
+    default: return null
+  }
+}
+
+function VectorSearchUsageSection({ days }: { days: number }) {
+  const { data: trendRaw, isLoading: trendLoading } = useVectorSearchUsageTrend(days)
+  const { data: indexesRaw, isLoading: indexesLoading } = useVectorSearchIndexUsage(days)
+  const seesAccountWide = useSeesAccountWide()
+
+  const { sort, toggle } = useSort<string>('query_count', 'desc')
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
+  const [selected, setSelected] = useState<{ index_name: string; workspace_id: string } | null>(null)
+  const { data: callersRaw, isLoading: callersLoading } = useVectorSearchIndexCallers(
+    selected?.index_name ?? null,
+    selected?.workspace_id ?? null,
+  )
+
+  // Daily reads (queryVectorIndex) and errors (all actions) for the trend chart.
+  const trend = useMemo(() => {
+    const byDate: Record<string, { date: string; queries: number; errors: number }> = {}
+    for (const r of trendRaw ?? []) {
+      const d = r.usage_date
+      if (!byDate[d]) byDate[d] = { date: d, queries: 0, errors: 0 }
+      if (r.action === 'queryVectorIndex') byDate[d].queries += Number(r.request_count || 0)
+      byDate[d].errors += Number(r.error_count || 0)
+    }
+    return Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date))
+  }, [trendRaw])
+
+  const indexRows: IndexUsageRow[] = useMemo(() => (indexesRaw ?? []).map((r) => {
+    const total = Number(r.query_count || 0) + Number(r.scan_count || 0) + Number(r.write_count || 0)
+    return {
+      ...r,
+      name: shortIndexName(r.index_name),
+      total,
+      error_rate: total > 0 ? Number(r.error_count || 0) / total : 0,
+    }
+  }), [indexesRaw])
+
+  const sortedIdx = useMemo(() => sortRows(indexRows, sort, indexUsageAccessor), [indexRows, sort])
+  const pagedIdx = sortedIdx.slice(page * pageSize, (page + 1) * pageSize)
+
+  const totalQueries = indexRows.reduce((s, r) => s + Number(r.query_count || 0), 0)
+  const totalAll = indexRows.reduce((s, r) => s + r.total, 0)
+  const totalErrors = indexRows.reduce((s, r) => s + Number(r.error_count || 0), 0)
+  const activeIndexes = indexRows.filter((r) => r.total > 0).length
+  const agentBricksIndexes = indexRows.filter((r) => r.managed_by).length
+
+  const callers: VsIndexCallerRow[] = Array.isArray(callersRaw) ? callersRaw : []
+  const selectedName = selected ? shortIndexName(selected.index_name) : ''
+
+  if (trendLoading || indexesLoading) {
+    return (
+      <div className="flex items-center justify-center py-12 text-gray-400">
+        <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading index usage...
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3 pt-1">
+        <Activity className="w-5 h-5 text-gray-400" />
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Index Usage</h3>
+        <div className="flex-1 border-t border-gray-200 dark:border-gray-700" />
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <KpiCard title={`Queries (${days}d)`} value={totalQueries} format="number" />
+        <KpiCard
+          title="Error Rate"
+          value={totalAll > 0 ? (totalErrors / totalAll) * 100 : 0}
+          format="percentage"
+        />
+        <KpiCard title="Indexes Queried" value={activeIndexes} format="number" />
+        <KpiCard title="Agent Bricks Indexes" value={agentBricksIndexes} format="number" />
+      </div>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Daily Queries &amp; Errors</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {trend.length === 0 ? (
+            <UsageEmpty seesAccountWide={seesAccountWide} days={days} what="Vector Search audit events" />
+          ) : (
+            <LazyChart height={260}>
+              <ResponsiveContainer width="100%" height={260}>
+                <LineChart data={trend}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={DB_GRID} />
+                  <XAxis dataKey="date" tick={{ fontSize: 12, fill: DB_AXIS_TEXT }} />
+                  <YAxis tick={{ fontSize: 12, fill: DB_AXIS_TEXT }} tickFormatter={(v: number) => fmtNumber(v)} />
+                  <Tooltip formatter={(v: number, name: string) => [fmtNumber(v), name]} contentStyle={TOOLTIP_STYLE} />
+                  <Legend wrapperStyle={{ fontSize: 13 }} />
+                  <Line type="monotone" dataKey="queries" stroke="#E53935" strokeWidth={2} dot={false} name="Queries" />
+                  <Line type="monotone" dataKey="errors" stroke="#F59E0B" strokeWidth={2} dot={false} name="Errors" />
+                </LineChart>
+              </ResponsiveContainer>
+            </LazyChart>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Top Indexes by Queries</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {indexRows.length === 0 ? (
+            <UsageEmpty seesAccountWide={seesAccountWide} days={days} what="Vector Search audit events" />
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-200 dark:border-gray-700">
+                      <SortableHeader label="Index" sortKey="name" current={sort} onToggle={toggle} className="py-2 pr-4 text-gray-500 dark:text-gray-400" />
+                      <SortableHeader label="Managed by" sortKey="managed" current={sort} onToggle={toggle} className="py-2 pr-4 text-gray-500 dark:text-gray-400" />
+                      <SortableHeader label="Queries" sortKey="query_count" current={sort} onToggle={toggle} align="right" className="py-2 pr-4 text-gray-500 dark:text-gray-400" />
+                      <SortableHeader label="Error Rate" sortKey="error_rate" current={sort} onToggle={toggle} align="right" className="py-2 pr-4 text-gray-500 dark:text-gray-400" />
+                      <SortableHeader label="Peak Daily Callers" sortKey="peak_daily_callers" current={sort} onToggle={toggle} align="right" className="py-2 pr-4 text-gray-500 dark:text-gray-400" />
+                      <SortableHeader label="Last Active" sortKey="last_active_date" current={sort} onToggle={toggle} className="py-2 text-gray-500 dark:text-gray-400" />
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                    {pagedIdx.map((r) => {
+                      const isSel = selected?.index_name === r.index_name && selected?.workspace_id === r.workspace_id
+                      return (
+                        <tr
+                          key={`${r.workspace_id}-${r.index_name}`}
+                          onClick={() => setSelected({ index_name: r.index_name, workspace_id: r.workspace_id })}
+                          className={`cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 ${isSel ? 'bg-gray-50 dark:bg-gray-800/70' : ''}`}
+                        >
+                          <td className="py-2 pr-4">
+                            <div className="font-medium text-gray-900 dark:text-gray-100 text-xs truncate max-w-[220px]" title={r.index_name}>{r.name}</div>
+                            <div className="text-[11px] text-gray-400 truncate max-w-[220px]">{r.endpoint_name || r.workspace_id}</div>
+                          </td>
+                          <td className="py-2 pr-4"><ManagedByBadge managedBy={r.managed_by} /></td>
+                          <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtNumber(Number(r.query_count || 0))}</td>
+                          <td className="py-2 pr-4 text-right tabular-nums">
+                            <span className={r.error_rate > 0.05 ? 'text-red-600 dark:text-red-400' : 'text-gray-700 dark:text-gray-300'}>
+                              {(r.error_rate * 100).toFixed(1)}%
+                            </span>
+                          </td>
+                          <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{r.peak_daily_callers}</td>
+                          <td className="py-2 text-xs text-gray-500">{r.last_active_date || '—'}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <TablePagination
+                page={page}
+                totalItems={sortedIdx.length}
+                pageSize={pageSize}
+                onPageChange={setPage}
+                onPageSizeChange={setPageSize}
+              />
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {selected && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              Top Callers
+              <span className="font-mono text-sm font-normal text-gray-500 dark:text-gray-400 truncate" title={selected.index_name}>{selectedName}</span>
+              <button
+                type="button"
+                onClick={() => setSelected(null)}
+                className="ml-auto text-xs font-normal text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+              >
+                Clear
+              </button>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {callersLoading ? (
+              <div className="flex items-center justify-center py-8 text-gray-400">
+                <Loader2 className="w-4 h-4 animate-spin mr-2" /> Loading callers...
+              </div>
+            ) : callers.length === 0 ? (
+              <UsageEmpty seesAccountWide={seesAccountWide} days={days} what="caller activity for this index" />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                      <th className="pb-2 pr-4 font-medium">Caller</th>
+                      <th className="pb-2 pr-4 font-medium text-right">Requests</th>
+                      <th className="pb-2 pr-4 font-medium text-right">Errors</th>
+                      <th className="pb-2 font-medium">Last Seen</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                    {callers.map((c, i) => (
+                      <tr key={`${c.caller}-${i}`} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                        <td className="py-2 pr-4 text-gray-900 dark:text-gray-100 text-xs" title={c.caller}>{callerLabel(c.caller)}</td>
+                        <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtNumber(Number(c.request_count || 0))}</td>
+                        <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{Number(c.error_count || 0)}</td>
+                        <td className="py-2 text-xs text-gray-500">{c.last_seen ? new Date(c.last_seen).toLocaleString() : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+/* ── Lakebase: operational health + per-project cost (Retrieval & Memory) ── */
+
+function LakebaseHealthSection({ days }: { days: number }) {
+  const { data: healthRaw, isLoading: healthLoading } = useLakebaseHealth(days)
+  const { data: waitsRaw, isLoading: waitsLoading } = useLakebaseWaitEvents(25)
+  const seesAccountWide = useSeesAccountWide()
+
+  const health: LakebaseHealthRow[] = Array.isArray(healthRaw) ? healthRaw : []
+  const waits: LakebaseWaitEventRow[] = Array.isArray(waitsRaw) ? waitsRaw : []
+
+  const projectCount = new Set(health.map((r) => r.project_id)).size
+  const peakConnections = health.reduce((m, r) => Math.max(m, Number(r.max_connections || 0)), 0)
+  const largestDb = health.reduce((m, r) => Math.max(m, Number(r.max_db_size_bytes || 0)), 0)
+  const topWait = waits[0]
+
+  const connPivot = useMemo(
+    () => pivotByDay(health, projectSeriesLabel, (r) => Number(r.max_connections || 0)),
+    [health],
+  )
+  const sizePivot = useMemo(
+    () => pivotByDay(health, projectSeriesLabel, (r) => Number(r.max_db_size_bytes || 0)),
+    [health],
+  )
+
+  if (healthLoading || waitsLoading) {
+    return (
+      <div className="flex items-center justify-center py-12 text-gray-400">
+        <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading Lakebase health...
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3 pt-1">
+        <Activity className="w-5 h-5 text-gray-400" />
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Operational Health</h3>
+        <div className="flex-1 border-t border-gray-200 dark:border-gray-700" />
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <KpiCard title="Projects Monitored" value={projectCount} format="number" />
+        <KpiCard title="Peak Connections" value={peakConnections} format="number" />
+        <KpiCard title="Largest Database" value={formatBytes(largestDb)} />
+        <KpiCard title="Top Wait Event" value={topWait ? topWait.wait_event_name : '—'} />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Peak Connections per Day</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {connPivot.data.length === 0 ? (
+              <UsageEmpty seesAccountWide={seesAccountWide} days={days} what="Lakebase gauge samples" />
+            ) : (
+              <LazyChart height={260}>
+                <ResponsiveContainer width="100%" height={260}>
+                  <LineChart data={connPivot.data}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={DB_GRID} />
+                    <XAxis dataKey="date" tick={{ fontSize: 11, fill: DB_AXIS_TEXT }} />
+                    <YAxis tick={{ fontSize: 11, fill: DB_AXIS_TEXT }} />
+                    <Tooltip contentStyle={TOOLTIP_STYLE} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    {connPivot.series.map((s, i) => (
+                      <Line key={s} type="monotone" dataKey={s} stroke={WS_COLORS[i % WS_COLORS.length]} strokeWidth={2} dot={false} name={s} />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </LazyChart>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Database Size per Day</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {sizePivot.data.length === 0 ? (
+              <UsageEmpty seesAccountWide={seesAccountWide} days={days} what="Lakebase gauge samples" />
+            ) : (
+              <LazyChart height={260}>
+                <ResponsiveContainer width="100%" height={260}>
+                  <LineChart data={sizePivot.data}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={DB_GRID} />
+                    <XAxis dataKey="date" tick={{ fontSize: 11, fill: DB_AXIS_TEXT }} />
+                    <YAxis tick={{ fontSize: 11, fill: DB_AXIS_TEXT }} tickFormatter={(v: number) => formatBytes(v)} width={80} />
+                    <Tooltip formatter={(v: number, name: string) => [formatBytes(v), name]} contentStyle={TOOLTIP_STYLE} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    {sizePivot.series.map((s, i) => (
+                      <Line key={s} type="monotone" dataKey={s} stroke={WS_COLORS[i % WS_COLORS.length]} strokeWidth={2} dot={false} name={s} />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </LazyChart>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Top Wait Events</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {waits.length === 0 ? (
+            <UsageEmpty seesAccountWide={seesAccountWide} days={7} what="Lakebase wait-event samples" />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                    <th className="pb-2 pr-4 font-medium">Wait Event</th>
+                    <th className="pb-2 pr-4 font-medium">Class</th>
+                    <th className="pb-2 pr-4 font-medium">Project · Branch</th>
+                    <th className="pb-2 pr-4 font-medium text-right">Count</th>
+                    <th className="pb-2 font-medium text-right">Total Wait Time</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                  {waits.map((w, i) => (
+                    <tr key={`${w.wait_event_name}-${w.project_name}-${i}`} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                      <td className="py-2 pr-4 text-xs font-medium text-gray-900 dark:text-gray-100">{w.wait_event_name}</td>
+                      <td className="py-2 pr-4 text-xs text-gray-500">{w.wait_class_name}</td>
+                      <td className="py-2 pr-4 text-xs text-gray-600 dark:text-gray-300">{projectSeriesLabel({ project_name: w.project_name, project_id: '', branch_name: w.branch_name })}</td>
+                      <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtNumber(Number(w.wait_event_count || 0))}</td>
+                      <td className="py-2 text-right tabular-nums text-gray-700 dark:text-gray-300">{Math.round(Number(w.wait_event_time || 0)).toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+const projectCostAccessor = (r: LakebaseProjectCostRow, key: string): string | number | null => {
+  switch (key) {
+    case 'name': return r.project_name
+    case 'total_dbus': return r.total_dbus
+    case 'total_cost_usd': return r.total_cost_usd
+    default: return null
+  }
+}
+
+function LakebaseProjectCostCard({ days }: { days: number }) {
+  const { data: raw, isLoading } = useLakebaseCostByProject(days)
+  const seesAccountWide = useSeesAccountWide()
+  const { sort, toggle } = useSort<string>('total_cost_usd', 'desc')
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
+
+  const sorted = useMemo(
+    () => sortRows(Array.isArray(raw) ? raw : [], sort, projectCostAccessor),
+    [raw, sort],
+  )
+  const paged = sorted.slice(page * pageSize, (page + 1) * pageSize)
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Cost by Project</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="flex items-center justify-center py-8 text-gray-400">
+            <Loader2 className="w-4 h-4 animate-spin mr-2" /> Loading...
+          </div>
+        ) : sorted.length === 0 ? (
+          <UsageEmpty seesAccountWide={seesAccountWide} days={days} what="project-tagged Lakebase usage" />
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 dark:border-gray-700">
+                    <SortableHeader label="Project · Branch" sortKey="name" current={sort} onToggle={toggle} className="py-2 pr-4 text-gray-500 dark:text-gray-400" />
+                    <SortableHeader label="DBUs" sortKey="total_dbus" current={sort} onToggle={toggle} align="right" className="py-2 pr-4 text-gray-500 dark:text-gray-400" />
+                    <SortableHeader label="Cost (USD)" sortKey="total_cost_usd" current={sort} onToggle={toggle} align="right" className="py-2 text-gray-500 dark:text-gray-400" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                  {paged.map((r, i) => (
+                    <tr key={`${r.project_id}-${r.branch_id}-${i}`} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                      <td className="py-2 pr-4 text-gray-900 dark:text-gray-100 text-xs">{projectSeriesLabel({ project_name: r.project_name, project_id: r.project_id, branch_name: r.branch_name })}</td>
+                      <td className="py-2 pr-4 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtNumber(Number(r.total_dbus || 0))}</td>
+                      <td className="py-2 text-right tabular-nums text-gray-700 dark:text-gray-300">{fmtCost(Number(r.total_cost_usd || 0))}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <TablePagination
+              page={page}
+              totalItems={sorted.length}
+              pageSize={pageSize}
+              onPageChange={setPage}
+              onPageSizeChange={setPageSize}
+            />
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 /* ── Vector Search Tab ──────────────────────────────────────── */
 
 function VectorSearchTab({ days, setDays, selectedWsIds }: { days: number; setDays: (d: number) => void; selectedWsIds: string[] }) {
@@ -553,6 +1077,16 @@ function VectorSearchTab({ days, setDays, selectedWsIds }: { days: number; setDa
           <option value={30}>Last 30 days</option>
           <option value={90}>Last 90 days</option>
         </select>
+      </div>
+
+      {/* Usage leads: query volume, errors, callers, Agent Bricks ownership */}
+      <VectorSearchUsageSection days={days} />
+
+      {/* Section divider — cost & inventory follow usage */}
+      <div className="flex items-center gap-3 pt-4">
+        <Database className="w-5 h-5 text-gray-400" />
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Cost</h3>
+        <div className="flex-1 border-t border-gray-200 dark:border-gray-700" />
       </div>
 
       {/* Cost KPIs */}
@@ -932,6 +1466,9 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
         <KpiCard title="Workspaces" value={costSummary?.workspace_count ?? 0} format="number" />
       </div>
 
+      {/* Operational health: connections, DB size, wait events */}
+      <LakebaseHealthSection days={days} />
+
       {/* Cost Type Summary — compute vs storage */}
       {safeCostByType.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -991,6 +1528,9 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
           )}
         </CardContent>
       </Card>
+
+      {/* Per-project cost (LAKEBASE usage tagged with project_id) */}
+      <LakebaseProjectCostCard days={days} />
 
       {/* Instances table */}
       <Card>

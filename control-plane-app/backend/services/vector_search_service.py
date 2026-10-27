@@ -856,3 +856,270 @@ def get_combined_cost_trend(days: int = 30, allowed_workspace_ids: Optional[List
            GROUP BY usage_date, product ORDER BY usage_date""",
         {"days": days, "ws": allowed_workspace_ids},
     )
+
+
+# ══════════════════════════════════════════════════════════════
+# Retrieval & Memory — Vector Search index usage + Lakebase health
+# (Delta → Lakebase mirrors written by 03/02; see workflows/03 "Retrieval & Memory")
+#
+# Every read here fails OPEN: a table that isn't synced yet (or a read error)
+# returns empty, never a 500. Scoping follows the rest of this module —
+# all five tables carry workspace_id, so a scoped caller gets rows for their
+# workspaces only; an empty allow-list short-circuits without querying.
+# ══════════════════════════════════════════════════════════════
+
+_KA_INDEX_PREFIX = "__databricks_internal_catalog_tiles_"
+
+
+def classify_managed_by(endpoint_name: Optional[str], index_name: Optional[str]) -> Optional[str]:
+    """Label indexes owned by Agent Bricks.
+
+    Knowledge Assistant indexes live under the internal tiles catalog
+    (``__databricks_internal_catalog_tiles_<...>.ka_<...>_index``) and sit on
+    ``ka-*`` endpoints. Multi-agent supervisors sit on ``mas-*`` endpoints.
+    Anything else is user-managed (None).
+    """
+    ep = (endpoint_name or "").lower()
+    name = index_name or ""
+    if ep.startswith("ka-") or (name.startswith(_KA_INDEX_PREFIX) and ".ka_" in name):
+        return "knowledge_assistant"
+    if ep.startswith("mas-"):
+        return "supervisor"
+    return None
+
+
+def _ws_pred(allowed_workspace_ids: Optional[List[str]], alias: str = "") -> Optional[str]:
+    """``workspace_id = ANY(%(ws)s)`` predicate, or None when unrestricted."""
+    if allowed_workspace_ids is None:
+        return None
+    col = f"{alias}.workspace_id" if alias else "workspace_id"
+    return f"{col} = ANY(%(ws)s)"
+
+
+def _where(clauses: List[Optional[str]]) -> str:
+    live = [c for c in clauses if c]
+    return ("WHERE " + " AND ".join(live)) if live else ""
+
+
+def _as_int(v: Any) -> int:
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _as_float(v: Any) -> float:
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _safe_query(sql: str, params: Dict[str, Any], label: str) -> List[Dict[str, Any]]:
+    """execute_query that fails open: a missing/unsynced table yields []."""
+    try:
+        return execute_query(sql, params)
+    except Exception as exc:
+        logger.warning("%s cache read failed (table may not be synced yet): %s", label, exc)
+        return []
+
+
+def get_vs_usage_trend(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Daily Vector Search data-plane requests + errors, split by action."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    where = _where([
+        "usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s",
+        _ws_pred(allowed_workspace_ids),
+    ])
+    rows = _safe_query(
+        f"""SELECT CAST(usage_date AS TEXT) AS usage_date, action,
+                   SUM(request_count) AS request_count, SUM(error_count) AS error_count
+            FROM vs_index_usage_daily {where}
+            GROUP BY usage_date, action ORDER BY usage_date, action""",
+        {"days": days, "ws": allowed_workspace_ids},
+        "vs_index_usage_daily",
+    )
+    return [
+        {"usage_date": r["usage_date"], "action": r["action"],
+         "request_count": _as_int(r.get("request_count")), "error_count": _as_int(r.get("error_count"))}
+        for r in rows
+    ]
+
+
+def get_vs_index_usage(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Per-index usage summary over the window, with the owning endpoint (from the
+    Vector Search cache) and an Agent Bricks ``managed_by`` label.
+
+    ``query_count`` / ``peak_daily_callers`` are read-path metrics
+    (queryVectorIndex). ``peak_daily_callers`` is the highest distinct-caller count
+    seen on any single day — a daily peak, not a window-wide distinct count.
+    """
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    where = _where(["usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s",
+                    _ws_pred(allowed_workspace_ids)])
+    rows = _safe_query(
+        f"""WITH u AS (
+               SELECT workspace_id, index_name,
+                      SUM(CASE WHEN action = 'queryVectorIndex' THEN request_count ELSE 0 END) AS query_count,
+                      SUM(CASE WHEN action = 'scanVectorIndex' THEN request_count ELSE 0 END) AS scan_count,
+                      SUM(CASE WHEN action IN ('upsertDataVectorIndex', 'deleteDataVectorIndex')
+                               THEN request_count ELSE 0 END) AS write_count,
+                      SUM(error_count) AS error_count,
+                      MAX(CASE WHEN action = 'queryVectorIndex' THEN distinct_callers ELSE 0 END) AS peak_daily_callers,
+                      CAST(MAX(usage_date) AS TEXT) AS last_active_date
+               FROM vs_index_usage_daily {where}
+               GROUP BY workspace_id, index_name
+            ),
+            ep AS (
+               SELECT index_name, MAX(endpoint_name) AS endpoint_name
+               FROM vector_search_indexes GROUP BY index_name
+            )
+            SELECT u.*, ep.endpoint_name
+            FROM u LEFT JOIN ep ON ep.index_name = u.index_name
+            ORDER BY u.query_count DESC, u.index_name""",
+        {"days": days, "ws": allowed_workspace_ids},
+        "vs_index_usage_daily",
+    )
+    out = []
+    for r in rows:
+        name = r.get("index_name") or ""
+        ep_name = r.get("endpoint_name") or ""
+        out.append({
+            "workspace_id": r.get("workspace_id") or "",
+            "index_name": name,
+            "endpoint_name": ep_name,
+            "managed_by": classify_managed_by(ep_name, name),
+            "query_count": _as_int(r.get("query_count")),
+            "scan_count": _as_int(r.get("scan_count")),
+            "write_count": _as_int(r.get("write_count")),
+            "error_count": _as_int(r.get("error_count")),
+            "peak_daily_callers": _as_int(r.get("peak_daily_callers")),
+            "last_active_date": r.get("last_active_date"),
+        })
+    return out
+
+
+def get_vs_index_callers(
+    index_name: str,
+    workspace_id: Optional[str] = None,
+    allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Top callers of one index over the usage window (drilldown).
+
+    The callers table has no date column — its window is the workflow's usage
+    window (30d), so this endpoint takes no ``days`` argument.
+    """
+    if not index_name:
+        return []
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    params: Dict[str, Any] = {"idx": index_name, "ws": allowed_workspace_ids}
+    clauses: List[Optional[str]] = ["index_name = %(idx)s", _ws_pred(allowed_workspace_ids)]
+    if workspace_id:
+        clauses.append("workspace_id = %(wsid)s")
+        params["wsid"] = workspace_id
+    rows = _safe_query(
+        f"""SELECT caller, SUM(request_count) AS request_count, SUM(error_count) AS error_count,
+                   MAX(last_seen) AS last_seen
+            FROM vs_index_callers {_where(clauses)}
+            GROUP BY caller ORDER BY request_count DESC, caller LIMIT 50""",
+        params,
+        "vs_index_callers",
+    )
+    return [
+        {"caller": r.get("caller") or "unknown", "request_count": _as_int(r.get("request_count")),
+         "error_count": _as_int(r.get("error_count")), "last_seen": r.get("last_seen")}
+        for r in rows
+    ]
+
+
+def get_lakebase_health(days: int = 14, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Daily Lakebase connections and database size per project/branch."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    where = _where(["usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s",
+                    _ws_pred(allowed_workspace_ids)])
+    rows = _safe_query(
+        f"""SELECT CAST(usage_date AS TEXT) AS usage_date, project_id, branch_id,
+                   MAX(project_name) AS project_name, MAX(branch_name) AS branch_name,
+                   SUM(avg_connections) AS avg_connections,
+                   MAX(max_connections) AS max_connections,
+                   MAX(max_db_size_bytes) AS max_db_size_bytes
+            FROM lakebase_health_daily {where}
+            GROUP BY usage_date, project_id, branch_id
+            ORDER BY usage_date, project_name""",
+        {"days": days, "ws": allowed_workspace_ids},
+        "lakebase_health_daily",
+    )
+    return [
+        {"usage_date": r["usage_date"], "project_id": r.get("project_id") or "",
+         "project_name": r.get("project_name") or r.get("project_id") or "",
+         "branch_id": r.get("branch_id") or "", "branch_name": r.get("branch_name") or "",
+         "avg_connections": round(_as_float(r.get("avg_connections")), 2),
+         "max_connections": _as_int(r.get("max_connections")),
+         "max_db_size_bytes": _as_int(r.get("max_db_size_bytes"))}
+        for r in rows
+    ]
+
+
+def get_lakebase_wait_events(
+    limit: int = 25, allowed_workspace_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Top Lakebase wait events by total wait time over the workflow window."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    where = _where([_ws_pred(allowed_workspace_ids)])
+    rows = _safe_query(
+        f"""SELECT wait_class_name, wait_event_name, project_name, branch_name,
+                   SUM(wait_event_count) AS wait_event_count,
+                   SUM(wait_event_time) AS wait_event_time
+            FROM lakebase_wait_events {where}
+            GROUP BY wait_class_name, wait_event_name, project_name, branch_name
+            ORDER BY wait_event_time DESC LIMIT %(limit)s""",
+        {"limit": limit, "ws": allowed_workspace_ids},
+        "lakebase_wait_events",
+    )
+    return [
+        {"wait_class_name": r.get("wait_class_name") or "unknown",
+         "wait_event_name": r.get("wait_event_name") or "unknown",
+         "project_name": r.get("project_name") or "", "branch_name": r.get("branch_name") or "",
+         "wait_event_count": _as_int(r.get("wait_event_count")),
+         "wait_event_time": round(_as_float(r.get("wait_event_time")), 2)}
+        for r in rows
+    ]
+
+
+def get_lakebase_cost_by_project(days: int = 30, allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Lakebase $ per project/branch over the window, with names from the health cache."""
+    if allowed_workspace_ids is not None and not allowed_workspace_ids:
+        return []
+    ws_c = _ws_pred(allowed_workspace_ids, alias="c")
+    ws_n = _ws_pred(allowed_workspace_ids)
+    rows = _safe_query(
+        f"""WITH names AS (
+               SELECT project_id, branch_id,
+                      MAX(project_name) AS project_name, MAX(branch_name) AS branch_name
+               FROM lakebase_health_daily {_where([ws_n])}
+               GROUP BY project_id, branch_id
+            )
+            SELECT c.project_id, c.branch_id,
+                   MAX(n.project_name) AS project_name, MAX(n.branch_name) AS branch_name,
+                   SUM(c.total_dbus) AS total_dbus, SUM(c.total_cost_usd) AS total_cost_usd
+            FROM lakebase_cost_by_project c
+            LEFT JOIN names n ON n.project_id = c.project_id AND n.branch_id = c.branch_id
+            {_where(["c.usage_date >= CURRENT_DATE - INTERVAL '1 day' * %(days)s", ws_c])}
+            GROUP BY c.project_id, c.branch_id
+            ORDER BY total_cost_usd DESC LIMIT 50""",
+        {"days": days, "ws": allowed_workspace_ids},
+        "lakebase_cost_by_project",
+    )
+    return [
+        {"project_id": r.get("project_id") or "", "branch_id": r.get("branch_id") or "",
+         "project_name": r.get("project_name") or r.get("project_id") or "",
+         "branch_name": r.get("branch_name") or "",
+         "total_dbus": round(_as_float(r.get("total_dbus")), 4),
+         "total_cost_usd": round(_as_float(r.get("total_cost_usd")), 4)}
+        for r in rows
+    ]

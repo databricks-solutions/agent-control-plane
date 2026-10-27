@@ -2309,6 +2309,211 @@ uag_conn.close()
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Phase 6b: Sync Retrieval & Memory (Delta → Lakebase)
+# MAGIC Mirrors the five aggregates written by `03_discover_knowledge_bases`:
+# MAGIC `vs_index_usage_daily`, `vs_index_callers`, `lakebase_health_daily`,
+# MAGIC `lakebase_wait_events`, `lakebase_cost_by_project`.
+# MAGIC Each block is isolated: DDL and the sync run in their own transaction, so a
+# MAGIC failure in one table rolls back only that table.
+
+# COMMAND ----------
+
+rm_conn = get_lakebase_connection()
+rm_counts = {
+    "vs_index_usage": 0, "vs_index_callers": 0, "lakebase_health": 0,
+    "lakebase_wait_events": 0, "lakebase_cost_by_project": 0,
+}
+
+
+def _ensure_ddl(conn, statements):
+    """Run DDL one statement per transaction, so one failure cannot abort the rest."""
+    for ddl in statements:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(ddl)
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            print(f"  DDL warning: {e}")
+
+
+def _mirror_full_refresh(conn, pg_table, delta_table, insert_sql, row_to_tuple, label):
+    """Read Delta FIRST, then TRUNCATE + INSERT in one transaction (same as the uag_* blocks).
+    A failed read leaves the last-good Lakebase snapshot untouched."""
+    try:
+        delta_rows = spark.read.table(delta_table).collect()
+        values = [row_to_tuple(r) for r in delta_rows]
+        with conn.cursor() as cur:
+            cur.execute(f"TRUNCATE TABLE {pg_table}")
+            if values:
+                execute_values(cur, insert_sql, values, page_size=500)
+        conn.commit()
+        print(f"  ✅ {len(values)} {label} rows synced")
+        return len(values)
+    except Exception as exc:
+        conn.rollback()
+        print(f"  ⚠️  {pg_table} sync failed: {exc}")
+        return 0
+
+
+# Vector Search index usage per (day, workspace, index, action) — drives the usage charts.
+VS_USAGE_DELTA = f"{CATALOG}.{SCHEMA}.vs_index_usage_daily"
+print(f"▸ Syncing {VS_USAGE_DELTA} → vs_index_usage_daily ...")
+_ensure_ddl(rm_conn, [
+    """CREATE TABLE IF NOT EXISTS vs_index_usage_daily (
+        usage_date       DATE NOT NULL,
+        workspace_id     TEXT NOT NULL,
+        index_name       TEXT NOT NULL,
+        action           TEXT NOT NULL,
+        request_count    BIGINT DEFAULT 0,
+        error_count      BIGINT DEFAULT 0,
+        distinct_callers BIGINT DEFAULT 0,
+        last_synced      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_vsui_ws ON vs_index_usage_daily (workspace_id)",
+    "CREATE INDEX IF NOT EXISTS idx_vsui_index ON vs_index_usage_daily (index_name)",
+    "CREATE INDEX IF NOT EXISTS idx_vsui_date ON vs_index_usage_daily (usage_date DESC)",
+])
+rm_counts["vs_index_usage"] = _mirror_full_refresh(
+    rm_conn, "vs_index_usage_daily", VS_USAGE_DELTA,
+    """INSERT INTO vs_index_usage_daily
+       (usage_date, workspace_id, index_name, action, request_count, error_count, distinct_callers, last_synced)
+       VALUES %s""",
+    lambda r: (str(r.usage_date), r.workspace_id, r.index_name, r.action,
+               int(r.request_count or 0), int(r.error_count or 0), int(r.distinct_callers or 0), now),
+    "VS index usage",
+)
+
+# COMMAND ----------
+
+# Top callers per index (drilldown). Capped per index in the workflow.
+VS_CALLERS_DELTA = f"{CATALOG}.{SCHEMA}.vs_index_callers"
+print(f"▸ Syncing {VS_CALLERS_DELTA} → vs_index_callers ...")
+_ensure_ddl(rm_conn, [
+    """CREATE TABLE IF NOT EXISTS vs_index_callers (
+        workspace_id   TEXT NOT NULL,
+        index_name     TEXT NOT NULL,
+        caller         TEXT NOT NULL,
+        request_count  BIGINT DEFAULT 0,
+        error_count    BIGINT DEFAULT 0,
+        last_seen      TEXT,
+        last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_vsc_index ON vs_index_callers (index_name)",
+    "CREATE INDEX IF NOT EXISTS idx_vsc_ws ON vs_index_callers (workspace_id)",
+])
+rm_counts["vs_index_callers"] = _mirror_full_refresh(
+    rm_conn, "vs_index_callers", VS_CALLERS_DELTA,
+    """INSERT INTO vs_index_callers
+       (workspace_id, index_name, caller, request_count, error_count, last_seen, last_synced)
+       VALUES %s""",
+    lambda r: (r.workspace_id, r.index_name, r.caller, int(r.request_count or 0),
+               int(r.error_count or 0), r.last_seen, now),
+    "VS index caller",
+)
+
+# COMMAND ----------
+
+# Lakebase connections + database size per project/branch/endpoint per day.
+LB_HEALTH_DELTA = f"{CATALOG}.{SCHEMA}.lakebase_health_daily"
+print(f"▸ Syncing {LB_HEALTH_DELTA} → lakebase_health_daily ...")
+_ensure_ddl(rm_conn, [
+    """CREATE TABLE IF NOT EXISTS lakebase_health_daily (
+        usage_date        DATE NOT NULL,
+        workspace_id      TEXT NOT NULL,
+        project_id        TEXT DEFAULT '',
+        project_name      TEXT DEFAULT '',
+        branch_id         TEXT DEFAULT '',
+        branch_name       TEXT DEFAULT '',
+        endpoint_id       TEXT DEFAULT '',
+        endpoint_name     TEXT DEFAULT '',
+        avg_connections   DOUBLE PRECISION DEFAULT 0,
+        max_connections   BIGINT DEFAULT 0,
+        max_db_size_bytes BIGINT DEFAULT 0,
+        last_synced       TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_lbh_ws ON lakebase_health_daily (workspace_id)",
+    "CREATE INDEX IF NOT EXISTS idx_lbh_project ON lakebase_health_daily (project_id)",
+    "CREATE INDEX IF NOT EXISTS idx_lbh_date ON lakebase_health_daily (usage_date DESC)",
+])
+rm_counts["lakebase_health"] = _mirror_full_refresh(
+    rm_conn, "lakebase_health_daily", LB_HEALTH_DELTA,
+    """INSERT INTO lakebase_health_daily
+       (usage_date, workspace_id, project_id, project_name, branch_id, branch_name,
+        endpoint_id, endpoint_name, avg_connections, max_connections, max_db_size_bytes, last_synced)
+       VALUES %s""",
+    lambda r: (str(r.usage_date), r.workspace_id, r.project_id or "", r.project_name or "",
+               r.branch_id or "", r.branch_name or "", r.endpoint_id or "", r.endpoint_name or "",
+               float(r.avg_connections or 0), int(r.max_connections or 0),
+               int(r.max_db_size_bytes or 0), now),
+    "Lakebase health",
+)
+
+# COMMAND ----------
+
+# Lakebase wait events (top N per workspace over the window).
+LB_WAIT_DELTA = f"{CATALOG}.{SCHEMA}.lakebase_wait_events"
+print(f"▸ Syncing {LB_WAIT_DELTA} → lakebase_wait_events ...")
+_ensure_ddl(rm_conn, [
+    """CREATE TABLE IF NOT EXISTS lakebase_wait_events (
+        workspace_id      TEXT NOT NULL,
+        project_id        TEXT DEFAULT '',
+        project_name      TEXT DEFAULT '',
+        branch_name       TEXT DEFAULT '',
+        wait_class_name   TEXT DEFAULT 'unknown',
+        wait_event_name   TEXT DEFAULT 'unknown',
+        wait_event_count  BIGINT DEFAULT 0,
+        wait_event_time   DOUBLE PRECISION DEFAULT 0,
+        last_synced       TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_lbw_ws ON lakebase_wait_events (workspace_id)",
+])
+rm_counts["lakebase_wait_events"] = _mirror_full_refresh(
+    rm_conn, "lakebase_wait_events", LB_WAIT_DELTA,
+    """INSERT INTO lakebase_wait_events
+       (workspace_id, project_id, project_name, branch_name, wait_class_name, wait_event_name,
+        wait_event_count, wait_event_time, last_synced)
+       VALUES %s""",
+    lambda r: (r.workspace_id, r.project_id or "", r.project_name or "", r.branch_name or "",
+               r.wait_class_name or "unknown", r.wait_event_name or "unknown",
+               int(r.wait_event_count or 0), float(r.wait_event_time or 0), now),
+    "Lakebase wait event",
+)
+
+# COMMAND ----------
+
+# Lakebase cost per project/branch per day (list-price join from the billing workflow).
+LB_COST_PROJECT_DELTA = f"{CATALOG}.{SCHEMA}.lakebase_cost_by_project"
+print(f"▸ Syncing {LB_COST_PROJECT_DELTA} → lakebase_cost_by_project ...")
+_ensure_ddl(rm_conn, [
+    """CREATE TABLE IF NOT EXISTS lakebase_cost_by_project (
+        usage_date      DATE NOT NULL,
+        workspace_id    TEXT NOT NULL,
+        project_id      TEXT NOT NULL,
+        branch_id       TEXT DEFAULT '',
+        total_dbus      DOUBLE PRECISION DEFAULT 0,
+        total_cost_usd  DOUBLE PRECISION DEFAULT 0,
+        last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_lbcp_ws ON lakebase_cost_by_project (workspace_id)",
+    "CREATE INDEX IF NOT EXISTS idx_lbcp_project ON lakebase_cost_by_project (project_id)",
+    "CREATE INDEX IF NOT EXISTS idx_lbcp_date ON lakebase_cost_by_project (usage_date DESC)",
+])
+rm_counts["lakebase_cost_by_project"] = _mirror_full_refresh(
+    rm_conn, "lakebase_cost_by_project", LB_COST_PROJECT_DELTA,
+    """INSERT INTO lakebase_cost_by_project
+       (usage_date, workspace_id, project_id, branch_id, total_dbus, total_cost_usd, last_synced)
+       VALUES %s""",
+    lambda r: (str(r.usage_date), r.workspace_id, r.project_id, r.branch_id or "",
+               float(r.total_dbus or 0), float(r.total_cost_usd or 0), now),
+    "Lakebase cost by project",
+)
+
+rm_conn.close()
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Phase 7: Sync Billing (Delta → Lakebase)
 # MAGIC
 # MAGIC Mirrors the four billing tables populated by `09_discover_billing`:
@@ -2792,6 +2997,11 @@ result = {
     "gw_daily_rows": gw_daily_count,
     "gw_hourly_rows": gw_hourly_count,
     "uag_usage_rows": uag_count,
+    "vs_index_usage_rows": rm_counts["vs_index_usage"],
+    "vs_index_caller_rows": rm_counts["vs_index_callers"],
+    "lakebase_health_rows": rm_counts["lakebase_health"],
+    "lakebase_wait_event_rows": rm_counts["lakebase_wait_events"],
+    "lakebase_cost_by_project_rows": rm_counts["lakebase_cost_by_project"],
     "billing_serving_daily_rows": bsd_count,
     "billing_token_daily_rows": btd_count,
     "billing_product_daily_rows": bpd_count,

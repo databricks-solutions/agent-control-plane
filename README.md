@@ -30,9 +30,9 @@ Auto-discovered agent registry across all workspaces. Finds serving endpoints, D
 
 Unified view of all model serving endpoints with usage analytics, token volume charts, per-endpoint and per-user breakdowns. Manage Unity Catalog permissions directly from the UI. Monitor operational metrics (requests, errors, latency), view individual request logs, and inspect rate limits and safety guardrails configured via Unity Gateway.
 
-### Knowledge Bases
+### Retrieval & Memory
 
-Combined monitoring for Vector Search and Lakebase. Overview tab shows total cost, daily cost trends by product, and top workspaces by spend. Vector Search tab provides endpoint/index inventory, sync status, health history, and cost attribution by workload type (ingest, serving, storage). Lakebase tab shows instance inventory, compute vs storage cost, and per-workspace breakdown.
+Combined monitoring for Vector Search and Lakebase. Overview tab shows total cost, daily cost trends by product, and top workspaces by spend. Vector Search tab leads with index usage (daily queries and errors, top indexes with error rate and peak callers, per-index caller drilldown, and an Agent Bricks label for Knowledge Assistant and Supervisor indexes), then cost by workload type and endpoint/index inventory and sync status. Lakebase tab shows operational health (connections, database size per project, top wait events), cost per project, instance inventory, and per-workspace cost breakdown.
 
 ### Observability
 
