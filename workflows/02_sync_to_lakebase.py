@@ -2309,11 +2309,11 @@ def _mirror(delta_table: str, pg_table: str, ddl: str, cols: list) -> int:
     """Delta → Lakebase mirror for a small, workflow-owned table: read Delta FIRST,
     then TRUNCATE + INSERT in one transaction (a failed read never empties the
     Lakebase copy). Missing Delta table / any error → rollback, keep previous."""
-    with uag_conn.cursor() as cur:
-        cur.execute(ddl)
-        uag_conn.commit()
     print(f"▸ Syncing {delta_table} → {pg_table} ...")
     try:
+        with uag_conn.cursor() as cur:
+            cur.execute(ddl)
+        uag_conn.commit()
         src = spark.read.table(delta_table).collect()
         values = [tuple(getattr(r, c) for c in cols) + (now,) for r in src]
         with uag_conn.cursor() as cur:

@@ -537,9 +537,9 @@ function indexUsageAccessor(r: IndexUsageRow, key: string): string | number | nu
   }
 }
 
-function VectorSearchUsageSection({ days }: { days: number }) {
-  const { data: trendRaw, isLoading: trendLoading } = useVectorSearchUsageTrend(days)
-  const { data: indexesRaw, isLoading: indexesLoading } = useVectorSearchIndexUsage(days)
+function VectorSearchUsageSection({ days, wsIds }: { days: number; wsIds: string[] }) {
+  const { data: trendRaw, isLoading: trendLoading } = useVectorSearchUsageTrend(days, wsIds)
+  const { data: indexesRaw, isLoading: indexesLoading } = useVectorSearchIndexUsage(days, wsIds)
   const seesAccountWide = useSeesAccountWide()
 
   const { sort, toggle } = useSort<string>('query_count', 'desc')
@@ -753,9 +753,9 @@ function VectorSearchUsageSection({ days }: { days: number }) {
 
 /* ── Lakebase: operational health + per-project cost (Retrieval & Memory) ── */
 
-function LakebaseHealthSection({ days }: { days: number }) {
-  const { data: healthRaw, isLoading: healthLoading } = useLakebaseHealth(days)
-  const { data: waitsRaw, isLoading: waitsLoading } = useLakebaseWaitEvents(25)
+function LakebaseHealthSection({ days, wsIds }: { days: number; wsIds: string[] }) {
+  const { data: healthRaw, isLoading: healthLoading } = useLakebaseHealth(days, wsIds)
+  const { data: waitsRaw, isLoading: waitsLoading } = useLakebaseWaitEvents(25, wsIds)
   const seesAccountWide = useSeesAccountWide()
 
   const health: LakebaseHealthRow[] = Array.isArray(healthRaw) ? healthRaw : []
@@ -900,8 +900,8 @@ const projectCostAccessor = (r: LakebaseProjectCostRow, key: string): string | n
   }
 }
 
-function LakebaseProjectCostCard({ days }: { days: number }) {
-  const { data: raw, isLoading } = useLakebaseCostByProject(days)
+function LakebaseProjectCostCard({ days, wsIds }: { days: number; wsIds: string[] }) {
+  const { data: raw, isLoading } = useLakebaseCostByProject(days, wsIds)
   const seesAccountWide = useSeesAccountWide()
   const { sort, toggle } = useSort<string>('total_cost_usd', 'desc')
   const [page, setPage] = useState(0)
@@ -1080,7 +1080,7 @@ function VectorSearchTab({ days, setDays, selectedWsIds }: { days: number; setDa
       </div>
 
       {/* Usage leads: query volume, errors, callers, Agent Bricks ownership */}
-      <VectorSearchUsageSection days={days} />
+      <VectorSearchUsageSection days={days} wsIds={selectedWsIds} />
 
       {/* Section divider — cost & inventory follow usage */}
       <div className="flex items-center gap-3 pt-4">
@@ -1467,7 +1467,7 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
       </div>
 
       {/* Operational health: connections, DB size, wait events */}
-      <LakebaseHealthSection days={days} />
+      <LakebaseHealthSection days={days} wsIds={selectedWsIds} />
 
       {/* Cost Type Summary — compute vs storage */}
       {safeCostByType.length > 0 && (
@@ -1530,7 +1530,7 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
       </Card>
 
       {/* Per-project cost (LAKEBASE usage tagged with project_id) */}
-      <LakebaseProjectCostCard days={days} />
+      <LakebaseProjectCostCard days={days} wsIds={selectedWsIds} />
 
       {/* Instances table */}
       <Card>

@@ -1864,21 +1864,27 @@ export interface LakebaseProjectCostRow {
   total_cost_usd: number
 }
 
-export function useVectorSearchUsageTrend(days = 30) {
+/** Optional workspace narrowing for the Retrieval & Memory endpoints. The server
+ *  intersects it with the caller's access scope, so it can only narrow. */
+function wsParam(ids: string[]): { workspace_ids?: string } {
+  return ids.length ? { workspace_ids: ids.join(',') } : {}
+}
+
+export function useVectorSearchUsageTrend(days = 30, workspaceIds: string[] = []) {
   return useQuery({
-    queryKey: ['vector-search', 'usage-trend', days],
+    queryKey: ['vector-search', 'usage-trend', days, workspaceIds.join(',')],
     queryFn: async () => {
-      const { data } = await apiClient.get('/vector-search/usage/trend', { params: { days } })
+      const { data } = await apiClient.get('/vector-search/usage/trend', { params: { days, ...wsParam(workspaceIds) } })
       return (Array.isArray(data) ? data : []) as VsUsageTrendRow[]
     },
   })
 }
 
-export function useVectorSearchIndexUsage(days = 30) {
+export function useVectorSearchIndexUsage(days = 30, workspaceIds: string[] = []) {
   return useQuery({
-    queryKey: ['vector-search', 'usage-indexes', days],
+    queryKey: ['vector-search', 'usage-indexes', days, workspaceIds.join(',')],
     queryFn: async () => {
-      const { data } = await apiClient.get('/vector-search/usage/indexes', { params: { days } })
+      const { data } = await apiClient.get('/vector-search/usage/indexes', { params: { days, ...wsParam(workspaceIds) } })
       return (Array.isArray(data) ? data : []) as VsIndexUsageRow[]
     },
   })
@@ -1898,31 +1904,31 @@ export function useVectorSearchIndexCallers(indexName: string | null, workspaceI
   })
 }
 
-export function useLakebaseHealth(days = 14) {
+export function useLakebaseHealth(days = 14, workspaceIds: string[] = []) {
   return useQuery({
-    queryKey: ['vector-search', 'lakebase-health', days],
+    queryKey: ['vector-search', 'lakebase-health', days, workspaceIds.join(',')],
     queryFn: async () => {
-      const { data } = await apiClient.get('/vector-search/lakebase/health', { params: { days } })
+      const { data } = await apiClient.get('/vector-search/lakebase/health', { params: { days, ...wsParam(workspaceIds) } })
       return (Array.isArray(data) ? data : []) as LakebaseHealthRow[]
     },
   })
 }
 
-export function useLakebaseWaitEvents(limit = 25) {
+export function useLakebaseWaitEvents(limit = 25, workspaceIds: string[] = []) {
   return useQuery({
-    queryKey: ['vector-search', 'lakebase-wait-events', limit],
+    queryKey: ['vector-search', 'lakebase-wait-events', limit, workspaceIds.join(',')],
     queryFn: async () => {
-      const { data } = await apiClient.get('/vector-search/lakebase/wait-events', { params: { limit } })
+      const { data } = await apiClient.get('/vector-search/lakebase/wait-events', { params: { limit, ...wsParam(workspaceIds) } })
       return (Array.isArray(data) ? data : []) as LakebaseWaitEventRow[]
     },
   })
 }
 
-export function useLakebaseCostByProject(days = 30) {
+export function useLakebaseCostByProject(days = 30, workspaceIds: string[] = []) {
   return useQuery({
-    queryKey: ['vector-search', 'lakebase-cost-by-project', days],
+    queryKey: ['vector-search', 'lakebase-cost-by-project', days, workspaceIds.join(',')],
     queryFn: async () => {
-      const { data } = await apiClient.get('/vector-search/lakebase/cost/by-project', { params: { days } })
+      const { data } = await apiClient.get('/vector-search/lakebase/cost/by-project', { params: { days, ...wsParam(workspaceIds) } })
       return (Array.isArray(data) ? data : []) as LakebaseProjectCostRow[]
     },
   })

@@ -481,3 +481,32 @@ class TestRetrievalMemoryRoutes:
             assert resp.status_code == 200
             assert "ANY" not in mock_q.call_args[0][0]
             assert mock_q.call_args[0][1]["days"] == 7
+
+
+class TestWorkspaceSelectorScope:
+    """The page's workspace selector narrows the Retrieval & Memory views, but is
+    intersected with the caller's scope so it can never widen access."""
+
+    def _scope(self, allowed, selected):
+        from unittest.mock import MagicMock
+        from backend.api import vector_search as vs
+        with patch.object(vs, "get_allowed_workspace_ids", return_value=allowed):
+            return vs._scope(MagicMock(), selected)
+
+    def test_no_selection_keeps_caller_scope(self):
+        assert self._scope(None, None) is None
+        assert self._scope(["ws1"], "") == ["ws1"]
+
+    def test_admin_selection_narrows(self):
+        assert self._scope(None, "ws1, ws2") == ["ws1", "ws2"]
+
+    def test_scoped_selection_is_intersected(self):
+        assert self._scope(["ws1", "ws2"], "ws2,ws9") == ["ws2"]   # ws9 not allowed → dropped
+        assert self._scope(["ws1"], "ws9") == []                   # nothing allowed → empty, not all
+
+    def test_route_passes_narrowed_scope(self, app_client):
+        with patch("backend.api.vector_search.get_allowed_workspace_ids", return_value=None), \
+             patch("backend.services.vector_search_service.get_lakebase_health", return_value=[]) as fn:
+            r = app_client.get("/api/v1/vector-search/lakebase/health?days=14&workspace_ids=ws1,ws2")
+        assert r.status_code == 200
+        assert fn.call_args.kwargs["allowed_workspace_ids"] == ["ws1", "ws2"]
