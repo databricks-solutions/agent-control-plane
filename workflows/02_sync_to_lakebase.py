@@ -2304,6 +2304,95 @@ except Exception as exc:
     uag_conn.rollback()
     print(f"  ⚠️  model_services_inventory sync failed: {exc}")
 
+
+def _mirror(delta_table: str, pg_table: str, ddl: str, cols: list) -> int:
+    """Delta → Lakebase mirror for a small, workflow-owned table: read Delta FIRST,
+    then TRUNCATE + INSERT in one transaction (a failed read never empties the
+    Lakebase copy). Missing Delta table / any error → rollback, keep previous."""
+    with uag_conn.cursor() as cur:
+        cur.execute(ddl)
+        uag_conn.commit()
+    print(f"▸ Syncing {delta_table} → {pg_table} ...")
+    try:
+        src = spark.read.table(delta_table).collect()
+        values = [tuple(getattr(r, c) for c in cols) + (now,) for r in src]
+        with uag_conn.cursor() as cur:
+            cur.execute(f"TRUNCATE TABLE {pg_table}")
+            if values:
+                execute_values(cur,
+                    f"INSERT INTO {pg_table} ({', '.join(cols)}, last_synced) VALUES %s",
+                    values, page_size=500)
+        uag_conn.commit()
+        print(f"  ✅ {len(values)} rows synced")
+        return len(values)
+    except Exception as exc:
+        uag_conn.rollback()
+        print(f"  ⚠️  {pg_table} sync failed: {exc}")
+        return 0
+
+
+# Unity Gateway services inventory (all service kinds + config) — workflow 15.
+gw_services_count = _mirror(
+    f"{CATALOG}.{SCHEMA}.gateway_services_inventory", "gateway_services_inventory",
+    """CREATE TABLE IF NOT EXISTS gateway_services_inventory (
+        full_name               TEXT NOT NULL,
+        service_type            TEXT NOT NULL,
+        owner                   TEXT,
+        comment                 TEXT,
+        supported_api_types     TEXT,
+        provider_type           TEXT,
+        source_connection       TEXT,
+        destinations            TEXT,
+        rate_limit_count        INT,
+        rate_limits             TEXT,
+        inference_table         TEXT,
+        inference_table_enabled BOOLEAN,
+        create_time             TEXT,
+        update_time             TEXT,
+        updated_by              TEXT,
+        discovered_at           TIMESTAMP WITH TIME ZONE,
+        last_synced             TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        PRIMARY KEY (full_name, service_type))""",
+    ["full_name", "service_type", "owner", "comment", "supported_api_types", "provider_type",
+     "source_connection", "destinations", "rate_limit_count", "rate_limits", "inference_table",
+     "inference_table_enabled", "create_time", "update_time", "updated_by", "discovered_at"],
+)
+
+# Per-service usage (system.ai_gateway.usage by service_name) — workflow 11.
+uag_service_usage_count = _mirror(
+    f"{CATALOG}.{SCHEMA}.uag_service_usage", "uag_service_usage",
+    """CREATE TABLE IF NOT EXISTS uag_service_usage (
+        service_name    TEXT NOT NULL,
+        service_type    TEXT,
+        request_count   BIGINT DEFAULT 0,
+        error_count     BIGINT DEFAULT 0,
+        throttled_count BIGINT DEFAULT 0,
+        unique_users    BIGINT DEFAULT 0,
+        input_tokens    BIGINT DEFAULT 0,
+        output_tokens   BIGINT DEFAULT 0,
+        p50_latency_ms  BIGINT DEFAULT 0,
+        p95_latency_ms  BIGINT DEFAULT 0,
+        max_event_time  TEXT,
+        discovered_at   TIMESTAMP WITH TIME ZONE,
+        last_synced     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        PRIMARY KEY (service_name))""",
+    ["service_name", "service_type", "request_count", "error_count", "throttled_count", "unique_users",
+     "input_tokens", "output_tokens", "p50_latency_ms", "p95_latency_ms", "max_event_time", "discovered_at"],
+)
+
+# endpoint_id → service map (attributes gateway billing to a service) — workflow 11.
+uag_endpoint_map_count = _mirror(
+    f"{CATALOG}.{SCHEMA}.uag_endpoint_service_map", "uag_endpoint_service_map",
+    """CREATE TABLE IF NOT EXISTS uag_endpoint_service_map (
+        endpoint_id   TEXT NOT NULL,
+        service_name  TEXT,
+        service_type  TEXT,
+        discovered_at TIMESTAMP WITH TIME ZONE,
+        last_synced   TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        PRIMARY KEY (endpoint_id))""",
+    ["endpoint_id", "service_name", "service_type", "discovered_at"],
+)
+
 uag_conn.close()
 
 # COMMAND ----------

@@ -102,6 +102,9 @@ EXPECTED = [
     "uag_budget_status",             # account Budgets API config inventory; empty without account creds
     "serving_endpoints_inventory",   # account-wide served-entity inventory; empty if served_entities unreadable
     "model_services_inventory",      # v3 UC model services; empty if model-services API unreadable
+    "gateway_services_inventory",    # v3 UC services (model / MCP / provider / agent) + config; empty if lists unreadable
+    "uag_service_usage",             # per-service traffic from system.ai_gateway.usage; empty when no gateway traffic
+    "uag_endpoint_service_map",      # endpoint_id → service (attributes gateway billing); empty when no gateway traffic
     "billing_cache_meta",
     # App-managed tables created in Phase 7 of 02_sync_to_lakebase. These were
     # historically created lazily by the app's startup hook, but the app SP

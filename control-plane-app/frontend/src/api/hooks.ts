@@ -572,7 +572,7 @@ export function useGatewayUsageByUser(days = 7) {
   })
 }
 
-export interface UagV2Usage {
+export interface UnityUsage {
   as_of: string | null
   totals: {
     request_count?: number
@@ -609,7 +609,7 @@ export interface UagV2Usage {
   }
 }
 
-export interface UagV2Timeseries {
+export interface UnityTimeseries {
   series: Array<{
     usage_date: string
     request_count: number
@@ -644,13 +644,13 @@ export interface UagBreakdownRow {
   cached_tokens: number
 }
 
-/** Unity Gateway (v2) usage — v2-routed endpoints only, ~20-min fresh. */
-export function useUagV2Usage() {
+/** Unity Gateway usage — gateway-routed traffic only, ~20-min fresh. */
+export function useUnityUsage() {
   return useQuery({
-    queryKey: ['gateway', 'uag-v2-usage'],
+    queryKey: ['gateway', 'unity-usage'],
     queryFn: async () => {
-      const { data } = await apiClient.get('/gateway/uag-v2-usage')
-      return data as UagV2Usage
+      const { data } = await apiClient.get('/gateway/unity-usage')
+      return data as UnityUsage
     },
     staleTime: GW_STALE,
   })
@@ -797,6 +797,84 @@ export function useModelServices() {
   })
 }
 
+export type GatewayServiceType = 'MODEL_SERVICE' | 'MCP_SERVICE' | 'MODEL_PROVIDER_SERVICE' | 'AGENT_SERVICE'
+
+export interface GatewayRateLimit {
+  key?: string            // RATE_LIMIT_KEY_SERVICE | RATE_LIMIT_KEY_USER_DEFAULT | …
+  principal?: string
+  renewal_period?: string // RATE_LIMIT_RENEWAL_PERIOD_MINUTE
+  requests?: string | number
+  tokens?: string | number
+}
+
+/** One Unity Gateway UC service, merged with its 7-day traffic. Traffic fields are
+ *  null when there's no usage (or the caller can't see account-wide traffic). */
+export interface GatewayService {
+  full_name: string
+  service_type: GatewayServiceType | null
+  owner: string
+  comment: string
+  supported_api_types: string[]
+  provider_type: string
+  source_connection: string
+  destinations: string[]
+  rate_limits: GatewayRateLimit[]
+  inference_table: string
+  inference_table_enabled: boolean | null
+  update_time: string | null
+  in_inventory: boolean
+  request_count: number | null
+  error_count: number | null
+  throttled_count: number | null
+  unique_users: number | null
+  input_tokens: number | null
+  output_tokens: number | null
+  p50_latency_ms: number | null
+  p95_latency_ms: number | null
+  error_rate: number | null
+  last_seen: string | null
+}
+
+export interface GatewayServicesResponse {
+  as_of: string | null
+  traffic_visible: boolean
+  totals: {
+    services?: number
+    by_type?: Record<string, number>
+    with_rate_limits?: number
+    with_inference_table?: number
+    with_traffic?: number
+    throttled?: number
+  }
+  services: GatewayService[]
+}
+
+/** Unity Gateway services hub (all UC service kinds + config + traffic). */
+export function useGatewayServices() {
+  return useQuery({
+    queryKey: ['gateway', 'services'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/services')
+      return data as GatewayServicesResponse
+    },
+    staleTime: GW_STALE,
+  })
+}
+
+/** UC grants on any Unity Gateway service (model / MCP / provider / agent). */
+export function useServiceGrants(fullName: string | null, serviceType: GatewayServiceType | null) {
+  return useQuery({
+    queryKey: ['gateway', 'service-grants', serviceType, fullName],
+    enabled: !!fullName,
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/services/grants', {
+        params: { full_name: fullName, service_type: serviceType || 'MODEL_SERVICE' },
+      })
+      return data as { grants: ModelServiceGrantRow[]; error?: string }
+    },
+  })
+}
+
 export function useModelServiceGrants(fullName: string | null) {
   return useQuery({
     queryKey: ['gateway', 'model-service-grants', fullName],
@@ -928,13 +1006,13 @@ export function useUagCodingAgents() {
   })
 }
 
-/** Daily UAG v2 usage series (requests + tokens) for trend charts. */
-export function useUagV2Timeseries() {
+/** Daily Unity Gateway usage series (requests + tokens) for trend charts. */
+export function useUnityTimeseries() {
   return useQuery({
-    queryKey: ['gateway', 'uag-v2-timeseries'],
+    queryKey: ['gateway', 'unity-timeseries'],
     queryFn: async () => {
-      const { data } = await apiClient.get('/gateway/uag-v2-timeseries')
-      return data as UagV2Timeseries
+      const { data } = await apiClient.get('/gateway/unity-timeseries')
+      return data as UnityTimeseries
     },
     staleTime: GW_STALE,
   })
@@ -1199,13 +1277,31 @@ export interface BillingPageData {
   daily_tokens: any[]
   products: any[]
   cost_by_user: any[]
-  /** "actual" = Unity Gateway v2 per-user attribution; "estimate" = token-share split */
+  /** "actual" = Unity Gateway per-user attribution; "estimate" = token-share split */
   cost_by_user_source: 'actual' | 'estimate'
   tokens_by_user: any[]
   /** MODEL_SERVING $ attributed by custom_tag (window aggregate, workspace-agnostic) */
   cost_by_tag: CostByTagRow[]
   /** Actual $ for external LLMs (OpenAI, Foundry, …) routed through the Unity Gateway */
   external_model_spend: ExternalModelSpendRow[]
+  /** Gateway-attributed serving $ per Unity Gateway service (billing endpoint_id → service) */
+  cost_by_service: ServiceCostRow[]
+  /** Gateway-attributed serving $ per user × service (top 100) */
+  cost_by_user_service: UserServiceCostRow[]
+}
+
+export interface ServiceCostRow {
+  service_name: string
+  service_type: string | null
+  total_dbus: number | string
+  total_cost_usd: number | string
+  users: number
+}
+
+export interface UserServiceCostRow {
+  user_identity: string
+  service_name: string
+  total_cost_usd: number | string
 }
 
 /** One row of billing_cost_by_tag: a (tag_key, tag_value) pair and its total cost. */
@@ -1253,6 +1349,8 @@ export function useBillingPageData(days = 30, workspaceIds?: string[] | null) {
         tokens_by_user: [],
         cost_by_tag: [],
         external_model_spend: [],
+        cost_by_service: [],
+        cost_by_user_service: [],
         ...data,
       } as BillingPageData
     },

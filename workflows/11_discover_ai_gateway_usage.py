@@ -59,6 +59,8 @@ UAG_TIMESERIES_TABLE = f"{CATALOG}.{SCHEMA}.uag_usage_timeseries_daily"
 UAG_CODING_AGENT_TABLE = f"{CATALOG}.{SCHEMA}.uag_coding_agent_usage"
 UAG_THROTTLING_TABLE = f"{CATALOG}.{SCHEMA}.uag_throttling_daily"
 UAG_FALLBACK_TABLE = f"{CATALOG}.{SCHEMA}.uag_fallback_routing_daily"
+UAG_SERVICE_USAGE_TABLE = f"{CATALOG}.{SCHEMA}.uag_service_usage"
+UAG_ENDPOINT_SERVICE_MAP_TABLE = f"{CATALOG}.{SCHEMA}.uag_endpoint_service_map"
 print(f"Target tables: {UAG_TABLE}, {UAG_BREAKDOWN_TABLE}, {UAG_MCP_TOOL_TABLE}, {UAG_GUARDRAIL_TABLE}, {UAG_TIMESERIES_TABLE}, {UAG_THROTTLING_TABLE}, {UAG_FALLBACK_TABLE} | retention {RETENTION_DAYS}d")
 
 # COMMAND ----------
@@ -167,6 +169,34 @@ UAG_FALLBACK_SCHEMA = StructType([
     StructField("fallback_recovered", LongType(), True),
     StructField("fallback_destinations", StringType(), True),
     StructField("max_event_time", StringType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+# Per-service usage, keyed by the UC service full name (= service inventory
+# full_name). Unlike the endpoint-keyed tables this also covers MCP services,
+# which have no endpoint_name.
+UAG_SERVICE_USAGE_SCHEMA = StructType([
+    StructField("service_name", StringType(), False),
+    StructField("service_type", StringType(), True),
+    StructField("request_count", LongType(), True),
+    StructField("error_count", LongType(), True),
+    StructField("throttled_count", LongType(), True),
+    StructField("unique_users", LongType(), True),
+    StructField("input_tokens", LongType(), True),
+    StructField("output_tokens", LongType(), True),
+    StructField("p50_latency_ms", LongType(), True),
+    StructField("p95_latency_ms", LongType(), True),
+    StructField("max_event_time", StringType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+# endpoint_id → service. Lets the app attribute gateway-attributed billing
+# (billing_user_cost_daily keys on usage_metadata.ai_gateway.endpoint_id) to a UC
+# service, i.e. cost per model service and per user × service.
+UAG_ENDPOINT_SERVICE_MAP_SCHEMA = StructType([
+    StructField("endpoint_id", StringType(), False),
+    StructField("service_name", StringType(), True),
+    StructField("service_type", StringType(), True),
     StructField("discovered_at", TimestampType(), False),
 ])
 
@@ -615,7 +645,72 @@ print(f"✅ Wrote {len(fb_rows_raw)} rows to {UAG_FALLBACK_TABLE}")
 
 # COMMAND ----------
 
-result = {"status": "success", "kept_previous": _KEPT_PREVIOUS, "uag_endpoint_rows": len(rows_raw), "uag_breakdown_rows": len(bd_rows),
+# Per-service usage (model / MCP / provider services) — the traffic side of the
+# Unity Gateway services inventory (workflow 15). Untyped legacy rows excluded.
+print("▸ Querying ai_gateway.usage by service …")
+try:
+    sv_rows_raw = _execute_sql(f"""
+        SELECT service_name,
+               MAX(service_type)                                          AS service_type,
+               COUNT(*)                                                   AS request_count,
+               SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END)        AS error_count,
+               SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END)         AS throttled_count,
+               COUNT(DISTINCT requester)                                  AS unique_users,
+               COALESCE(SUM(input_tokens), 0)                             AS input_tokens,
+               COALESCE(SUM(output_tokens), 0)                            AS output_tokens,
+               CAST(PERCENTILE_APPROX(latency_ms, 0.5) AS LONG)           AS p50_latency_ms,
+               CAST(PERCENTILE_APPROX(latency_ms, 0.95) AS LONG)          AS p95_latency_ms,
+               CAST(MAX(event_time) AS STRING)                            AS max_event_time
+        FROM system.ai_gateway.usage
+        WHERE event_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
+          AND service_name IS NOT NULL AND service_name != ''
+        GROUP BY service_name
+        ORDER BY request_count DESC
+    """)
+    print(f"  ✅ {len(sv_rows_raw)} service rows")
+except Exception as exc:
+    sv_rows_raw = []
+    print(f"  ⚠️  service usage query unavailable: {exc}")
+
+if sv_rows_raw:
+    rows = [(r.get("service_name", ""), r.get("service_type"), to_int(r.get("request_count")),
+             to_int(r.get("error_count")), to_int(r.get("throttled_count")), to_int(r.get("unique_users")),
+             to_int(r.get("input_tokens")), to_int(r.get("output_tokens")),
+             to_int(r.get("p50_latency_ms")), to_int(r.get("p95_latency_ms")), r.get("max_event_time"), now)
+            for r in sv_rows_raw]
+    spark.createDataFrame(rows, UAG_SERVICE_USAGE_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_SERVICE_USAGE_TABLE)
+else:
+    _empty_or_keep(UAG_SERVICE_USAGE_SCHEMA, UAG_SERVICE_USAGE_TABLE)
+print(f"✅ Wrote {len(sv_rows_raw)} rows to {UAG_SERVICE_USAGE_TABLE}")
+
+# COMMAND ----------
+
+# endpoint_id → service map over the billing window (90d, matching the billing
+# workflow), so older gateway-attributed cost still resolves to a service.
+print("▸ Querying ai_gateway.usage endpoint_id → service map (90d) …")
+try:
+    map_rows_raw = _execute_sql("""
+        SELECT endpoint_id, MAX(service_name) AS service_name, MAX(service_type) AS service_type
+        FROM system.ai_gateway.usage
+        WHERE event_time >= current_timestamp() - INTERVAL 90 DAYS
+          AND endpoint_id IS NOT NULL AND service_name IS NOT NULL AND service_name != ''
+        GROUP BY endpoint_id
+    """)
+    print(f"  ✅ {len(map_rows_raw)} endpoint→service rows")
+except Exception as exc:
+    map_rows_raw = []
+    print(f"  ⚠️  endpoint→service map query unavailable: {exc}")
+
+if map_rows_raw:
+    rows = [(str(r.get("endpoint_id")), r.get("service_name"), r.get("service_type"), now) for r in map_rows_raw]
+    spark.createDataFrame(rows, UAG_ENDPOINT_SERVICE_MAP_SCHEMA).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(UAG_ENDPOINT_SERVICE_MAP_TABLE)
+else:
+    _empty_or_keep(UAG_ENDPOINT_SERVICE_MAP_SCHEMA, UAG_ENDPOINT_SERVICE_MAP_TABLE)
+print(f"✅ Wrote {len(map_rows_raw)} rows to {UAG_ENDPOINT_SERVICE_MAP_TABLE}")
+
+# COMMAND ----------
+
+result = {"status": "success", "uag_service_rows": len(sv_rows_raw), "uag_endpoint_service_map_rows": len(map_rows_raw), "kept_previous": _KEPT_PREVIOUS, "uag_endpoint_rows": len(rows_raw), "uag_breakdown_rows": len(bd_rows),
           "uag_mcp_tool_rows": len(mcp_rows_raw), "uag_guardrail_rows": len(gr_rows_raw),
           "uag_timeseries_rows": len(ts_rows_raw), "uag_coding_agent_rows": len(ca_rows_raw),
           "uag_throttling_rows": len(th_rows_raw), "uag_fallback_rows": len(fb_rows_raw),

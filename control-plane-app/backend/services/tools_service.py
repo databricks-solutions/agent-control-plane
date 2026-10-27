@@ -561,7 +561,7 @@ def get_mcp_servers() -> List[Dict[str, Any]]:
 
 def get_mcp_activity() -> Dict[str, Any]:
     """Server-grouped MCP tool activity from `uag_mcp_tool_daily` (Unity AI
-    Gateway v2, service_type = MCP_SERVICE).
+    Gateway, service_type = MCP_SERVICE).
 
     Complements the connection-based inventory in get_mcp_servers(): that lists
     configured UC MCP connections; this shows what actually routed through the

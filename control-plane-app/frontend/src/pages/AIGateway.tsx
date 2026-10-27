@@ -11,8 +11,8 @@ import {
   useGatewayUsageSummary,
   useGatewayUsageTimeseries,
   useGatewayUsageByUser,
-  useUagV2Usage,
-  useUagV2Timeseries,
+  useUnityUsage,
+  useUnityTimeseries,
   useUagCodingAgents,
   useUagMcpTools,
   useGuardrailCoverage,
@@ -29,8 +29,10 @@ import {
   useDeleteBudget,
   fetchBudgetRaw,
   type BudgetWritePayload,
-  useModelServices,
-  useModelServiceGrants,
+  useGatewayServices,
+  useServiceGrants,
+  type GatewayService,
+  type GatewayServiceType,
   useAppConfig,
   useRefreshGateway,
   useCurrentUser,
@@ -73,11 +75,14 @@ import {
   Archive,
   Server,
   Wallet,
+  Layers,
+  Activity,
 } from 'lucide-react'
 
 /* ── tab definitions ─────────────────────────────────────────── */
 const baseTabs = [
-  { id: 'uag-v2', label: 'Overview', icon: Sparkles },
+  { id: 'services', label: 'Services', icon: Layers },
+  { id: 'unity', label: 'Usage', icon: Activity },
   { id: 'budgets', label: 'Budgets', icon: Wallet },
   { id: 'legacy', label: 'Legacy AI Gateway', icon: Archive },
 ] as const
@@ -99,25 +104,26 @@ function fmtCost(v: number): string {
   return `$${v.toFixed(4)}`
 }
 
-// Secondary nav inside the Legacy AI Gateway tab — the per-endpoint serving-gateway
-// views (v1), plus Permissions (endpoint ACLs + UC grants).
+// Secondary nav inside the Legacy AI Gateway tab — the per-serving-endpoint views
+// (endpoint ACLs, endpoint-level rate limits/guardrails, system.serving.* usage).
 const legacyTabs = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'inventory', label: 'Endpoint Inventory', icon: Server },
   { id: 'metrics', label: 'Metrics', icon: Cpu },
   { id: 'permissions', label: 'Permissions', icon: Shield },
   { id: 'rate-limits', label: 'Rate Limits & Guardrails', icon: ShieldAlert },
 ] as const
 
-type TabId = 'uag-v2' | 'budgets' | 'legacy'
-type LegacyTabId = 'overview' | 'metrics' | 'permissions' | 'rate-limits'
+type TabId = 'services' | 'unity' | 'budgets' | 'legacy'
+type LegacyTabId = 'overview' | 'inventory' | 'metrics' | 'permissions' | 'rate-limits'
 
 export default function AIGatewayPage() {
-  const [activeTab, setActiveTab] = useState<TabId>('uag-v2')
+  const [activeTab, setActiveTab] = useState<TabId>('services')
   const [legacyTab, setLegacyTab] = useState<LegacyTabId>('overview')
   const [days, setDays] = useState(7)
   const [searchQuery, setSearchQuery] = useState('')
 
-  const { data: pageData, isLoading: pageLoading } = useGatewayPageData()
+  const { data: pageData, isLoading: pageLoading } = useGatewayPageData({ enabled: activeTab === 'legacy' })
   const overview = pageData?.overview
   const endpoints = pageData?.endpoints
   const { data: config } = useAppConfig()
@@ -135,7 +141,7 @@ export default function AIGatewayPage() {
         <div>
           <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Unity Gateway</h2>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Manage, monitor and govern serving endpoints across your workspace&nbsp;
+            Govern and monitor AI services in Unity Catalog — models, MCP servers, providers and agents&nbsp;
             <a
               href="https://docs.databricks.com/aws/en/ai-gateway/"
               target="_blank"
@@ -151,9 +157,10 @@ export default function AIGatewayPage() {
             onRefresh={() => refreshGateway.mutate()}
             isPending={refreshGateway.isPending || isFetchingGateway}
             lastSynced={pageData?.last_refreshed ?? null}
-            title="Updates the shared cache, not only the selected workspace"
+            title="Reload the latest synced data (discovery runs every 30 min)"
           />
-          {/* Search */}
+          {/* Search + window only drive the Legacy Overview views */}
+          {activeTab === 'legacy' && legacyTab === 'overview' && (<>
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
             <input
@@ -173,6 +180,7 @@ export default function AIGatewayPage() {
             <option value={7}>Last 7 days</option>
             <option value={30}>Last 30 days</option>
           </select>
+          </>)}
         </div>
       </div>
 
@@ -185,11 +193,12 @@ export default function AIGatewayPage() {
       <div className="flex items-start gap-2.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3.5 py-2.5 text-[13px] text-indigo-900 dark:border-indigo-900/50 dark:bg-indigo-950/30 dark:text-indigo-200">
         <Sparkles className="w-4 h-4 mt-0.5 flex-shrink-0 text-indigo-500 dark:text-indigo-400" />
         <p className="leading-snug">
-          <span className="font-semibold">Unity Gateway is where this is headed.</span>{' '}
-          It's Databricks' native, generally available control plane for AI governance. We
-          integrate its capabilities as their APIs become available — start with the{' '}
-          <span className="font-medium">Unity Gateway</span> tab — and retire legacy
-          views here as they're superseded. Expect this page to shift toward Unity Gateway over time.
+          <span className="font-semibold">Unity Gateway first.</span>{' '}
+          Services, usage and budgets come from Unity Gateway (UC services,{' '}
+          <code className="text-[12px]">system.ai_gateway.*</code>, account budgets).
+          Per-serving-endpoint configuration and usage live under{' '}
+          <span className="font-medium">Legacy AI Gateway</span> — still the only source for
+          custom CPU/GPU endpoints and agents on Model Serving, which Unity Gateway doesn't cover yet.
         </p>
       </div>
 
@@ -211,14 +220,11 @@ export default function AIGatewayPage() {
         ))}
       </div>
 
-      {/* Unity Gateway — primary surface, incl. account-wide endpoint inventory */}
-      {activeTab === 'uag-v2' && (
-        <div className="space-y-6">
-          <UagV2Section />
-          <ModelServicesSection />
-          <EndpointInventorySection />
-        </div>
-      )}
+      {/* Services — every Unity Gateway UC service, its config and traffic */}
+      {activeTab === 'services' && <ServicesSection />}
+
+      {/* Usage — system.ai_gateway.usage */}
+      {activeTab === 'unity' && <UnityUsageSection />}
 
       {/* Budgets — native account budgets (read-only), config + MTD spend vs cap */}
       {activeTab === 'budgets' && <BudgetsTab />}
@@ -256,6 +262,7 @@ export default function AIGatewayPage() {
             </div>
           )}
 
+          {legacyTab === 'inventory' && <EndpointInventorySection />}
           {legacyTab === 'overview' && <OverviewSection endpoints={endpoints} overview={overview} workspaceUrl={workspaceUrl} loading={pageLoading} searchQuery={searchQuery} days={days} />}
           {legacyTab === 'metrics' && <MetricsSection />}
           {legacyTab === 'permissions' && <PermissionsSection />}
@@ -726,110 +733,205 @@ function BudgetDeleteConfirm({
 
 /* ── Model Services (v3 UC securables + UC grants, OBO/UC-enforced) ── */
 
-function ModelServiceGrantsEditor({ fullName }: { fullName: string }) {
-  const { data, isLoading } = useModelServiceGrants(fullName)
+const SERVICE_TYPE_LABEL: Record<string, string> = {
+  MODEL_SERVICE: 'Model',
+  MCP_SERVICE: 'MCP',
+  MODEL_PROVIDER_SERVICE: 'Provider',
+  AGENT_SERVICE: 'Agent',
+}
+
+/** "300 req/min" · "user default: 8 req/min, 10k tok/min" — readable rate-limit summary. */
+function fmtRateLimit(rl: { key?: string; principal?: string; renewal_period?: string; requests?: string | number; tokens?: string | number }): string {
+  const scope = rl.principal
+    ? rl.principal
+    : (rl.key || '').includes('USER_DEFAULT') ? 'per user' : (rl.key || '').includes('SERVICE') ? 'service' : (rl.key || '').replace('RATE_LIMIT_KEY_', '').toLowerCase()
+  const per = (rl.renewal_period || '').replace('RATE_LIMIT_RENEWAL_PERIOD_', '').toLowerCase() || 'minute'
+  const parts: string[] = []
+  if (rl.requests !== undefined && rl.requests !== null && rl.requests !== '') parts.push(`${Number(rl.requests).toLocaleString()} req`)
+  if (rl.tokens !== undefined && rl.tokens !== null && rl.tokens !== '') parts.push(`${Number(rl.tokens).toLocaleString()} tok`)
+  const blocked = parts.length > 0 && [rl.requests, rl.tokens].every((v) => v === undefined || v === null || v === '' || Number(v) === 0)
+  return `${scope}: ${blocked ? 'blocked (0)' : `${parts.join(', ')}/${per}`}`
+}
+
+function ServiceGrants({ fullName, serviceType }: { fullName: string; serviceType: GatewayServiceType | null }) {
+  const { data, isLoading } = useServiceGrants(fullName, serviceType)
   const grants = data?.grants ?? []
-  if (isLoading) return <div className="px-4 py-2 text-xs text-gray-400 dark:text-gray-500">Loading grants…</div>
+  if (isLoading) return <div className="text-xs text-gray-400 dark:text-gray-500">Loading grants…</div>
   return (
-    <div className="px-4 py-3 space-y-2">
+    <div className="space-y-1">
       {data?.error && <div className="text-xs text-amber-600 dark:text-amber-400">{data.error}</div>}
-      <table className="w-full text-xs">
-        <tbody>
-          {grants.length === 0 && (
-            <tr><td className="py-1 text-gray-400 dark:text-gray-500">No direct grants</td></tr>
-          )}
-          {grants.map((g) => (
-            <tr key={g.principal} className="border-b border-gray-100 dark:border-gray-700/50 last:border-0">
-              <td className="py-1 font-mono">{g.principal}</td>
-              <td className="py-1">{g.privileges.map((p) => <Badge key={p} variant="info" className="text-[10px] mr-1">{p}</Badge>)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <p className="text-[11px] text-gray-400 dark:text-gray-500">
-        Read-only — grant editing isn't enabled yet (needs the app service principal to have <code>MANAGE</code> on the model service).
-      </p>
+      {!data?.error && grants.length === 0 && <div className="text-xs text-gray-400 dark:text-gray-500">No direct grants</div>}
+      {grants.map((g) => (
+        <div key={g.principal} className="flex items-center gap-2 text-xs">
+          <span className="font-mono truncate max-w-[260px]" title={g.principal}>{g.principal}</span>
+          {g.privileges.map((p) => <Badge key={p} variant="info" className="text-[10px]">{p}</Badge>)}
+        </div>
+      ))}
     </div>
   )
 }
 
-function ModelServicesSection() {
-  const { data, isLoading } = useModelServices()
+function ServiceDetail({ s }: { s: GatewayService }) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 px-4 py-3 text-xs">
+      <div className="space-y-1.5">
+        <div className="font-medium text-gray-700 dark:text-gray-300">Configuration</div>
+        {s.comment && <div className="text-gray-500 dark:text-gray-400 line-clamp-3" title={s.comment}>{s.comment}</div>}
+        {s.destinations.length > 0 && <div><span className="text-gray-400">Routes to:</span> {s.destinations.join(', ')}</div>}
+        {s.provider_type && <div><span className="text-gray-400">Provider:</span> {s.provider_type}</div>}
+        {s.source_connection && <div><span className="text-gray-400">Connection:</span> {s.source_connection}</div>}
+        {s.supported_api_types.length > 0 && <div><span className="text-gray-400">APIs:</span> {s.supported_api_types.join(', ')}</div>}
+        <div>
+          <span className="text-gray-400">Inference table:</span>{' '}
+          {s.inference_table ? <span className="font-mono">{s.inference_table}{s.inference_table_enabled === false ? ' (disabled)' : ''}</span> : 'not configured'}
+        </div>
+        {!s.in_inventory && <div className="text-amber-600 dark:text-amber-400">Seen in traffic only — the discovery identity can't list this service, so its config isn't visible.</div>}
+      </div>
+      <div className="space-y-1.5">
+        <div className="font-medium text-gray-700 dark:text-gray-300">Rate limits</div>
+        {s.rate_limits.length === 0
+          ? <div className="text-gray-400 dark:text-gray-500">None configured</div>
+          : s.rate_limits.map((rl, i) => <div key={i}>{fmtRateLimit(rl)}</div>)}
+      </div>
+      <div className="space-y-1.5">
+        <div className="font-medium text-gray-700 dark:text-gray-300">UC grants</div>
+        {s.in_inventory ? <ServiceGrants fullName={s.full_name} serviceType={s.service_type} /> : <div className="text-gray-400 dark:text-gray-500">—</div>}
+      </div>
+    </div>
+  )
+}
+
+function ServicesSection() {
+  const { data, isLoading } = useGatewayServices()
   const services = data?.services ?? []
+  const totals = data?.totals ?? {}
+  const trafficVisible = data?.traffic_visible !== false
   const [expanded, setExpanded] = useState<string | null>(null)
   const [page, setPage] = useState(0)
-  const [pageSize, setPageSize] = useState(10)
+  const [pageSize, setPageSize] = useState(15)
   const [q, setQ] = useState('')
-  const { sort, toggle } = useSort<string>('full_name', 'asc')
+  const [type, setType] = useState<string>('all')
+  const { sort, toggle } = useSort<string>('request_count', 'desc')
 
   const filtered = useMemo(() => {
     const n = q.trim().toLowerCase()
-    return n ? services.filter((s) => s.full_name.toLowerCase().includes(n) || (s.owner || '').toLowerCase().includes(n)) : services
-  }, [services, q])
-  const sorted = useMemo(() => sortRows(filtered, sort, (s: (typeof services)[number], k) => (s as any)[k]), [filtered, sort])
+    return services.filter((s) =>
+      (type === 'all' || s.service_type === type) &&
+      (!n || s.full_name.toLowerCase().includes(n) || (s.owner || '').toLowerCase().includes(n)))
+  }, [services, q, type])
+  const sorted = useMemo(() => sortRows(filtered, sort, (s: GatewayService, k) => {
+    if (k === 'full_name' || k === 'owner' || k === 'service_type') return String((s as any)[k] || '').toLowerCase()
+    if (k === 'rate_limits') return s.rate_limits.length
+    return Number((s as any)[k] ?? -1)
+  }), [filtered, sort])
   const paged = sorted.slice(page * pageSize, (page + 1) * pageSize)
-
-  if (isLoading || services.length === 0) return null
+  const byType = totals.by_type || {}
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base flex items-center gap-2">
-          <Sparkles className="w-4 h-4 text-db-red" />
-          Model Services
-          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">{services.length}</span>
-          <span className="group relative inline-flex">
-            <Info className="w-3.5 h-3.5 text-gray-400 cursor-help" tabIndex={0} />
-            <span role="tooltip" className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 hidden w-80 rounded-lg border border-gray-200 bg-white p-3 text-left text-[11px] font-normal leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">
-              Unity Gateway model services — UC securables governed by Unity Catalog grants
-              (metastore-wide). <strong>Read-only</strong>: the list is discovered by the workflow
-              and grants are shown live. Editing is deferred (needs the app SP to have MANAGE, or
-              a UC scope Apps OBO can't yet carry).
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <KpiCard title="Services" value={totals.services ?? 0} format="number" />
+        <KpiCard title="Model / MCP" value={`${byType.MODEL_SERVICE ?? 0} / ${byType.MCP_SERVICE ?? 0}`} />
+        <KpiCard title="Provider / Agent" value={`${byType.MODEL_PROVIDER_SERVICE ?? 0} / ${byType.AGENT_SERVICE ?? 0}`} />
+        <KpiCard title="With Traffic (7d)" value={trafficVisible ? (totals.with_traffic ?? 0) : '—'} format={trafficVisible ? 'number' : undefined} />
+        <KpiCard title="Rate-Limited" value={totals.with_rate_limits ?? 0} format="number" />
+        <KpiCard title="Throttled (7d)" value={trafficVisible ? (totals.throttled ?? 0) : '—'} format={trafficVisible ? 'number' : undefined} />
+      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Layers className="w-4 h-4 text-db-red" />
+            Unity Gateway Services
+            <span className="group relative inline-flex">
+              <Info className="w-3.5 h-3.5 text-gray-400 cursor-help" tabIndex={0} />
+              <span role="tooltip" className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 hidden w-80 rounded-lg border border-gray-200 bg-white p-3 text-left text-[11px] font-normal leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">
+                Every Unity Gateway service in Unity Catalog — model, MCP, model-provider and agent services —
+                with its owner, rate limits, inference table and routing (discovered by the workflow), plus
+                7-day traffic from <code>system.ai_gateway.usage</code>. UC grants are read live. Read-only.
+              </span>
             </span>
-          </span>
-        </CardTitle>
-        <p className="text-[11px] text-gray-400 dark:text-gray-500">Expand a service to view and edit its UC grants.</p>
-      </CardHeader>
-      <CardContent>
-        <div className="relative mb-3 max-w-xs">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
-          <input type="text" placeholder="Search model services…" value={q} onChange={(e) => { setQ(e.target.value); setPage(0) }} className="pl-8 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-800 dark:text-gray-200 w-full" />
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="border-b dark:border-gray-700">
-              <tr>
-                <SortableHeader label="Model Service" sortKey="full_name" current={sort} onToggle={toggle} />
-                <SortableHeader label="Owner" sortKey="owner" current={sort} onToggle={toggle} />
-                <th className="py-2 px-2 text-left text-xs text-gray-500 dark:text-gray-400">API Types</th>
-                <th className="py-2 px-2 text-right text-xs text-gray-500 dark:text-gray-400">Grants</th>
-              </tr>
-            </thead>
-            <tbody>
-              {paged.map((s) => {
-                const open = expanded === s.full_name
-                return (
-                  <Fragment key={s.full_name}>
-                    <tr className="border-b border-gray-100 dark:border-gray-700/50 hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer" onClick={() => setExpanded(open ? null : s.full_name)}>
-                      <td className="py-2 px-2 font-mono text-xs truncate max-w-[320px]" title={s.full_name}>{s.full_name}</td>
-                      <td className="py-2 px-2 text-gray-500 dark:text-gray-400 truncate max-w-[200px]" title={s.owner}>{s.owner || '—'}</td>
-                      <td className="py-2 px-2 text-gray-500 dark:text-gray-400 text-xs">{(s.supported_api_types || []).join(', ') || '—'}</td>
-                      <td className="py-2 px-2 text-right text-xs text-db-red">{open ? 'Hide' : 'View'}</td>
+            {data?.as_of && <span className="ml-auto text-[10px] font-normal text-gray-400 dark:text-gray-500">as of {formatAsOf(data.as_of)}</span>}
+          </CardTitle>
+          {!trafficVisible && <p className="text-[11px] text-amber-600 dark:text-amber-400">Traffic columns are account-wide, so they're only shown to account admins.</p>}
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="py-12 text-center text-gray-400 dark:text-gray-500">Loading…</div>
+          ) : services.length === 0 ? (
+            <div className="py-12 text-center text-gray-400 dark:text-gray-500">
+              No Unity Gateway services discovered yet — the discovery workflow hasn't synced the services inventory, or its identity can't list UC services.
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center gap-2 mb-3">
+                <div className="relative max-w-xs flex-1">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                  <input type="text" placeholder="Search services or owners…" value={q} onChange={(e) => { setQ(e.target.value); setPage(0) }} className="pl-8 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-800 dark:text-gray-200 w-full" />
+                </div>
+                <div className="flex gap-1">
+                  {['all', 'MODEL_SERVICE', 'MCP_SERVICE', 'MODEL_PROVIDER_SERVICE', 'AGENT_SERVICE'].map((t) => (
+                    <button key={t} onClick={() => { setType(t); setPage(0) }}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium ${type === t ? 'bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}>
+                      {t === 'all' ? 'All' : SERVICE_TYPE_LABEL[t]}{t !== 'all' ? ` ${byType[t] ?? 0}` : ''}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="border-b dark:border-gray-700">
+                    <tr>
+                      <SortableHeader label="Service" sortKey="full_name" current={sort} onToggle={toggle} />
+                      <SortableHeader label="Type" sortKey="service_type" current={sort} onToggle={toggle} />
+                      <SortableHeader label="Owner" sortKey="owner" current={sort} onToggle={toggle} />
+                      <SortableHeader label="Requests (7d)" sortKey="request_count" current={sort} onToggle={toggle} align="right" />
+                      <SortableHeader label="Users" sortKey="unique_users" current={sort} onToggle={toggle} align="right" />
+                      <SortableHeader label="Error %" sortKey="error_rate" current={sort} onToggle={toggle} align="right" />
+                      <SortableHeader label="429s" sortKey="throttled_count" current={sort} onToggle={toggle} align="right" />
+                      <SortableHeader label="p95" sortKey="p95_latency_ms" current={sort} onToggle={toggle} align="right" />
+                      <SortableHeader label="Limits" sortKey="rate_limits" current={sort} onToggle={toggle} align="right" />
                     </tr>
-                    {open && (
-                      <tr className="bg-gray-50/60 dark:bg-gray-800/30">
-                        <td colSpan={4}><ModelServiceGrantsEditor fullName={s.full_name} /></td>
-                      </tr>
-                    )}
-                  </Fragment>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
-        <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
-      </CardContent>
-    </Card>
+                  </thead>
+                  <tbody>
+                    {paged.map((s) => {
+                      const key = `${s.service_type}:${s.full_name}`
+                      const open = expanded === key
+                      const num = (v: number | null, f: (x: number) => string = (x) => x.toLocaleString()) => (v === null || v === undefined ? '—' : f(v))
+                      return (
+                        <Fragment key={key}>
+                          <tr className="border-b border-gray-100 dark:border-gray-700/50 hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer" onClick={() => setExpanded(open ? null : key)}>
+                            <td className="py-2 px-2 font-mono text-xs truncate max-w-[300px]" title={s.full_name}>
+                              <span className="inline-flex items-center gap-1">
+                                {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                                {s.full_name}
+                              </span>
+                            </td>
+                            <td className="py-2 px-2"><Badge variant="default" className="text-[10px]">{SERVICE_TYPE_LABEL[s.service_type || ''] || s.service_type || '—'}</Badge></td>
+                            <td className="py-2 px-2 text-gray-500 dark:text-gray-400 truncate max-w-[180px]" title={s.owner}>{s.owner || '—'}</td>
+                            <td className="py-2 px-2 text-right tabular-nums">{num(s.request_count)}</td>
+                            <td className="py-2 px-2 text-right tabular-nums">{num(s.unique_users)}</td>
+                            <td className={`py-2 px-2 text-right tabular-nums ${(s.error_rate ?? 0) >= 5 ? 'text-red-600 dark:text-red-400' : ''}`}>{num(s.error_rate, (x) => `${x.toFixed(1)}%`)}</td>
+                            <td className={`py-2 px-2 text-right tabular-nums ${(s.throttled_count ?? 0) > 0 ? 'text-amber-600 dark:text-amber-400' : ''}`}>{num(s.throttled_count)}</td>
+                            <td className="py-2 px-2 text-right tabular-nums">{num(s.p95_latency_ms, (x) => `${x.toLocaleString()} ms`)}</td>
+                            <td className="py-2 px-2 text-right tabular-nums">{s.rate_limits.length || '—'}</td>
+                          </tr>
+                          {open && (
+                            <tr className="bg-gray-50/60 dark:bg-gray-800/30">
+                              <td colSpan={9}><ServiceDetail s={s} /></td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+            </>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   )
 }
 
@@ -955,8 +1057,8 @@ function EndpointInventorySection() {
 
 /* ── Unity Gateway Section ───────────────────────── */
 
-function UagV2Section() {
-  const { data: uag, isLoading } = useUagV2Usage()
+function UnityUsageSection() {
+  const { data: uag, isLoading } = useUnityUsage()
   const seesAccountWide = useSeesAccountWide()
   const uagSort = useSort('request_count', 'desc')
   const [uagPage, setUagPage] = useState(0)
@@ -1012,7 +1114,7 @@ function UagV2Section() {
                 <KpiCard title="Endpoints" value={uag!.totals.endpoints ?? 0} format="number" />
               </div>
               <div className="mb-4">
-                <UagV2TrendCard />
+                <UnityTrendCard />
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
@@ -1122,10 +1224,10 @@ function UagV2Section() {
   )
 }
 
-/* Daily UAG v2 usage trend (uag_usage_timeseries_daily) — requests + tokens over
+/* Daily Unity Gateway usage trend (uag_usage_timeseries_daily) — requests + tokens over
  * time. Hidden when there's no v2 traffic. */
-function UagV2TrendCard() {
-  const { data, isLoading } = useUagV2Timeseries()
+function UnityTrendCard() {
+  const { data, isLoading } = useUnityTimeseries()
   const series = data?.series || []
   if (isLoading || series.length === 0) return null
   // append a local-midnight time so the date-only string parses in local tz
@@ -1195,7 +1297,7 @@ function CodingAgentsCard() {
   )
 }
 
-/* Guardrail coverage/activity (uag_guardrail_daily). Which endpoints have UAG v2
+/* Guardrail coverage/activity (uag_guardrail_daily). Which endpoints have Unity Gateway
  * guardrails running + by which judge model. Coverage only — NOT block/mask
  * outcomes (the verdict isn't in system.ai_gateway.usage; it needs the gated
  * feature-results surface). Hidden when no endpoint has guardrails active. */
