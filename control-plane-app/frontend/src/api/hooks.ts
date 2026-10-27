@@ -1804,6 +1804,130 @@ export function useLBTopWorkspacesDaily(days = 30) {
   })
 }
 
+// ── Retrieval & Memory: Vector Search index usage + Lakebase health ──
+// Cached in Lakebase by workflows 03/02 (system.access.audit, system.lakebase.*,
+// system.billing.usage). Every endpoint fails open to [] when a table isn't synced.
+
+export interface VsUsageTrendRow {
+  usage_date: string
+  action: string
+  request_count: number
+  error_count: number
+}
+
+export interface VsIndexUsageRow {
+  workspace_id: string
+  index_name: string
+  endpoint_name: string
+  managed_by: 'knowledge_assistant' | 'supervisor' | null
+  query_count: number
+  scan_count: number
+  write_count: number
+  error_count: number
+  peak_daily_callers: number
+  last_active_date: string | null
+}
+
+export interface VsIndexCallerRow {
+  caller: string
+  request_count: number
+  error_count: number
+  last_seen: string | null
+}
+
+export interface LakebaseHealthRow {
+  usage_date: string
+  project_id: string
+  project_name: string
+  branch_id: string
+  branch_name: string
+  avg_connections: number
+  max_connections: number
+  max_db_size_bytes: number
+}
+
+export interface LakebaseWaitEventRow {
+  wait_class_name: string
+  wait_event_name: string
+  project_name: string
+  branch_name: string
+  wait_event_count: number
+  wait_event_time: number
+}
+
+export interface LakebaseProjectCostRow {
+  project_id: string
+  branch_id: string
+  project_name: string
+  branch_name: string
+  total_dbus: number
+  total_cost_usd: number
+}
+
+export function useVectorSearchUsageTrend(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'usage-trend', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/usage/trend', { params: { days } })
+      return (Array.isArray(data) ? data : []) as VsUsageTrendRow[]
+    },
+  })
+}
+
+export function useVectorSearchIndexUsage(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'usage-indexes', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/usage/indexes', { params: { days } })
+      return (Array.isArray(data) ? data : []) as VsIndexUsageRow[]
+    },
+  })
+}
+
+/** Top callers for one index. Disabled until an index is selected in the table. */
+export function useVectorSearchIndexCallers(indexName: string | null, workspaceId?: string | null) {
+  return useQuery({
+    queryKey: ['vector-search', 'usage-callers', indexName, workspaceId ?? null],
+    enabled: !!indexName,
+    queryFn: async () => {
+      const params: Record<string, string> = { index_name: indexName as string }
+      if (workspaceId) params.workspace_id = workspaceId
+      const { data } = await apiClient.get('/vector-search/usage/callers', { params })
+      return (Array.isArray(data) ? data : []) as VsIndexCallerRow[]
+    },
+  })
+}
+
+export function useLakebaseHealth(days = 14) {
+  return useQuery({
+    queryKey: ['vector-search', 'lakebase-health', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/lakebase/health', { params: { days } })
+      return (Array.isArray(data) ? data : []) as LakebaseHealthRow[]
+    },
+  })
+}
+
+export function useLakebaseWaitEvents(limit = 25) {
+  return useQuery({
+    queryKey: ['vector-search', 'lakebase-wait-events', limit],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/lakebase/wait-events', { params: { limit } })
+      return (Array.isArray(data) ? data : []) as LakebaseWaitEventRow[]
+    },
+  })
+}
+
+export function useLakebaseCostByProject(days = 30) {
+  return useQuery({
+    queryKey: ['vector-search', 'lakebase-cost-by-project', days],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/lakebase/cost/by-project', { params: { days } })
+      return (Array.isArray(data) ? data : []) as LakebaseProjectCostRow[]
+    },
+  })
+}
+
 // ── Genie Ask tab (feature-flagged via FEATURE_GENIE_ENABLED) ──
 
 export interface GenieSpaceInfo {

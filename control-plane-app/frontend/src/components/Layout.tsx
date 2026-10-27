@@ -25,7 +25,7 @@ const navItems = [
   { to: '/', label: 'Governance', icon: Shield, exact: true },
   { to: '/agents', label: 'Agents', icon: Bot },
   { to: '/ai-gateway', label: 'Unity Gateway', icon: Waypoints },
-  { to: '/vector-search', label: 'Knowledge Bases', icon: Database },
+  { to: '/vector-search', label: 'Retrieval & Memory', icon: Database },
   { to: '/tools', label: 'Tools', icon: Wrench },
   { to: '/observability', label: 'Observability', icon: Eye },
   { to: '/workspaces', label: 'Workspaces', icon: Globe },
