@@ -99,9 +99,17 @@ EXPECTED = [
     "uag_coding_agent_usage",        # coding-agent activity; empty when no coding-agent traffic
     "uag_throttling_daily",          # 429/5xx per endpoint; empty when no throttling/errors
     "uag_fallback_routing_daily",    # smart-routing fallbacks per endpoint; empty when no fallbacks
+    "vs_index_usage_daily",          # Vector Search index query/error usage from audit; empty when no VS traffic in window
+    "vs_index_callers",              # top callers per VS index; empty when no VS traffic in window
+    "lakebase_health_daily",         # Lakebase connections / DB size per project; empty if gauges unreadable
+    "lakebase_wait_events",          # Lakebase wait events per workspace; empty if counters unreadable
+    "lakebase_cost_by_project",      # Lakebase $ per project_id; empty when no project-tagged LAKEBASE usage
     "uag_budget_status",             # account Budgets API config inventory; empty without account creds
     "serving_endpoints_inventory",   # account-wide served-entity inventory; empty if served_entities unreadable
     "model_services_inventory",      # v3 UC model services; empty if model-services API unreadable
+    "gateway_services_inventory",    # v3 UC services (model / MCP / provider / agent) + config; empty if lists unreadable
+    "uag_service_usage",             # per-service traffic from system.ai_gateway.usage; empty when no gateway traffic
+    "uag_endpoint_service_map",      # endpoint_id → service (attributes gateway billing); empty when no gateway traffic
     "billing_cache_meta",
     # App-managed tables created in Phase 7 of 02_sync_to_lakebase. These were
     # historically created lazily by the app's startup hook, but the app SP

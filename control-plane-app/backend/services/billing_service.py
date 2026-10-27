@@ -840,6 +840,8 @@ def _empty_page_data() -> Dict[str, Any]:
         "tokens_by_user": [],
         "cost_by_tag": [],
         "external_model_spend": [],
+        "cost_by_service": [],
+        "cost_by_user_service": [],
     }
 
 
@@ -1041,6 +1043,42 @@ def get_all_page_data(
         else:
             cost_by_user_source = "estimate"
 
+        # 9c. Cost per Unity Gateway service, and per user × service: the same
+        # gateway-attributed billing rows (usage_metadata.ai_gateway.endpoint_id),
+        # resolved to a UC service via uag_endpoint_service_map (workflow 11).
+        # SAVEPOINT: the map table may not exist until the first workflow run after
+        # deploy — a failure here must not abort the page's shared transaction.
+        cost_by_service: List[Dict[str, Any]] = []
+        cost_by_user_service: List[Dict[str, Any]] = []
+        cur.execute("SAVEPOINT svc_cost")
+        try:
+            cur.execute(
+                f"""SELECT m.service_name, MAX(m.service_type) AS service_type,
+                           SUM(u.total_dbus)::NUMERIC(18,2)     AS total_dbus,
+                           SUM(u.total_cost_usd)::NUMERIC(18,2) AS total_cost_usd,
+                           COUNT(DISTINCT u.run_by)             AS users
+                    FROM billing_user_cost_daily u
+                    JOIN uag_endpoint_service_map m ON m.endpoint_id = u.endpoint_id
+                    WHERE u.usage_date >= CURRENT_DATE - %s {ws_filter_u}
+                    GROUP BY m.service_name ORDER BY total_cost_usd DESC LIMIT 50""",
+                _p(),
+            )
+            cost_by_service = [dict(r) for r in cur.fetchall()]
+            cur.execute(
+                f"""SELECT u.run_by AS user_identity, m.service_name,
+                           SUM(u.total_cost_usd)::NUMERIC(18,2) AS total_cost_usd
+                    FROM billing_user_cost_daily u
+                    JOIN uag_endpoint_service_map m ON m.endpoint_id = u.endpoint_id
+                    WHERE u.usage_date >= CURRENT_DATE - %s {ws_filter_u}
+                    GROUP BY u.run_by, m.service_name ORDER BY total_cost_usd DESC LIMIT 100""",
+                _p(),
+            )
+            cost_by_user_service = [dict(r) for r in cur.fetchall()]
+            cur.execute("RELEASE SAVEPOINT svc_cost")
+        except Exception as exc:
+            cur.execute("ROLLBACK TO SAVEPOINT svc_cost")
+            logger.info("cost by service unavailable (uag_endpoint_service_map not synced yet?): %s", exc)
+
         # 10. token usage by user
         cur.execute(
             f"""SELECT user_identity,
@@ -1127,4 +1165,6 @@ def get_all_page_data(
         "tokens_by_user": tokens_by_user,
         "cost_by_tag": cost_by_tag,
         "external_model_spend": external_model_spend,
+        "cost_by_service": cost_by_service,
+        "cost_by_user_service": cost_by_user_service,
     }

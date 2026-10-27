@@ -12,6 +12,8 @@ Performance:
 """
 from __future__ import annotations
 
+import json
+import re
 import time
 import threading
 import httpx
@@ -640,9 +642,9 @@ def _max_as_of(rows: List[Dict[str, Any]]) -> Optional[str]:
     return max((r.get("max_event_time") for r in rows if r.get("max_event_time")), default=None)
 
 
-def get_uag_v2_usage(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Unity Gateway (v2) usage summary from `uag_usage_summary` (sourced from
-    system.ai_gateway.usage — v2-routed endpoints only, ~20-min fresh).
+def get_unity_usage(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Unity Gateway usage summary from `uag_usage_summary` (sourced from
+    system.ai_gateway.usage — gateway-routed traffic only, ~20-min fresh).
 
     Returns {as_of, totals, endpoints}. Degrades to empty if the table isn't
     synced yet or the workflow couldn't read the (account-scoped) system table.
@@ -1253,7 +1255,28 @@ def list_model_services(user_token: str = "") -> Dict[str, Any]:
 
 def get_model_service_grants(full_name: str, user_token: str = "") -> Dict[str, Any]:
     """UC grants on one model service (securable_type MODEL_SERVICE)."""
-    body = _uc_get_json(f"/api/2.1/unity-catalog/permissions/model_service/{full_name}", user_token)
+    return get_service_grants(full_name, "MODEL_SERVICE", user_token)
+
+
+# UC permissions-API securable type for each Unity Gateway service kind.
+_SERVICE_SECURABLE = {
+    "MODEL_SERVICE": "model_service",
+    "MCP_SERVICE": "mcp_service",
+    "MODEL_PROVIDER_SERVICE": "model_provider_service",
+    "AGENT_SERVICE": "agent_service",
+}
+# A UC full name (catalog.schema.name) — rejects anything that could alter the URL path.
+_UC_FULL_NAME = re.compile(r"^[\w\-]+\.[\w\-]+\.[\w\-.]+$")
+
+
+def get_service_grants(full_name: str, service_type: str = "MODEL_SERVICE", user_token: str = "") -> Dict[str, Any]:
+    """UC grants on one Unity Gateway service (model / MCP / provider / agent)."""
+    securable = _SERVICE_SECURABLE.get((service_type or "").upper())
+    if not securable:
+        return {"grants": [], "error": f"unknown service type {service_type!r}"}
+    if not _UC_FULL_NAME.match(full_name or ""):
+        return {"grants": [], "error": "invalid service name"}
+    body = _uc_get_json(f"/api/2.1/unity-catalog/permissions/{securable}/{full_name}", user_token)
     if body is None:
         return {"grants": [], "error": "grants not readable (insufficient privileges)"}
     return {
@@ -1261,6 +1284,126 @@ def get_model_service_grants(full_name: str, user_token: str = "") -> Dict[str, 
             {"principal": pa.get("principal", ""), "privileges": pa.get("privileges", [])}
             for pa in body.get("privilege_assignments", [])
         ]
+    }
+
+
+def get_gateway_services(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Unity Gateway services hub: every UC service (model / MCP / provider / agent)
+    with owner + config (rate limits, inference table, routing) from
+    `gateway_services_inventory` (workflow 15), merged with 7-day traffic from
+    `uag_service_usage` (workflow 11, system.ai_gateway.usage by service_name).
+
+    The inventory lists are grant-filtered, so services that carry traffic but
+    weren't listable still appear (traffic only, ``in_inventory=False``).
+
+    Inventory is metastore metadata (same visibility as the model-services list);
+    traffic is account-wide usage, so it's suppressed for scoped callers
+    (``traffic_visible=False``) rather than shown partially.
+    """
+    from backend.database import execute_query
+    traffic_visible = allowed_workspace_ids is None
+    try:
+        inv = execute_query(
+            """SELECT full_name, service_type, owner, comment, supported_api_types, provider_type,
+                      source_connection, destinations, rate_limit_count, rate_limits,
+                      inference_table, inference_table_enabled, update_time, discovered_at
+               FROM gateway_services_inventory ORDER BY full_name LIMIT 5000""")
+    except Exception as exc:
+        logger.warning("gateway_services_inventory not available: %s", exc)
+        inv = []
+    usage: Dict[str, Dict[str, Any]] = {}
+    if traffic_visible:
+        try:
+            for r in execute_query(
+                """SELECT service_name, service_type, request_count, error_count, throttled_count,
+                          unique_users, input_tokens, output_tokens, p50_latency_ms, p95_latency_ms,
+                          max_event_time
+                   FROM uag_service_usage"""):
+                usage[r["service_name"]] = dict(r)
+        except Exception as exc:
+            logger.warning("uag_service_usage not available: %s", exc)
+
+    def _json_list(v):
+        try:
+            return json.loads(v) if v else []
+        except Exception:
+            return []
+
+    services: List[Dict[str, Any]] = []
+    seen = set()
+    for r in inv:
+        name = r.get("full_name") or ""
+        seen.add(name)
+        u = usage.get(name, {})
+        services.append({
+            "full_name": name,
+            "service_type": r.get("service_type"),
+            "owner": r.get("owner") or "",
+            "comment": r.get("comment") or "",
+            "supported_api_types": [a for a in (r.get("supported_api_types") or "").split(",") if a],
+            "provider_type": r.get("provider_type") or "",
+            "source_connection": r.get("source_connection") or "",
+            "destinations": [d for d in (r.get("destinations") or "").split(",") if d],
+            "rate_limits": _json_list(r.get("rate_limits")),
+            "inference_table": r.get("inference_table") or "",
+            "inference_table_enabled": r.get("inference_table_enabled"),
+            "update_time": r.get("update_time"),
+            "in_inventory": True,
+            **_service_traffic(u),
+        })
+    for name, u in usage.items():  # traffic for services the run-as identity couldn't list
+        if name in seen:
+            continue
+        services.append({
+            "full_name": name, "service_type": u.get("service_type"), "owner": "", "comment": "",
+            "supported_api_types": [], "provider_type": "", "source_connection": "", "destinations": [],
+            "rate_limits": [], "inference_table": "", "inference_table_enabled": None, "update_time": None,
+            "in_inventory": False, **_service_traffic(u),
+        })
+    services.sort(key=lambda s: (-(s["request_count"] or 0), s["full_name"]))
+
+    by_type: Dict[str, int] = {}
+    for s in services:
+        by_type[s["service_type"] or "UNKNOWN"] = by_type.get(s["service_type"] or "UNKNOWN", 0) + 1
+    as_of = None
+    for r in inv:
+        d = r.get("discovered_at")
+        if d is not None and (as_of is None or d > as_of):
+            as_of = d
+    return {
+        "as_of": as_of.isoformat() if hasattr(as_of, "isoformat") else as_of,
+        "traffic_visible": traffic_visible,
+        "totals": {
+            "services": len(services),
+            "by_type": by_type,
+            "with_rate_limits": sum(1 for s in services if s["rate_limits"]),
+            "with_inference_table": sum(1 for s in services if s["inference_table"] and s["inference_table_enabled"] is not False),
+            "with_traffic": sum(1 for s in services if (s["request_count"] or 0) > 0),
+            "throttled": sum(1 for s in services if (s["throttled_count"] or 0) > 0),
+        },
+        "services": services,
+    }
+
+
+def _service_traffic(u: Dict[str, Any]) -> Dict[str, Any]:
+    """Traffic fields for one service; None (not 0) when there's no usage row."""
+    if not u:
+        return {k: None for k in ("request_count", "error_count", "throttled_count", "unique_users",
+                                  "input_tokens", "output_tokens", "p50_latency_ms", "p95_latency_ms",
+                                  "error_rate", "last_seen")}
+    req = int(u.get("request_count") or 0)
+    err = int(u.get("error_count") or 0)
+    return {
+        "request_count": req,
+        "error_count": err,
+        "throttled_count": int(u.get("throttled_count") or 0),
+        "unique_users": int(u.get("unique_users") or 0),
+        "input_tokens": int(u.get("input_tokens") or 0),
+        "output_tokens": int(u.get("output_tokens") or 0),
+        "p50_latency_ms": int(u.get("p50_latency_ms") or 0) or None,
+        "p95_latency_ms": int(u.get("p95_latency_ms") or 0) or None,
+        "error_rate": round(err * 100.0 / req, 2) if req else None,
+        "last_seen": u.get("max_event_time"),
     }
 
 
@@ -1297,7 +1440,7 @@ def get_uag_mcp_tools(allowed_workspace_ids: Optional[List[str]] = None) -> Dict
     system.ai_gateway.usage rows where service_type = MCP_SERVICE).
 
     Returns {as_of, totals, tools}. Degrades to empty when the table isn't
-    synced or the workspace routes no MCP traffic through UAG v2.
+    synced or the workspace routes no MCP traffic through Unity Gateway.
     """
     from backend.database import execute_query
     empty = {"as_of": None, "totals": {}, "tools": []}
@@ -1350,7 +1493,7 @@ def get_uag_mcp_tools(allowed_workspace_ids: Optional[List[str]] = None) -> Dict
 
 def get_guardrail_coverage(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Guardrail COVERAGE / activity from `uag_guardrail_daily` — which endpoints
-    have Unity Gateway v2 guardrails running, how often, and by which judge
+    have Unity Gateway guardrails running, how often, and by which judge
     model(s).
 
     IMPORTANT: this is coverage/activity only, NOT block/mask outcomes. The
@@ -1521,9 +1664,9 @@ def get_fallback_routing(allowed_workspace_ids: Optional[List[str]] = None) -> D
     }
 
 
-def get_uag_v2_timeseries(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Daily UAG v2 usage series (requests + tokens) from `uag_usage_timeseries_daily`
-    for trend charts on the v2 tab. Degrades to empty when unsynced / no v2 traffic."""
+def get_unity_timeseries(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Daily Unity Gateway usage series (requests + tokens) from `uag_usage_timeseries_daily`
+    for trend charts. Degrades to empty when unsynced / no gateway traffic."""
     if allowed_workspace_ids is not None:
         return {"series": []}
     from backend.database import execute_query
@@ -2411,3 +2554,8 @@ def prewarm_cache() -> None:
     except Exception as exc:
         elapsed = round(_t.time() - start, 1)
         logger.warning("Unity Gateway cache pre-warm partial (%ss): %s", elapsed, exc)
+
+
+# Backward-compatible aliases (pre-rename "v2" names; the data was always v3).
+get_uag_v2_usage = get_unity_usage
+get_uag_v2_timeseries = get_unity_timeseries

@@ -1,4 +1,6 @@
 """API routes for Vector Search monitoring."""
+from typing import List, Optional
+
 from fastapi import APIRouter, Depends, Query
 from backend.utils.auth import get_current_user, require_admin, UserInfo
 from backend.utils.access_scope import get_allowed_workspace_ids
@@ -159,3 +161,60 @@ def lb_top_workspaces_daily(days: int = Query(30, ge=1, le=365), user: UserInfo 
 def combined_cost_trend(days: int = Query(30, ge=1, le=365), user: UserInfo = Depends(get_current_user)):
     """Daily cost trend for both products."""
     return vector_search_service.get_combined_cost_trend(days, allowed_workspace_ids=get_allowed_workspace_ids(user))
+
+
+# ── Retrieval & Memory: Vector Search index usage ───────────────
+
+def _scope(user: UserInfo, workspace_ids: Optional[str]) -> Optional[List[str]]:
+    """Caller's access scope, optionally narrowed by the page's workspace selector
+    (comma-separated). The selection is INTERSECTED with the scope, so it can only
+    narrow what the caller may see — never widen it."""
+    allowed = get_allowed_workspace_ids(user)
+    selected = [w.strip() for w in (workspace_ids or "").split(",") if w.strip()]
+    if not selected:
+        return allowed
+    if allowed is None:
+        return selected
+    return [w for w in selected if w in set(allowed)]
+
+@router.get("/usage/trend")
+def usage_trend(days: int = Query(30, ge=1, le=365), workspace_ids: Optional[str] = Query(None), user: UserInfo = Depends(get_current_user)):
+    """Daily Vector Search requests + errors, split by action (from audit)."""
+    return vector_search_service.get_vs_usage_trend(days, allowed_workspace_ids=_scope(user, workspace_ids))
+
+
+@router.get("/usage/indexes")
+def usage_indexes(days: int = Query(30, ge=1, le=365), workspace_ids: Optional[str] = Query(None), user: UserInfo = Depends(get_current_user)):
+    """Per-index query/error/caller usage with an Agent Bricks managed_by label."""
+    return vector_search_service.get_vs_index_usage(days, allowed_workspace_ids=_scope(user, workspace_ids))
+
+
+@router.get("/usage/callers")
+def usage_callers(
+    index_name: str = Query(..., min_length=1),
+    workspace_id: str = Query(None),
+    user: UserInfo = Depends(get_current_user),
+):
+    """Top callers of one index (drilldown)."""
+    return vector_search_service.get_vs_index_callers(
+        index_name, workspace_id, allowed_workspace_ids=get_allowed_workspace_ids(user))
+
+
+# ── Retrieval & Memory: Lakebase operational health ─────────────
+
+@router.get("/lakebase/health")
+def lakebase_health(days: int = Query(14, ge=1, le=90), workspace_ids: Optional[str] = Query(None), user: UserInfo = Depends(get_current_user)):
+    """Daily connections + database size per project/branch."""
+    return vector_search_service.get_lakebase_health(days, allowed_workspace_ids=_scope(user, workspace_ids))
+
+
+@router.get("/lakebase/wait-events")
+def lakebase_wait_events(limit: int = Query(25, ge=1, le=100), workspace_ids: Optional[str] = Query(None), user: UserInfo = Depends(get_current_user)):
+    """Top Lakebase wait events by total wait time."""
+    return vector_search_service.get_lakebase_wait_events(limit, allowed_workspace_ids=_scope(user, workspace_ids))
+
+
+@router.get("/lakebase/cost/by-project")
+def lakebase_cost_by_project(days: int = Query(30, ge=1, le=365), workspace_ids: Optional[str] = Query(None), user: UserInfo = Depends(get_current_user)):
+    """Lakebase cost per project/branch."""
+    return vector_search_service.get_lakebase_cost_by_project(days, allowed_workspace_ids=_scope(user, workspace_ids))

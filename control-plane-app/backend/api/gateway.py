@@ -199,13 +199,32 @@ def usage_by_user(
     return gateway_service.get_usage_by_user(days, allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
-@router.get("/uag-v2-usage")
-def uag_v2_usage(user: UserInfo = Depends(get_current_user)):
-    """Unity Gateway (v2) usage summary from system.ai_gateway.usage —
-    v2-routed endpoints only, ~20-min fresh (cached tokens + latency/TTFB).
-    Breakdowns include requester_type, destination_model, api_type,
-    service_type (model/MCP/provider) and route_action (routing outcomes)."""
-    return gateway_service.get_uag_v2_usage(allowed_workspace_ids=get_allowed_workspace_ids(user))
+@router.get("/unity-usage")
+@router.get("/uag-v2-usage", include_in_schema=False)  # legacy path, kept for older frontends
+def unity_usage(user: UserInfo = Depends(get_current_user)):
+    """Unity Gateway usage summary from system.ai_gateway.usage — gateway-routed
+    traffic only, ~20-min fresh (cached tokens + latency/TTFB). Breakdowns include
+    requester_type, destination_model, api_type, service_type (model/MCP/provider)
+    and route_action (routing outcomes)."""
+    return gateway_service.get_unity_usage(allowed_workspace_ids=get_allowed_workspace_ids(user))
+
+
+@router.get("/services")
+def gateway_services(user: UserInfo = Depends(get_current_user)):
+    """Unity Gateway services hub: every UC service (model / MCP / provider / agent)
+    with owner, rate limits, inference table and routing, plus 7-day traffic.
+    Traffic is account-wide, so it's hidden for scoped callers (traffic_visible)."""
+    return gateway_service.get_gateway_services(allowed_workspace_ids=get_allowed_workspace_ids(user))
+
+
+@router.get("/services/grants")
+def gateway_service_grants(
+    full_name: str = Query(...),
+    service_type: str = Query("MODEL_SERVICE"),
+    user: UserInfo = Depends(get_current_user),
+):
+    """UC grants on one Unity Gateway service securable (any service kind)."""
+    return gateway_service.get_service_grants(full_name, service_type, user_token=user.token)
 
 
 class ModelServiceGrant(BaseModel):
@@ -318,10 +337,11 @@ def uag_mcp_tools(user: UserInfo = Depends(get_current_user)):
     return gateway_service.get_uag_mcp_tools(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
-@router.get("/uag-v2-timeseries")
-def uag_v2_timeseries(user: UserInfo = Depends(get_current_user)):
-    """Daily UAG v2 usage series (requests + tokens) for trend charts."""
-    return gateway_service.get_uag_v2_timeseries(allowed_workspace_ids=get_allowed_workspace_ids(user))
+@router.get("/unity-timeseries")
+@router.get("/uag-v2-timeseries", include_in_schema=False)  # legacy path, kept for older frontends
+def unity_timeseries(user: UserInfo = Depends(get_current_user)):
+    """Daily Unity Gateway usage series (requests + tokens) for trend charts."""
+    return gateway_service.get_unity_timeseries(allowed_workspace_ids=get_allowed_workspace_ids(user))
 
 
 @router.get("/uag-coding-agents")
@@ -333,7 +353,7 @@ def uag_coding_agents(user: UserInfo = Depends(get_current_user)):
 
 @router.get("/guardrail-coverage")
 def guardrail_coverage(user: UserInfo = Depends(get_current_user)):
-    """Guardrail coverage/activity per endpoint from Unity Gateway v2
+    """Guardrail coverage/activity per endpoint from Unity Gateway
     (which endpoints are guarded, check volume, judge models). Coverage only —
     not block/mask outcomes (those need the gated UAG feature-results surface)."""
     return gateway_service.get_guardrail_coverage(allowed_workspace_ids=get_allowed_workspace_ids(user))

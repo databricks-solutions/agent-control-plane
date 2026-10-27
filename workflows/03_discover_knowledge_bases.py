@@ -1,11 +1,13 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Knowledge Bases Discovery Job
+# MAGIC # Knowledge Bases / Retrieval & Memory Discovery Job
 # MAGIC
 # MAGIC Discovers Vector Search endpoints/indexes and Lakebase instances,
-# MAGIC then writes results to Delta tables for Lakebase sync.
+# MAGIC then writes results to Delta tables for Lakebase sync. Also aggregates
+# MAGIC Vector Search query usage (system.access.audit), Lakebase health
+# MAGIC (system.lakebase.*) and per-project Lakebase cost (system.billing.usage).
 # MAGIC
-# MAGIC **Data flow:** REST APIs → Delta tables → Lakebase (sync task)
+# MAGIC **Data flow:** REST APIs + system tables → Delta tables → Lakebase (sync task)
 
 # COMMAND ----------
 
@@ -24,6 +26,7 @@ from databricks.sdk import WorkspaceClient
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     StructType, StructField, StringType, IntegerType, BooleanType, TimestampType,
+    LongType, DoubleType,
 )
 
 spark = SparkSession.builder.getOrCreate()
@@ -38,10 +41,20 @@ spark = SparkSession.builder.getOrCreate()
 dbutils.widgets.text("catalog", "", "Unity Catalog name")
 dbutils.widgets.text("schema", "", "Schema name")
 dbutils.widgets.text("warehouse_id", "", "SQL warehouse ID for billing queries")
+# Retrieval & Memory windows. Each is bounded so the system-table scans stay cheap:
+# audit is partitioned on event_date, gauges / wait counters are scanned on ts.
+dbutils.widgets.text("usage_window_days", "30", "Vector Search audit usage window (days)")
+dbutils.widgets.text("lakebase_window_days", "14", "Lakebase gauge window (days)")
+dbutils.widgets.text("wait_window_days", "7", "Lakebase wait-event window (days)")
+dbutils.widgets.text("lakebase_cost_window_days", "90", "Lakebase per-project cost window (days)")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
 WAREHOUSE_ID = dbutils.widgets.get("warehouse_id")
+USAGE_DAYS = int(dbutils.widgets.get("usage_window_days") or "30")
+LB_HEALTH_DAYS = int(dbutils.widgets.get("lakebase_window_days") or "14")
+WAIT_DAYS = int(dbutils.widgets.get("wait_window_days") or "7")
+LB_COST_DAYS = int(dbutils.widgets.get("lakebase_cost_window_days") or "90")
 
 if not CATALOG or not SCHEMA:
     raise ValueError(f"catalog and schema required (got {CATALOG!r}, {SCHEMA!r})")
@@ -52,9 +65,15 @@ VS_ENDPOINTS_TABLE = f"{CATALOG}.{SCHEMA}.vector_search_endpoints"
 VS_INDEXES_TABLE = f"{CATALOG}.{SCHEMA}.vector_search_indexes"
 LAKEBASE_INSTANCES_TABLE = f"{CATALOG}.{SCHEMA}.lakebase_instances"
 KB_BILLING_TABLE = f"{CATALOG}.{SCHEMA}.kb_billing_daily"
+VS_USAGE_TABLE = f"{CATALOG}.{SCHEMA}.vs_index_usage_daily"
+VS_CALLERS_TABLE = f"{CATALOG}.{SCHEMA}.vs_index_callers"
+LB_HEALTH_TABLE = f"{CATALOG}.{SCHEMA}.lakebase_health_daily"
+LB_WAIT_TABLE = f"{CATALOG}.{SCHEMA}.lakebase_wait_events"
+LB_COST_PROJECT_TABLE = f"{CATALOG}.{SCHEMA}.lakebase_cost_by_project"
 
 print(f"Target tables: {VS_ENDPOINTS_TABLE}, {VS_INDEXES_TABLE}, {LAKEBASE_INSTANCES_TABLE}, {KB_BILLING_TABLE}")
-print(f"Warehouse: {WAREHOUSE_ID}")
+print(f"Retrieval & Memory tables: {VS_USAGE_TABLE}, {VS_CALLERS_TABLE}, {LB_HEALTH_TABLE}, {LB_WAIT_TABLE}, {LB_COST_PROJECT_TABLE}")
+print(f"Warehouse: {WAREHOUSE_ID} | windows: usage={USAGE_DAYS}d lakebase={LB_HEALTH_DAYS}d wait={WAIT_DAYS}d lb_cost={LB_COST_DAYS}d")
 
 # COMMAND ----------
 
@@ -473,6 +492,327 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Retrieval & Memory: Vector Search usage, Lakebase health and cost
+# MAGIC
+# MAGIC Read-only aggregates for the "Retrieval & Memory" page, all read with
+# MAGIC `spark.sql` (serverless) from system tables and bounded by a window.
+# MAGIC Tables written: `vs_index_usage_daily`, `vs_index_callers`,
+# MAGIC `lakebase_health_daily`, `lakebase_wait_events`, `lakebase_cost_by_project`.
+# MAGIC
+# MAGIC Failure contract (same as `11_discover_ai_gateway_usage`): a query that
+# MAGIC FAILS keeps the previous snapshot; a query that genuinely returns 0 rows
+# MAGIC writes an empty table (truthful); the very first run writes empty so
+# MAGIC downstream sync / smoke check still find the table.
+
+# COMMAND ----------
+
+VS_USAGE_SCHEMA = StructType([
+    StructField("usage_date", StringType(), False),
+    StructField("workspace_id", StringType(), False),
+    StructField("index_name", StringType(), False),
+    StructField("action", StringType(), False),
+    StructField("request_count", LongType(), True),
+    StructField("error_count", LongType(), True),
+    StructField("distinct_callers", LongType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+VS_CALLERS_SCHEMA = StructType([
+    StructField("workspace_id", StringType(), False),
+    StructField("index_name", StringType(), False),
+    StructField("caller", StringType(), False),
+    StructField("request_count", LongType(), True),
+    StructField("error_count", LongType(), True),
+    StructField("last_seen", StringType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+LB_HEALTH_SCHEMA = StructType([
+    StructField("usage_date", StringType(), False),
+    StructField("workspace_id", StringType(), False),
+    StructField("project_id", StringType(), True),
+    StructField("project_name", StringType(), True),
+    StructField("branch_id", StringType(), True),
+    StructField("branch_name", StringType(), True),
+    StructField("endpoint_id", StringType(), True),
+    StructField("endpoint_name", StringType(), True),
+    StructField("avg_connections", DoubleType(), True),
+    StructField("max_connections", LongType(), True),
+    StructField("max_db_size_bytes", LongType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+LB_WAIT_SCHEMA = StructType([
+    StructField("workspace_id", StringType(), False),
+    StructField("project_id", StringType(), True),
+    StructField("project_name", StringType(), True),
+    StructField("branch_name", StringType(), True),
+    StructField("wait_class_name", StringType(), True),
+    StructField("wait_event_name", StringType(), True),
+    StructField("wait_event_count", LongType(), True),
+    StructField("wait_event_time", DoubleType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+LB_COST_PROJECT_SCHEMA = StructType([
+    StructField("window_days", IntegerType(), False),   # one of LB_COST_WINDOWS
+    StructField("workspace_id", StringType(), False),
+    StructField("project_id", StringType(), False),
+    StructField("branch_id", StringType(), True),
+    StructField("total_dbus", DoubleType(), True),
+    StructField("total_cost_usd", DoubleType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+_KEPT_PREVIOUS: List[str] = []
+# Per-index caller cap for vs_index_callers — the drilldown shows the top callers.
+VS_CALLERS_PER_INDEX = 50
+# Per-workspace cap for lakebase_wait_events (top by wait time).
+LB_WAITS_PER_WORKSPACE = 50
+# Agent Bricks / managed index traffic is audited as the same vectorSearch service.
+_VS_DATA_PLANE_ACTIONS = "('queryVectorIndex', 'scanVectorIndex', 'upsertDataVectorIndex', 'deleteDataVectorIndex')"
+
+
+def _spark_rows(sql: str, label: str):
+    """Bounded spark.sql read. Returns dict rows, [] for a genuine empty result,
+    or None when the query FAILED (the caller then keeps the previous snapshot)."""
+    try:
+        return [r.asDict() for r in spark.sql(sql).collect()]
+    except Exception as exc:
+        print(f"  ⚠️  {label} unavailable: {str(exc)[:300]}")
+        return None
+
+
+def _empty_or_keep(schema, table: str, failed: bool) -> None:
+    """Failed query + previous snapshot → keep it (one transient error must not
+    blank the page). Otherwise overwrite with an empty table (truthful, or first run)."""
+    if failed and spark.catalog.tableExists(table):
+        _KEPT_PREVIOUS.append(table.split(".")[-1])
+        print(f"  ↺ query failed — keeping previous snapshot of {table}")
+        return
+    spark.createDataFrame([], schema).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(table)
+
+
+def _write_snapshot(rows, schema, table: str, to_row) -> int:
+    """Write a query result to Delta, or fall back to _empty_or_keep."""
+    if rows:
+        data = [to_row(r) for r in rows]
+        spark.createDataFrame(data, schema).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(table)
+        print(f"✅ Wrote {len(data)} rows to {table}")
+        return len(data)
+    _empty_or_keep(schema, table, failed=rows is None)
+    if rows is not None:
+        print(f"ℹ️  0 rows for {table} — empty table written")
+    return 0
+
+
+def _s(v) -> str:
+    return "" if v is None else str(v)
+
+
+def _n(v) -> int:
+    return int(v) if v is not None else 0
+
+
+def _f(v) -> float:
+    return float(v) if v is not None else 0.0
+
+# COMMAND ----------
+
+# Vector Search data-plane usage per (day, workspace, index, action). System audit is
+# account-wide but carries workspace_id, so the app can scope it per caller.
+print(f"▸ Querying system.access.audit vectorSearch usage (last {USAGE_DAYS}d) ...")
+vs_usage_raw = _spark_rows(f"""
+    SELECT CAST(event_date AS STRING)                                  AS usage_date,
+           COALESCE(CAST(workspace_id AS STRING), '')                  AS workspace_id,
+           request_params['name']                                      AS index_name,
+           action_name                                                 AS action,
+           COUNT(*)                                                    AS request_count,
+           SUM(CASE WHEN CAST(response.status_code AS INT) >= 400
+                    THEN 1 ELSE 0 END)                                 AS error_count,
+           COUNT(DISTINCT user_identity.email)                         AS distinct_callers
+    FROM system.access.audit
+    WHERE service_name = 'vectorSearch'
+      AND action_name IN {_VS_DATA_PLANE_ACTIONS}
+      AND event_date >= current_date() - INTERVAL {USAGE_DAYS} DAYS
+      AND request_params['name'] IS NOT NULL
+    GROUP BY 1, 2, 3, 4
+""", "Vector Search audit usage")
+_n_vs_usage = _write_snapshot(vs_usage_raw, VS_USAGE_SCHEMA, VS_USAGE_TABLE, lambda r: (
+    _s(r["usage_date"]), _s(r["workspace_id"]), _s(r["index_name"]), _s(r["action"]),
+    _n(r["request_count"]), _n(r["error_count"]), _n(r["distinct_callers"]), now,
+))
+
+# COMMAND ----------
+
+# Top callers per index over the usage window (drilldown). Capped per index.
+print(f"▸ Querying system.access.audit top callers per index (last {USAGE_DAYS}d) ...")
+vs_callers_raw = _spark_rows(f"""
+    WITH agg AS (
+        SELECT COALESCE(CAST(workspace_id AS STRING), '')              AS workspace_id,
+               request_params['name']                                  AS index_name,
+               COALESCE(user_identity.email, 'unknown')                AS caller,
+               COUNT(*)                                                AS request_count,
+               SUM(CASE WHEN CAST(response.status_code AS INT) >= 400
+                        THEN 1 ELSE 0 END)                             AS error_count,
+               CAST(MAX(event_time) AS STRING)                         AS last_seen
+        FROM system.access.audit
+        WHERE service_name = 'vectorSearch'
+          AND action_name IN {_VS_DATA_PLANE_ACTIONS}
+          AND event_date >= current_date() - INTERVAL {USAGE_DAYS} DAYS
+          AND request_params['name'] IS NOT NULL
+        GROUP BY 1, 2, 3
+    )
+    SELECT workspace_id, index_name, caller, request_count, error_count, last_seen
+    FROM (
+        SELECT agg.*,
+               ROW_NUMBER() OVER (PARTITION BY workspace_id, index_name
+                                  ORDER BY request_count DESC) AS rn
+        FROM agg
+    ) ranked
+    WHERE rn <= {VS_CALLERS_PER_INDEX}
+""", "Vector Search top callers")
+_n_vs_callers = _write_snapshot(vs_callers_raw, VS_CALLERS_SCHEMA, VS_CALLERS_TABLE, lambda r: (
+    _s(r["workspace_id"]), _s(r["index_name"]), _s(r["caller"]),
+    _n(r["request_count"]), _n(r["error_count"]), _s(r["last_seen"]), now,
+))
+
+# COMMAND ----------
+
+# Lakebase system tables (database_gauges, wait_event_counters) leave workspace_id NULL,
+# so the workspace is derived from LAKEBASE billing: each project_id maps to exactly one
+# workspace there (checked on prod). Projects with no billing in 90d get '' and are
+# only visible to account admins (fail closed in the app).
+LB_PROJECT_WS_CTE = """
+    project_ws AS (
+        SELECT usage_metadata.project_id                AS project_id,
+               CAST(MAX(workspace_id) AS STRING)        AS workspace_id
+        FROM system.billing.usage
+        WHERE billing_origin_product = 'LAKEBASE'
+          AND usage_metadata.project_id IS NOT NULL
+          AND usage_date >= current_date() - INTERVAL 90 DAYS
+        GROUP BY usage_metadata.project_id
+    )"""
+
+# Lakebase connections + database size, per project/branch/endpoint per day.
+# gauges are sampled per compute; sum across databases and computes per sample,
+# then take avg/max of that per-sample total over the day.
+print(f"▸ Querying system.lakebase.database_gauges health (last {LB_HEALTH_DAYS}d) ...")
+lb_health_raw = _spark_rows(f"""
+    WITH {LB_PROJECT_WS_CTE},
+    per_sample AS (
+        SELECT CAST(g.ts AS DATE)                                                       AS usage_date,
+               COALESCE(NULLIF(CAST(g.workspace_id AS STRING), ''), pw.workspace_id, '') AS workspace_id,
+               COALESCE(g.project_id, '')                                               AS project_id,
+               COALESCE(g.project_name, '')                                             AS project_name,
+               COALESCE(g.branch_id, '')                                                AS branch_id,
+               COALESCE(g.branch_name, '')                                              AS branch_name,
+               COALESCE(g.endpoint_id, '')                                              AS endpoint_id,
+               COALESCE(g.endpoint_name, '')                                            AS endpoint_name,
+               g.ts                                                                     AS ts,
+               SUM(COALESCE(g.numbackends, 0))                                          AS conns,
+               SUM(COALESCE(g.size, 0))                                                 AS db_bytes
+        FROM system.lakebase.database_gauges g
+        LEFT JOIN project_ws pw ON pw.project_id = g.project_id
+        WHERE g.ts >= current_timestamp() - INTERVAL {LB_HEALTH_DAYS} DAYS
+        GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
+    )
+    SELECT CAST(usage_date AS STRING)     AS usage_date,
+           workspace_id, project_id, project_name, branch_id, branch_name,
+           endpoint_id, endpoint_name,
+           ROUND(AVG(conns), 2)           AS avg_connections,
+           MAX(conns)                     AS max_connections,
+           MAX(db_bytes)                  AS max_db_size_bytes
+    FROM per_sample
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+""", "Lakebase health gauges")
+_n_lb_health = _write_snapshot(lb_health_raw, LB_HEALTH_SCHEMA, LB_HEALTH_TABLE, lambda r: (
+    _s(r["usage_date"]), _s(r["workspace_id"]), _s(r["project_id"]), _s(r["project_name"]),
+    _s(r["branch_id"]), _s(r["branch_name"]), _s(r["endpoint_id"]), _s(r["endpoint_name"]),
+    _f(r["avg_connections"]), _n(r["max_connections"]), _n(r["max_db_size_bytes"]), now,
+))
+
+# COMMAND ----------
+
+# Lakebase wait events. wait_event_counters rows are per-interval deltas
+# (previous_ts → ts), so SUM over the window is the true total. Top N per workspace.
+print(f"▸ Querying system.lakebase.wait_event_counters (last {WAIT_DAYS}d) ...")
+lb_wait_raw = _spark_rows(f"""
+    WITH {LB_PROJECT_WS_CTE},
+    agg AS (
+        SELECT COALESCE(NULLIF(CAST(w.workspace_id AS STRING), ''), pw.workspace_id, '') AS workspace_id,
+               COALESCE(w.project_id, '')                   AS project_id,
+               COALESCE(w.project_name, '')                 AS project_name,
+               COALESCE(w.branch_name, '')                  AS branch_name,
+               COALESCE(w.wait_class_name, 'unknown')       AS wait_class_name,
+               COALESCE(w.wait_event_name, 'unknown')       AS wait_event_name,
+               SUM(COALESCE(w.wait_event_count, 0))         AS wait_event_count,
+               SUM(COALESCE(w.wait_event_time, 0))          AS wait_event_time
+        FROM system.lakebase.wait_event_counters w
+        LEFT JOIN project_ws pw ON pw.project_id = w.project_id
+        WHERE w.ts >= current_timestamp() - INTERVAL {WAIT_DAYS} DAYS
+        GROUP BY 1, 2, 3, 4, 5, 6
+    )
+    SELECT workspace_id, project_id, project_name, branch_name, wait_class_name,
+           wait_event_name, wait_event_count, wait_event_time
+    FROM (
+        SELECT agg.*,
+               ROW_NUMBER() OVER (PARTITION BY workspace_id
+                                  ORDER BY wait_event_time DESC) AS rn
+        FROM agg
+    ) ranked
+    WHERE rn <= {LB_WAITS_PER_WORKSPACE}
+""", "Lakebase wait events")
+_n_lb_wait = _write_snapshot(lb_wait_raw, LB_WAIT_SCHEMA, LB_WAIT_TABLE, lambda r: (
+    _s(r["workspace_id"]), _s(r["project_id"]), _s(r["project_name"]), _s(r["branch_name"]),
+    _s(r["wait_class_name"]), _s(r["wait_event_name"]),
+    _n(r["wait_event_count"]), _f(r["wait_event_time"]), now,
+))
+
+# COMMAND ----------
+
+# Lakebase cost per project/branch, pre-aggregated for fixed windows. A day grain is
+# far too large to mirror on big accounts (~1.08M rows / 90d on the FE account) and the
+# app only ever shows a window total, so store one row per (window, workspace,
+# project, branch) — ~36k rows there. Same list-price join as the KB billing block
+# above. Rows without a project_id (serverless SKUs mis-tagged LAKEBASE) are excluded
+# here — they stay in kb_billing_daily for the product total.
+LB_COST_WINDOWS = sorted({7, 30, LB_COST_DAYS})
+print(f"▸ Querying system.billing.usage LAKEBASE cost by project (windows {LB_COST_WINDOWS}d) ...")
+lb_cost_raw = _spark_rows(f"""
+    WITH daily AS (
+        SELECT u.usage_date,
+               COALESCE(CAST(u.workspace_id AS STRING), '')              AS workspace_id,
+               u.usage_metadata.project_id                               AS project_id,
+               COALESCE(u.usage_metadata.branch_id, '')                  AS branch_id,
+               SUM(u.usage_quantity)                                     AS dbus,
+               SUM(u.usage_quantity *
+                   COALESCE(lp.pricing.effective_list.default, lp.pricing.default)) AS cost
+        FROM system.billing.usage u
+        LEFT JOIN system.billing.list_prices lp
+            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
+            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
+        WHERE u.billing_origin_product = 'LAKEBASE'
+          AND u.usage_metadata.project_id IS NOT NULL
+          AND u.usage_date >= current_date() - INTERVAL {max(LB_COST_WINDOWS)} DAYS
+        GROUP BY 1, 2, 3, 4
+    )
+    SELECT w.window_days, d.workspace_id, d.project_id, d.branch_id,
+           ROUND(SUM(d.dbus), 4) AS total_dbus,
+           ROUND(SUM(d.cost), 4) AS total_cost_usd
+    FROM daily d
+    CROSS JOIN (SELECT explode(array({", ".join(str(x) for x in LB_COST_WINDOWS)})) AS window_days) w
+    WHERE d.usage_date >= current_date() - make_interval(0, 0, 0, w.window_days)
+    GROUP BY 1, 2, 3, 4
+""", "Lakebase cost by project")
+_n_lb_cost = _write_snapshot(lb_cost_raw, LB_COST_PROJECT_SCHEMA, LB_COST_PROJECT_TABLE, lambda r: (
+    int(r["window_days"]), _s(r["workspace_id"]), _s(r["project_id"]), _s(r["branch_id"]),
+    _f(r["total_dbus"]), _f(r["total_cost_usd"]), now,
+))
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Summary
 
 # COMMAND ----------
@@ -483,6 +823,12 @@ result = {
     "vector_search_indexes": len(vs_indexes),
     "lakebase_instances": len(lb_instances),
     "kb_billing_rows": len(all_billing_rows),
+    "vs_index_usage_rows": _n_vs_usage,
+    "vs_index_caller_rows": _n_vs_callers,
+    "lakebase_health_rows": _n_lb_health,
+    "lakebase_wait_event_rows": _n_lb_wait,
+    "lakebase_cost_by_project_rows": _n_lb_cost,
+    "kept_previous": _KEPT_PREVIOUS,
     "discovered_at": now.isoformat(),
 }
 print(json.dumps(result, indent=2))

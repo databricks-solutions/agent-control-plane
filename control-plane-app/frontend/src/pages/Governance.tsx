@@ -55,7 +55,8 @@ function fmtNumber(v: number): string {
 
 const TABS = [
   { key: 'overview', label: 'Cost Overview', icon: LayoutDashboard },
-  { key: 'endpoints', label: 'Endpoint Costs', icon: Server },
+  { key: 'services', label: 'By Gateway Service', icon: Boxes },
+  { key: 'endpoints', label: 'By Serving Endpoint', icon: Server },
   { key: 'tokens', label: 'Token Usage', icon: Zap },
   { key: 'products', label: 'All Products', icon: Layers },
 ] as const
@@ -65,7 +66,6 @@ type TabKey = (typeof TABS)[number]['key']
 /* ── Workspace Selector ──────────────────────────────────────── */
 
 const ALL_WORKSPACES = '__all__'
-// Build v2 – default "All Workspaces" (no auto-select)
 
 function WorkspaceSelector({
   values,
@@ -234,6 +234,7 @@ export default function GovernancePage() {
 
       {/* Tab content — all data from pageData, zero extra fetches */}
       {tab === 'overview' && <OverviewTab data={pageData} loading={isLoading} />}
+      {tab === 'services' && <ServiceCostTab data={pageData} />}
       {tab === 'endpoints' && <EndpointCostsTab data={pageData} />}
       {tab === 'tokens' && <TokenUsageTab data={pageData} />}
       {tab === 'products' && <AllProductsTab data={pageData} />}
@@ -691,6 +692,116 @@ function TokensByUserSection({ tokensByUser }: { tokensByUser: any[] }) {
 }
 
 /* ── Endpoint Costs Tab ───────────────────────────────────────── */
+
+/* ── By Gateway Service (Unity Gateway-attributed serving cost) ──── */
+
+const SVC_TYPE_LABEL: Record<string, string> = {
+  MODEL_SERVICE: 'Model', MCP_SERVICE: 'MCP', MODEL_PROVIDER_SERVICE: 'Provider', AGENT_SERVICE: 'Agent',
+}
+
+function ServiceCostTab({ data }: { data?: BillingPageData }) {
+  const rows = useMemo(() => (data?.cost_by_service || []).map((r) => ({
+    ...r, cost: Number(r.total_cost_usd || 0), dbus: Number(r.total_dbus || 0), users: Number(r.users || 0),
+  })), [data])
+  const userRows = useMemo(() => (data?.cost_by_user_service || []).map((r) => ({ ...r, cost: Number(r.total_cost_usd || 0) })), [data])
+  const total = rows.reduce((s, r) => s + r.cost, 0)
+  const { sort, toggle } = useSort<string>('cost', 'desc')
+  const sorted = useMemo(() => sortRows(rows, sort, (r: any, k) => (k === 'service_name' ? String(r.service_name).toLowerCase() : Number(r[k] ?? 0))), [rows, sort])
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
+  const [uPage, setUPage] = useState(0)
+  const [uPageSize, setUPageSize] = useState(10)
+  const barData = sorted.slice(0, 10).map((r) => ({
+    name: r.service_name.length > 30 ? r.service_name.slice(0, 30) + '…' : r.service_name,
+    value: Math.round(r.cost * 100) / 100,
+  }))
+
+  if (rows.length === 0) {
+    return (
+      <Card><CardContent className="py-12 text-center text-gray-400 dark:text-gray-500">
+        No Unity Gateway-attributed serving cost in this window. Cost is attributed to a service only for
+        traffic routed through Unity Gateway (pay-per-token models) — legacy serving-endpoint cost is under
+        <strong> By Serving Endpoint</strong>.
+      </CardContent></Card>
+    )
+  }
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <KpiCard title="Gateway-Attributed Cost" value={fmtCost(total)} />
+        <KpiCard title="Services Billed" value={rows.length} format="number" />
+        <KpiCard title="Top Service Share" value={total ? `${Math.round((sorted[0]?.cost || 0) / total * 100)}%` : '—'} />
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Boxes className="w-4 h-4 text-db-red" /> Top Services by Cost
+            </CardTitle>
+            <p className="text-[11px] text-gray-400 dark:text-gray-500">
+              List-price $ from <code>system.billing.usage</code>, attributed to a UC service via the Unity Gateway endpoint id.
+            </p>
+          </CardHeader>
+          <CardContent><BarChart data={barData} dataKey="value" nameKey="name" multiColor height={300} /></CardContent>
+        </Card>
+        <Card>
+          <CardHeader><CardTitle className="text-base flex items-center gap-2"><Users className="w-4 h-4 text-blue-600" /> Top Users × Service</CardTitle></CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="border-b dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
+                  <tr><th className="py-2 px-2 font-medium">User</th><th className="py-2 px-2 font-medium">Service</th><th className="py-2 px-2 font-medium text-right">Cost</th></tr>
+                </thead>
+                <tbody>
+                  {userRows.slice(uPage * uPageSize, (uPage + 1) * uPageSize).map((r, i) => (
+                    <tr key={`${r.user_identity}-${r.service_name}-${i}`} className="border-b border-gray-100 dark:border-gray-700/50">
+                      <td className="py-2 px-2 truncate max-w-[200px]" title={r.user_identity}>{r.user_identity}</td>
+                      <td className="py-2 px-2 font-mono text-xs truncate max-w-[220px]" title={r.service_name}>{r.service_name}</td>
+                      <td className="py-2 px-2 text-right tabular-nums">{fmtCost(r.cost)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <TablePagination page={uPage} totalItems={userRows.length} pageSize={uPageSize} onPageChange={setUPage} onPageSizeChange={setUPageSize} />
+          </CardContent>
+        </Card>
+      </div>
+      <Card>
+        <CardHeader><CardTitle className="text-base">Cost by Service</CardTitle></CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="border-b dark:border-gray-700">
+                <tr>
+                  <SortableHeader label="Service" sortKey="service_name" current={sort} onToggle={toggle} />
+                  <th className="py-2 px-2 text-left text-xs text-gray-500 dark:text-gray-400">Type</th>
+                  <SortableHeader label="Cost" sortKey="cost" current={sort} onToggle={toggle} align="right" />
+                  <SortableHeader label="DBUs" sortKey="dbus" current={sort} onToggle={toggle} align="right" />
+                  <SortableHeader label="Users" sortKey="users" current={sort} onToggle={toggle} align="right" />
+                  <th className="py-2 px-2 text-right text-xs text-gray-500 dark:text-gray-400">Share</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.slice(page * pageSize, (page + 1) * pageSize).map((r) => (
+                  <tr key={r.service_name} className="border-b border-gray-100 dark:border-gray-700/50">
+                    <td className="py-2 px-2 font-mono text-xs truncate max-w-[340px]" title={r.service_name}>{r.service_name}</td>
+                    <td className="py-2 px-2"><Badge variant="default" className="text-[10px]">{SVC_TYPE_LABEL[r.service_type || ''] || r.service_type || '—'}</Badge></td>
+                    <td className="py-2 px-2 text-right tabular-nums">{fmtCost(r.cost)}</td>
+                    <td className="py-2 px-2 text-right tabular-nums">{fmtNumber(r.dbus)}</td>
+                    <td className="py-2 px-2 text-right tabular-nums">{r.users}</td>
+                    <td className="py-2 px-2 text-right tabular-nums">{total ? `${(r.cost / total * 100).toFixed(1)}%` : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
 
 function EndpointCostsTab({ data }: { data?: BillingPageData }) {
   const summary = data?.summary

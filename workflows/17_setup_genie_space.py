@@ -85,18 +85,28 @@ Data is refreshed every ~30 minutes by a discovery workflow.
 system.billing.usage data lags ~24h on the platform side; downstream tables inherit that lag.
 
 KEY CONVENTIONS:
-- gateway_usage_daily is the source for TOKEN questions (per-user/per-endpoint).
-- billing_serving_daily is the source for $ MODEL-SERVING cost questions.
-- billing_product_daily is the source for $ ALL-PRODUCT cost questions.
-- discovered_agents.type categorizes agents (serving_endpoint, databricks_app, genie_space, ...).
+- Unity Gateway (UC services) tables — prefer these for model / MCP / AI-service questions:
+    gateway_services_inventory  every UC service (model, MCP, provider, agent): owner, rate limits, inference table, routing
+    uag_service_usage           7-day traffic per service: requests, errors, 429s, users, tokens, p95 latency
+    uag_usage_summary           per gateway endpoint usage incl. cached tokens and latency percentiles
+    uag_usage_timeseries_daily  daily gateway requests / tokens
+    billing_user_cost_daily     ACTUAL $ per user (Unity Gateway-attributed, run_by) per endpoint per day
+    billing_external_model_spend  actual $ for external models (OpenAI, Bedrock, Foundry, ...) via the gateway
+- gateway_usage_daily is LEGACY serving-endpoint usage (system.serving.endpoint_usage):
+  use it for tokens/requests on serving endpoints that are not routed through Unity Gateway.
+- billing_serving_daily is the source for $ MODEL-SERVING cost per serving endpoint.
+- billing_product_daily is the source for $ ALL-PRODUCT cost (Model Serving, Jobs, SQL, Vector Search, ...).
 - usage_date is a DATE; trends should bucket by usage_date or DATE_TRUNC.
-When asked about "cost"/"$" prefer billing_serving_daily (or billing_product_daily for cross-product);
-for "tokens"/"requests" use gateway_usage_daily.
+When asked about cost per user, model or AI service, prefer billing_user_cost_daily / uag_service_usage;
+per serving endpoint use billing_serving_daily; cross-product use billing_product_daily.
+For tokens/requests prefer uag_service_usage / uag_usage_summary; gateway_usage_daily is legacy serving usage.
 """
 _CURATED_TABLES = [
     "discovered_agents", "gateway_usage_daily", "user_analytics_daily", "user_analytics_heatmap",
     "observability_traces", "vector_search_endpoints", "vector_search_indexes", "kb_billing_daily",
     "lakebase_instances", "billing_serving_daily", "billing_product_daily",
+    # Unity Gateway (UC services) — v3
+    "gateway_services_inventory", "uag_service_usage", "uag_usage_summary", "uag_usage_timeseries_daily", "billing_user_cost_daily", "billing_external_model_spend",
 ]
 SAMPLE_QUESTIONS = [
     "How many agents are deployed per workspace, broken down by type?",

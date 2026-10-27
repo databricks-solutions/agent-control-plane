@@ -572,7 +572,7 @@ export function useGatewayUsageByUser(days = 7) {
   })
 }
 
-export interface UagV2Usage {
+export interface UnityUsage {
   as_of: string | null
   totals: {
     request_count?: number
@@ -609,7 +609,7 @@ export interface UagV2Usage {
   }
 }
 
-export interface UagV2Timeseries {
+export interface UnityTimeseries {
   series: Array<{
     usage_date: string
     request_count: number
@@ -644,13 +644,13 @@ export interface UagBreakdownRow {
   cached_tokens: number
 }
 
-/** Unity Gateway (v2) usage — v2-routed endpoints only, ~20-min fresh. */
-export function useUagV2Usage() {
+/** Unity Gateway usage — gateway-routed traffic only, ~20-min fresh. */
+export function useUnityUsage() {
   return useQuery({
-    queryKey: ['gateway', 'uag-v2-usage'],
+    queryKey: ['gateway', 'unity-usage'],
     queryFn: async () => {
-      const { data } = await apiClient.get('/gateway/uag-v2-usage')
-      return data as UagV2Usage
+      const { data } = await apiClient.get('/gateway/unity-usage')
+      return data as UnityUsage
     },
     staleTime: GW_STALE,
   })
@@ -797,6 +797,84 @@ export function useModelServices() {
   })
 }
 
+export type GatewayServiceType = 'MODEL_SERVICE' | 'MCP_SERVICE' | 'MODEL_PROVIDER_SERVICE' | 'AGENT_SERVICE'
+
+export interface GatewayRateLimit {
+  key?: string            // RATE_LIMIT_KEY_SERVICE | RATE_LIMIT_KEY_USER_DEFAULT | …
+  principal?: string
+  renewal_period?: string // RATE_LIMIT_RENEWAL_PERIOD_MINUTE
+  requests?: string | number
+  tokens?: string | number
+}
+
+/** One Unity Gateway UC service, merged with its 7-day traffic. Traffic fields are
+ *  null when there's no usage (or the caller can't see account-wide traffic). */
+export interface GatewayService {
+  full_name: string
+  service_type: GatewayServiceType | null
+  owner: string
+  comment: string
+  supported_api_types: string[]
+  provider_type: string
+  source_connection: string
+  destinations: string[]
+  rate_limits: GatewayRateLimit[]
+  inference_table: string
+  inference_table_enabled: boolean | null
+  update_time: string | null
+  in_inventory: boolean
+  request_count: number | null
+  error_count: number | null
+  throttled_count: number | null
+  unique_users: number | null
+  input_tokens: number | null
+  output_tokens: number | null
+  p50_latency_ms: number | null
+  p95_latency_ms: number | null
+  error_rate: number | null
+  last_seen: string | null
+}
+
+export interface GatewayServicesResponse {
+  as_of: string | null
+  traffic_visible: boolean
+  totals: {
+    services?: number
+    by_type?: Record<string, number>
+    with_rate_limits?: number
+    with_inference_table?: number
+    with_traffic?: number
+    throttled?: number
+  }
+  services: GatewayService[]
+}
+
+/** Unity Gateway services hub (all UC service kinds + config + traffic). */
+export function useGatewayServices() {
+  return useQuery({
+    queryKey: ['gateway', 'services'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/services')
+      return data as GatewayServicesResponse
+    },
+    staleTime: GW_STALE,
+  })
+}
+
+/** UC grants on any Unity Gateway service (model / MCP / provider / agent). */
+export function useServiceGrants(fullName: string | null, serviceType: GatewayServiceType | null) {
+  return useQuery({
+    queryKey: ['gateway', 'service-grants', serviceType, fullName],
+    enabled: !!fullName,
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/services/grants', {
+        params: { full_name: fullName, service_type: serviceType || 'MODEL_SERVICE' },
+      })
+      return data as { grants: ModelServiceGrantRow[]; error?: string }
+    },
+  })
+}
+
 export function useModelServiceGrants(fullName: string | null) {
   return useQuery({
     queryKey: ['gateway', 'model-service-grants', fullName],
@@ -928,13 +1006,13 @@ export function useUagCodingAgents() {
   })
 }
 
-/** Daily UAG v2 usage series (requests + tokens) for trend charts. */
-export function useUagV2Timeseries() {
+/** Daily Unity Gateway usage series (requests + tokens) for trend charts. */
+export function useUnityTimeseries() {
   return useQuery({
-    queryKey: ['gateway', 'uag-v2-timeseries'],
+    queryKey: ['gateway', 'unity-timeseries'],
     queryFn: async () => {
-      const { data } = await apiClient.get('/gateway/uag-v2-timeseries')
-      return data as UagV2Timeseries
+      const { data } = await apiClient.get('/gateway/unity-timeseries')
+      return data as UnityTimeseries
     },
     staleTime: GW_STALE,
   })
@@ -1199,13 +1277,31 @@ export interface BillingPageData {
   daily_tokens: any[]
   products: any[]
   cost_by_user: any[]
-  /** "actual" = Unity Gateway v2 per-user attribution; "estimate" = token-share split */
+  /** "actual" = Unity Gateway per-user attribution; "estimate" = token-share split */
   cost_by_user_source: 'actual' | 'estimate'
   tokens_by_user: any[]
   /** MODEL_SERVING $ attributed by custom_tag (window aggregate, workspace-agnostic) */
   cost_by_tag: CostByTagRow[]
   /** Actual $ for external LLMs (OpenAI, Foundry, …) routed through the Unity Gateway */
   external_model_spend: ExternalModelSpendRow[]
+  /** Gateway-attributed serving $ per Unity Gateway service (billing endpoint_id → service) */
+  cost_by_service: ServiceCostRow[]
+  /** Gateway-attributed serving $ per user × service (top 100) */
+  cost_by_user_service: UserServiceCostRow[]
+}
+
+export interface ServiceCostRow {
+  service_name: string
+  service_type: string | null
+  total_dbus: number | string
+  total_cost_usd: number | string
+  users: number
+}
+
+export interface UserServiceCostRow {
+  user_identity: string
+  service_name: string
+  total_cost_usd: number | string
 }
 
 /** One row of billing_cost_by_tag: a (tag_key, tag_value) pair and its total cost. */
@@ -1253,6 +1349,8 @@ export function useBillingPageData(days = 30, workspaceIds?: string[] | null) {
         tokens_by_user: [],
         cost_by_tag: [],
         external_model_spend: [],
+        cost_by_service: [],
+        cost_by_user_service: [],
         ...data,
       } as BillingPageData
     },
@@ -1702,6 +1800,136 @@ export function useLBTopWorkspacesDaily(days = 30) {
     queryFn: async () => {
       const { data } = await apiClient.get('/vector-search/lakebase/cost/top-workspaces-daily', { params: { days } })
       return Array.isArray(data) ? data : []
+    },
+  })
+}
+
+// ── Retrieval & Memory: Vector Search index usage + Lakebase health ──
+// Cached in Lakebase by workflows 03/02 (system.access.audit, system.lakebase.*,
+// system.billing.usage). Every endpoint fails open to [] when a table isn't synced.
+
+export interface VsUsageTrendRow {
+  usage_date: string
+  action: string
+  request_count: number
+  error_count: number
+}
+
+export interface VsIndexUsageRow {
+  workspace_id: string
+  index_name: string
+  endpoint_name: string
+  managed_by: 'knowledge_assistant' | 'supervisor' | null
+  query_count: number
+  scan_count: number
+  write_count: number
+  error_count: number
+  peak_daily_callers: number
+  last_active_date: string | null
+}
+
+export interface VsIndexCallerRow {
+  caller: string
+  request_count: number
+  error_count: number
+  last_seen: string | null
+}
+
+export interface LakebaseHealthRow {
+  usage_date: string
+  project_id: string
+  project_name: string
+  branch_id: string
+  branch_name: string
+  avg_connections: number
+  max_connections: number
+  max_db_size_bytes: number
+}
+
+export interface LakebaseWaitEventRow {
+  wait_class_name: string
+  wait_event_name: string
+  project_name: string
+  branch_name: string
+  wait_event_count: number
+  wait_event_time: number
+}
+
+export interface LakebaseProjectCostRow {
+  project_id: string
+  branch_id: string
+  project_name: string
+  branch_name: string
+  total_dbus: number
+  total_cost_usd: number
+}
+
+/** Optional workspace narrowing for the Retrieval & Memory endpoints. The server
+ *  intersects it with the caller's access scope, so it can only narrow. */
+function wsParam(ids: string[]): { workspace_ids?: string } {
+  return ids.length ? { workspace_ids: ids.join(',') } : {}
+}
+
+export function useVectorSearchUsageTrend(days = 30, workspaceIds: string[] = []) {
+  return useQuery({
+    queryKey: ['vector-search', 'usage-trend', days, workspaceIds.join(',')],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/usage/trend', { params: { days, ...wsParam(workspaceIds) } })
+      return (Array.isArray(data) ? data : []) as VsUsageTrendRow[]
+    },
+  })
+}
+
+export function useVectorSearchIndexUsage(days = 30, workspaceIds: string[] = []) {
+  return useQuery({
+    queryKey: ['vector-search', 'usage-indexes', days, workspaceIds.join(',')],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/usage/indexes', { params: { days, ...wsParam(workspaceIds) } })
+      return (Array.isArray(data) ? data : []) as VsIndexUsageRow[]
+    },
+  })
+}
+
+/** Top callers for one index. Disabled until an index is selected in the table. */
+export function useVectorSearchIndexCallers(indexName: string | null, workspaceId?: string | null) {
+  return useQuery({
+    queryKey: ['vector-search', 'usage-callers', indexName, workspaceId ?? null],
+    enabled: !!indexName,
+    queryFn: async () => {
+      const params: Record<string, string> = { index_name: indexName as string }
+      if (workspaceId) params.workspace_id = workspaceId
+      const { data } = await apiClient.get('/vector-search/usage/callers', { params })
+      return (Array.isArray(data) ? data : []) as VsIndexCallerRow[]
+    },
+  })
+}
+
+export function useLakebaseHealth(days = 14, workspaceIds: string[] = []) {
+  return useQuery({
+    queryKey: ['vector-search', 'lakebase-health', days, workspaceIds.join(',')],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/lakebase/health', { params: { days, ...wsParam(workspaceIds) } })
+      return (Array.isArray(data) ? data : []) as LakebaseHealthRow[]
+    },
+  })
+}
+
+export function useLakebaseWaitEvents(limit = 25, workspaceIds: string[] = []) {
+  return useQuery({
+    queryKey: ['vector-search', 'lakebase-wait-events', limit, workspaceIds.join(',')],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/lakebase/wait-events', { params: { limit, ...wsParam(workspaceIds) } })
+      return (Array.isArray(data) ? data : []) as LakebaseWaitEventRow[]
+    },
+  })
+}
+
+export function useLakebaseCostByProject(days = 30, workspaceIds: string[] = []) {
+  return useQuery({
+    queryKey: ['vector-search', 'lakebase-cost-by-project', days, workspaceIds.join(',')],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/vector-search/lakebase/cost/by-project', { params: { days, ...wsParam(workspaceIds) } })
+      return (Array.isArray(data) ? data : []) as LakebaseProjectCostRow[]
     },
   })
 }

@@ -61,28 +61,28 @@ system.billing.usage data lags ~24h on the platform side; downstream
 tables here inherit that lag.
 
 KEY CONVENTIONS:
-- gateway_usage_daily is the source for TOKEN questions (per-user/per-endpoint).
-- billing_serving_daily is the source for $ MODEL-SERVING cost questions.
-- billing_product_daily is the source for $ ALL-PRODUCT cost questions
-  (Model Serving, Jobs, DLT, SQL, Vector Search, etc.).
-- discovered_agents.type is one of:
-    serving_endpoint, databricks_app, genie_space, agent_bricks_*
-  Use this to break down "agents" by category.
-- The user-identity column is named differently across tables:
-    gateway_usage_daily.requester
-    billing_user_endpoint_daily.user_identity
-    observability_runs.user_id
-  They all hold the user's email or a service-principal UUID.
+- Unity Gateway (UC services) tables — prefer these for model / MCP / AI-service questions:
+    gateway_services_inventory  every UC service (model, MCP, provider, agent): owner, rate limits, inference table, routing
+    uag_service_usage           7-day traffic per service: requests, errors, 429s, users, tokens, p95 latency
+    uag_usage_summary           per gateway endpoint usage incl. cached tokens and latency percentiles
+    uag_usage_timeseries_daily  daily gateway requests / tokens
+    billing_user_cost_daily     ACTUAL $ per user (Unity Gateway-attributed, run_by) per endpoint per day
+    billing_external_model_spend  actual $ for external models (OpenAI, Bedrock, Foundry, ...) via the gateway
+- gateway_usage_daily is LEGACY serving-endpoint usage (system.serving.endpoint_usage):
+  use it for tokens/requests on serving endpoints that are not routed through Unity Gateway.
+- billing_serving_daily is the source for $ MODEL-SERVING cost per serving endpoint.
+- billing_product_daily is the source for $ ALL-PRODUCT cost (Model Serving, Jobs, SQL, Vector Search, ...).
 - usage_date is a DATE; trends should bucket by usage_date or DATE_TRUNC.
 
-When asked about "cost" or "$", prefer billing_serving_daily (or
-billing_product_daily for cross-product). When asked about "tokens" or
-"requests", use gateway_usage_daily.
+When asked about cost per user, model or AI service, prefer billing_user_cost_daily /
+uag_service_usage; per serving endpoint use billing_serving_daily; cross-product use
+billing_product_daily. For tokens/requests prefer uag_service_usage / uag_usage_summary;
+gateway_usage_daily is legacy serving usage.
 """
 
 
 def _tables(catalog: str, schema: str) -> List[str]:
-    """Curated 11 — analytical Delta tables Genie can query."""
+    """Curated analytical Delta tables Genie can query (incl. Unity Gateway v3)."""
     return [
         f"{catalog}.{schema}.discovered_agents",
         f"{catalog}.{schema}.gateway_usage_daily",
@@ -95,6 +95,12 @@ def _tables(catalog: str, schema: str) -> List[str]:
         f"{catalog}.{schema}.lakebase_instances",
         f"{catalog}.{schema}.billing_serving_daily",
         f"{catalog}.{schema}.billing_product_daily",
+        f"{catalog}.{schema}.gateway_services_inventory",
+        f"{catalog}.{schema}.uag_service_usage",
+        f"{catalog}.{schema}.uag_usage_summary",
+        f"{catalog}.{schema}.uag_usage_timeseries_daily",
+        f"{catalog}.{schema}.billing_user_cost_daily",
+        f"{catalog}.{schema}.billing_external_model_spend",
     ]
 
 
