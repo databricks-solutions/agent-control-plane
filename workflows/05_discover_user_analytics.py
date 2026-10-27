@@ -2,10 +2,10 @@
 # MAGIC %md
 # MAGIC # User Analytics Discovery Job
 # MAGIC
-# MAGIC Queries `system.serving.endpoint_usage` for user activity data
-# MAGIC and writes results to Delta tables for Lakebase sync.
+# MAGIC Queries `system.ai_gateway.usage` plus the `system.serving.endpoint_usage`
+# MAGIC rows the gateway did not log, and writes results to Delta tables for Lakebase sync.
 # MAGIC
-# MAGIC **Data flow:** system.serving.endpoint_usage → Delta tables → Lakebase (sync task)
+# MAGIC **Data flow:** system.ai_gateway.usage + system.serving.endpoint_usage → Delta tables → Lakebase (sync task)
 
 # COMMAND ----------
 
@@ -122,6 +122,38 @@ def _execute_sql(sql):
     cols = [c["name"] for c in resp.get("manifest", {}).get("schema", {}).get("columns", [])]
     return [dict(zip(cols, row)) for row in resp.get("result", {}).get("data_array", [])]
 
+
+def _model_requests_cte(since: str) -> str:
+    """WITH clause defining `model_requests`: one row per model call since `since`.
+
+    system.ai_gateway.usage logs every call through Unity Gateway, including the
+    system.ai.* model services and ai_query retries that endpoint_usage misses.
+    endpoint_usage adds the traffic that bypasses the gateway; its rows whose
+    request id the gateway also logged are dropped, so nothing counts twice.
+    """
+    return f"""
+    WITH gw AS (
+        SELECT request_id, event_time AS request_time, workspace_id, endpoint_name,
+               requester, input_tokens, output_tokens, status_code
+        FROM system.ai_gateway.usage
+        WHERE event_time >= {since}
+          AND service_type IS DISTINCT FROM 'MCP_SERVICE'  -- tool calls, no tokens
+    ),
+    model_requests AS (
+        SELECT request_time, workspace_id, endpoint_name, requester,
+               input_tokens, output_tokens, status_code
+        FROM gw
+        UNION ALL
+        SELECT u.request_time, u.workspace_id, se.endpoint_name, u.requester,
+               u.input_token_count, u.output_token_count, u.status_code
+        FROM system.serving.endpoint_usage u
+        JOIN system.serving.served_entities se
+            ON u.served_entity_id = se.served_entity_id
+        LEFT ANTI JOIN gw ON gw.request_id = u.databricks_request_id
+        WHERE u.request_time >= {since}
+    )
+    """
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -131,46 +163,41 @@ def _execute_sql(sql):
 
 now = datetime.now(timezone.utc)
 
-print("▸ Querying system.serving.endpoint_usage for daily user activity ...")
-daily_rows = _execute_sql("""
+print("▸ Querying system.ai_gateway.usage + endpoint_usage for daily user activity ...")
+daily_rows = _execute_sql(_model_requests_cte("date_sub(current_date(), 90)") + """
     SELECT
         CAST(DATE(u.request_time) AS STRING) AS usage_date,
         u.requester,
-        se.endpoint_name,
+        u.endpoint_name,
         COUNT(*) AS request_count,
-        COALESCE(SUM(u.input_token_count + u.output_token_count), 0) AS total_tokens
-    FROM system.serving.endpoint_usage u
-    JOIN system.serving.served_entities se
-        ON u.served_entity_id = se.served_entity_id
-    WHERE u.request_time >= date_sub(current_date(), 90)
-      AND u.requester IS NOT NULL
-    GROUP BY DATE(u.request_time), u.requester, se.endpoint_name
+        COALESCE(SUM(u.input_tokens + u.output_tokens), 0) AS total_tokens
+    FROM model_requests u
+    WHERE u.requester IS NOT NULL
+    GROUP BY DATE(u.request_time), u.requester, u.endpoint_name
 """)
 print(f"  ✅ {len(daily_rows)} daily user activity rows")
 
 # COMMAND ----------
 
 print("▸ Querying heatmap data ...")
-heatmap_rows_30 = _execute_sql("""
+heatmap_rows_30 = _execute_sql(_model_requests_cte("date_sub(current_date(), 30)") + """
     SELECT
         DAYOFWEEK(request_time) - 1 AS dow,
         HOUR(request_time) AS hour,
         COUNT(*) AS request_count
-    FROM system.serving.endpoint_usage
-    WHERE request_time >= date_sub(current_date(), 30)
-      AND requester IS NOT NULL
+    FROM model_requests
+    WHERE requester IS NOT NULL
     GROUP BY DAYOFWEEK(request_time), HOUR(request_time)
 """)
 print(f"  ✅ {len(heatmap_rows_30)} heatmap buckets (30d)")
 
-heatmap_rows_90 = _execute_sql("""
+heatmap_rows_90 = _execute_sql(_model_requests_cte("date_sub(current_date(), 90)") + """
     SELECT
         DAYOFWEEK(request_time) - 1 AS dow,
         HOUR(request_time) AS hour,
         COUNT(*) AS request_count
-    FROM system.serving.endpoint_usage
-    WHERE request_time >= date_sub(current_date(), 90)
-      AND requester IS NOT NULL
+    FROM model_requests
+    WHERE requester IS NOT NULL
     GROUP BY DAYOFWEEK(request_time), HOUR(request_time)
 """)
 print(f"  ✅ {len(heatmap_rows_90)} heatmap buckets (90d)")

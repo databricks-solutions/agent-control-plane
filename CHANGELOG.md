@@ -79,6 +79,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   var so they aren't silently dropped.
 
 ### Fixed
+- **Per-user and per-endpoint usage now count Unity Gateway traffic.** The
+  user-analytics, gateway-usage and billing discovery notebooks read only
+  `system.serving.endpoint_usage`, which misses `system.ai.*` model services and
+  most `ai_query` traffic (each retry is a separate gateway call). They now read
+  `system.ai_gateway.usage` and add only the `endpoint_usage` rows whose request id
+  the gateway did not log, so nothing counts twice. On one account this took 90 days
+  from 0.45M to 17.8M requests, and a Claude Code user from 4.5K to 2.4B tokens.
 - **Genie spaces on serverless keep their real title and workspace.** On
   serverless compute `01_discover_agents` couldn't read the notebook-context
   `orgId`, so `_get_workspace_id()` fell back to a hash of the host URL and every
