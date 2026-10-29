@@ -60,6 +60,33 @@ class TestUsageExplorer:
         assert len(opt) == 1
         assert "workspace_id = ANY(%(ws)s)" in opt[0][0] and opt[0][1]["ws"] == ["ws1"]
 
+    def test_scoped_caller_partial_selection_is_intersected(self):
+        from backend.services import gateway_insights_service as g
+        rec = _Recorder()
+        with patch(f"{SVC}.execute_query", rec):
+            g.get_usage_explorer(None, None, ["ws1", "ws9"], None, None, allowed_workspace_ids=["ws1", "ws2"])
+        fact = [c for c in rec.calls if "uag_usage_daily_fact f" in c[0]]
+        assert fact and all(c[1]["ws"] == ["ws1"] for c in fact)   # ws9 dropped, ws2 not added
+
+    def test_trend_breakdowns_and_top_services_shaping(self):
+        from backend.services import gateway_insights_service as g
+        rec = _Recorder({
+            "COUNT(DISTINCT NULLIF(service_name": [{"requests": 10, "errors": 1, "throttled": 0, "input_tokens": 5,
+                                                   "output_tokens": 5, "cached_tokens": 0, "services": 1}],
+            "GROUP BY usage_date": [{"usage_date": date(2026, 10, 28), "requests": 10, "errors": 1,
+                                     "input_tokens": 5, "output_tokens": 5}],
+            "GROUP BY f.auth_mode": [{"k": None, "requests": 7, "tokens": 9, "errors": 0}],
+            "GROUP BY service_name": [{"service_name": "c.s.m", "service_type": "MODEL_SERVICE",
+                                       "requests": 10, "errors": 1, "tokens": 10}],
+        })
+        with patch(f"{SVC}.execute_query", rec):
+            out = g.get_usage_explorer(None, None, [], None, None, allowed_workspace_ids=None)
+        assert out["trend"] == [{"usage_date": "2026-10-28", "requests": 10, "errors": 1, "input_tokens": 5, "output_tokens": 5}]
+        assert set(out["breakdowns"]) == set(g._BREAKDOWN_DIMS)
+        assert out["breakdowns"]["auth_mode"] == [{"key": "unknown", "requests": 7, "tokens": 9, "errors": 0}]
+        assert out["top_services"] == [{"service_name": "c.s.m", "service_type": "MODEL_SERVICE",
+                                        "requests": 10, "errors": 1, "tokens": 10}]
+
     def test_tag_filter_is_parameterised(self):
         from backend.services import gateway_insights_service as g
         rec = _Recorder()
