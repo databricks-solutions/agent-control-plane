@@ -110,6 +110,16 @@ EXPECTED = [
     "gateway_services_inventory",    # v3 UC services (model / MCP / provider / agent) + config; empty if lists unreadable
     "uag_service_usage",             # per-service traffic from system.ai_gateway.usage; empty when no gateway traffic
     "uag_endpoint_service_map",      # endpoint_id → service (attributes gateway billing); empty when no gateway traffic
+    "uag_usage_daily_fact",          # filterable daily gateway fact (30d); empty when no gateway traffic
+    "uag_service_tags",              # service tag map; empty when services carry no tags
+    "uag_daily_activity",            # daily active / MCP / coding-agent users
+    "uag_coding_sessions_daily",     # coding-agent sessions by harness/surface; empty without coding agents
+    "uag_coding_sessions_top",       # top coding sessions by estimated spend
+    "uag_service_unit_cost",         # $/1M tokens, $/1k requests per service; empty without attributed billing
+    "uag_cost_by_service_tag",       # spend by service tag; empty without tags or attributed billing
+    "uag_model_performance",         # per-model latency / TTFB / tokens-per-sec (7d)
+    "uag_skill_usage",               # skill loads from audit (aiGatewaySkills); empty when skills unused
+    "uag_skill_users",               # skill loads per user
     "billing_cache_meta",
     # App-managed tables created in Phase 7 of 02_sync_to_lakebase. These were
     # historically created lazily by the app's startup hook, but the app SP

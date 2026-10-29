@@ -606,6 +606,10 @@ export interface UnityUsage {
     route_action?: UagBreakdownRow[]
     status_code?: UagBreakdownRow[]
     workspace_id?: UagBreakdownRow[]
+    auth_mode?: UagBreakdownRow[]
+    mcp_method?: UagBreakdownRow[]
+    coding_agent?: UagBreakdownRow[]
+    reasoning_effort?: UagBreakdownRow[]
   }
 }
 
@@ -872,6 +876,139 @@ export function useServiceGrants(fullName: string | null, serviceType: GatewaySe
       })
       return data as { grants: ModelServiceGrantRow[]; error?: string }
     },
+  })
+}
+
+// ── Usage-dashboard parity (gateway_insights_service) ───────────────────────
+
+export interface UsageExplorerFilters {
+  start_date?: string
+  end_date?: string
+  workspace_ids?: string[]
+  tag_key?: string
+  tag_value?: string
+}
+
+export interface ExplorerBreakdownRow { key: string; requests: number; tokens: number; errors: number }
+
+export interface UsageExplorer {
+  filters: { start_date: string; end_date: string; window_days: number }
+  scoped: boolean
+  totals: {
+    requests?: number; errors?: number; throttled?: number; error_rate?: number | null
+    input_tokens?: number; output_tokens?: number; cached_tokens?: number; cache_share?: number | null; services?: number
+  }
+  trend: Array<{ usage_date: string; requests: number; errors: number; input_tokens: number; output_tokens: number }>
+  breakdowns: Record<string, ExplorerBreakdownRow[]>
+  top_services: Array<{ service_name: string; service_type: string | null; requests: number; errors: number; tokens: number }>
+  options: { workspaces: string[]; tag_keys: Record<string, string[]> }
+}
+
+/** Filterable Unity Gateway usage (date range / workspace / service tag). */
+export function useUsageExplorer(f: UsageExplorerFilters) {
+  const params: Record<string, string> = {}
+  if (f.start_date) params.start_date = f.start_date
+  if (f.end_date) params.end_date = f.end_date
+  if (f.workspace_ids?.length) params.workspace_ids = f.workspace_ids.join(',')
+  if (f.tag_key) params.tag_key = f.tag_key
+  if (f.tag_key && f.tag_value) params.tag_value = f.tag_value
+  return useQuery({
+    queryKey: ['gateway', 'usage-explorer', params],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/gateway/usage-explorer', { params })
+      return data as UsageExplorer
+    },
+    staleTime: GW_STALE,
+    placeholderData: (prev) => prev,  // keep the last result visible while a filter change loads
+  })
+}
+
+export interface DailyActivityRow {
+  usage_date: string; active_users: number; mcp_requests: number; mcp_users: number
+  coding_sessions: number; coding_users: number
+}
+
+export function useDailyActivity() {
+  return useQuery({
+    queryKey: ['gateway', 'daily-activity'],
+    queryFn: async () => (await apiClient.get('/gateway/daily-activity')).data as { restricted: boolean; days: DailyActivityRow[] },
+    staleTime: GW_STALE,
+  })
+}
+
+export interface CodingSessionRow {
+  session_id: string; requester: string; coding_agent: string | null; surface: string | null
+  agent_version: string | null; reasoning_effort: string | null; models: string
+  first_seen: string; last_seen: string; requests: number; subagents: number
+  input_tokens: number; output_tokens: number; reasoning_tokens: number; est_cost_usd: number
+}
+
+export interface CodingSessions {
+  restricted: boolean
+  totals: { session_days?: number; requests?: number; est_cost_usd?: number; reasoning_tokens?: number; harnesses?: number }
+  trend: Array<{ usage_date: string; sessions: number; requests: number; est_cost_usd: number }>
+  by_harness: Array<{
+    coding_agent: string; surface: string; session_days: number; requests: number; input_tokens: number
+    output_tokens: number; reasoning_tokens: number; est_cost_usd: number; peak_daily_users: number
+  }>
+  top_sessions: CodingSessionRow[]
+}
+
+export function useCodingSessions() {
+  return useQuery({
+    queryKey: ['gateway', 'coding-sessions'],
+    queryFn: async () => (await apiClient.get('/gateway/coding-sessions')).data as CodingSessions,
+    staleTime: GW_STALE,
+  })
+}
+
+export interface UnitEconomicsRow {
+  service_name: string; service_type: string | null; cost_usd: number; requests: number
+  input_tokens: number; output_tokens: number; usd_per_1m_tokens: number | null; usd_per_1k_requests: number | null
+}
+
+export function useUnitEconomics() {
+  return useQuery({
+    queryKey: ['gateway', 'unit-economics'],
+    queryFn: async () => (await apiClient.get('/gateway/unit-economics')).data as { restricted: boolean; services: UnitEconomicsRow[] },
+    staleTime: GW_STALE,
+  })
+}
+
+export interface TagSpendRow { tag_key: string; tag_value: string; cost_usd: number; services: number; requests: number }
+
+export function useTagSpend() {
+  return useQuery({
+    queryKey: ['gateway', 'tag-spend'],
+    queryFn: async () => (await apiClient.get('/gateway/tag-spend')).data as { restricted: boolean; tags: TagSpendRow[] },
+    staleTime: GW_STALE,
+  })
+}
+
+export interface ModelPerformanceRow {
+  destination_model: string; requests: number; error_count: number; throttled_count: number
+  streaming_requests: number; p50_latency_ms: number | null; p95_latency_ms: number | null
+  p50_ttfb_ms: number | null; p95_ttfb_ms: number | null; p50_output_tps: number | null
+  input_tokens: number; cache_read_tokens: number; reasoning_tokens: number
+  error_rate: number | null; throttle_rate: number | null; cache_read_share: number | null
+}
+
+export function useModelPerformance() {
+  return useQuery({
+    queryKey: ['gateway', 'model-performance'],
+    queryFn: async () => (await apiClient.get('/gateway/model-performance')).data as { restricted: boolean; models: ModelPerformanceRow[] },
+    staleTime: GW_STALE,
+  })
+}
+
+export interface SkillUsageRow { skill_name: string; loads: number; bundle_fetches: number; users: number; last_used: string | null }
+export interface SkillUserRow { user_name: string; skills: number; loads: number; last_used: string | null }
+
+export function useGatewaySkills() {
+  return useQuery({
+    queryKey: ['gateway', 'skills'],
+    queryFn: async () => (await apiClient.get('/gateway/skills')).data as { restricted: boolean; skills: SkillUsageRow[]; users: SkillUserRow[] },
+    staleTime: GW_STALE,
   })
 }
 

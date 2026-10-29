@@ -108,3 +108,40 @@ def test_services_route_passes_caller_scope(app_client):
     assert r.status_code == 200
     assert r.json()["traffic_visible"] is False
     assert q.call_count == 1  # inventory only — account-wide usage never read
+
+
+class TestSystemSqlChunking:
+    """INLINE statement results are paged; reading only chunk 0 silently truncated
+    large results. _execute_system_sql must follow next_chunk_index."""
+
+    class _Api:
+        def __init__(self, fail_chunk=False):
+            self.fail_chunk, self.paths = fail_chunk, []
+
+        def do(self, method, path, body=None):
+            self.paths.append(path)
+            if method == "POST":
+                return {"statement_id": "s1", "status": {"state": "SUCCEEDED"},
+                        "manifest": {"schema": {"columns": [{"name": "a"}]}, "total_row_count": 3},
+                        "result": {"data_array": [[1]], "next_chunk_index": 1}}
+            if self.fail_chunk:
+                raise RuntimeError("chunk fetch failed")
+            if path.endswith("/chunks/1"):
+                return {"data_array": [[2]], "next_chunk_index": 2}
+            return {"data_array": [[3]]}
+
+    def _run(self, api):
+        from types import SimpleNamespace
+        from backend.services import gateway_service as g
+        with patch.object(g, "_get_workspace_client", return_value=SimpleNamespace(api_client=api)), \
+             patch.object(g, "_find_warehouse_id", return_value="wh"):
+            return g._execute_system_sql("SELECT a")
+
+    def test_follows_all_chunks(self):
+        api = self._Api()
+        assert self._run(api) == [{"a": 1}, {"a": 2}, {"a": 3}]
+        assert api.paths[1:] == ["/api/2.0/sql/statements/s1/result/chunks/1",
+                                 "/api/2.0/sql/statements/s1/result/chunks/2"]
+
+    def test_failed_chunk_returns_nothing_not_partial(self):
+        assert self._run(self._Api(fail_chunk=True)) == []

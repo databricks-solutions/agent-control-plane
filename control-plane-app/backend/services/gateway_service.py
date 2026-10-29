@@ -150,7 +150,25 @@ def _execute_system_sql(sql: str, warehouse_id: Optional[str] = None) -> List[Di
 
     manifest = resp_json.get("manifest", {})
     columns = [c["name"] for c in manifest.get("schema", {}).get("columns", [])]
-    data_array = resp_json.get("result", {}).get("data_array", [])
+    data_array = list(resp_json.get("result", {}).get("data_array", []) or [])
+    # INLINE results are paged: follow next_chunk_index, or a large result is
+    # silently truncated to its first chunk.
+    nxt = resp_json.get("result", {}).get("next_chunk_index")
+    sid = resp_json.get("statement_id")
+    try:
+        while nxt is not None and sid:
+            path = f"/api/2.0/sql/statements/{sid}/result/chunks/{nxt}"
+            if w:
+                chunk = w.api_client.do("GET", path)
+            else:
+                r = httpx.get(f"{get_databricks_host()}{path}", headers=get_databricks_headers(), timeout=_TIMEOUT)
+                r.raise_for_status()
+                chunk = r.json()
+            data_array.extend(chunk.get("data_array") or [])
+            nxt = chunk.get("next_chunk_index")
+    except Exception as exc:
+        logger.warning("SQL result chunk fetch failed — returning no rows rather than a partial result: %s", exc)
+        return []
     return [dict(zip(columns, row)) for row in data_array]
 
 

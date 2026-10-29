@@ -92,14 +92,16 @@ KEY CONVENTIONS:
     uag_usage_timeseries_daily  daily gateway requests / tokens
     billing_user_cost_daily     ACTUAL $ per user (Unity Gateway-attributed, run_by) per endpoint per day
     billing_external_model_spend  actual $ for external models (OpenAI, Bedrock, Foundry, ...) via the gateway
-- gateway_usage_daily is LEGACY serving-endpoint usage (system.serving.endpoint_usage):
-  use it for tokens/requests on serving endpoints that are not routed through Unity Gateway.
+- gateway_usage_daily / user_analytics_daily hold ALL model traffic per endpoint and user:
+  Unity Gateway calls (system.ai_gateway.usage, incl. ai_query retries) plus serving-endpoint
+  calls the gateway didn't log. Gateway endpoints are named by UC service (system.ai.<model>),
+  serving endpoints by endpoint name (databricks-<model>), so one model can appear under both.
 - billing_serving_daily is the source for $ MODEL-SERVING cost per serving endpoint.
 - billing_product_daily is the source for $ ALL-PRODUCT cost (Model Serving, Jobs, SQL, Vector Search, ...).
 - usage_date is a DATE; trends should bucket by usage_date or DATE_TRUNC.
 When asked about cost per user, model or AI service, prefer billing_user_cost_daily / uag_service_usage;
 per serving endpoint use billing_serving_daily; cross-product use billing_product_daily.
-For tokens/requests prefer uag_service_usage / uag_usage_summary; gateway_usage_daily is legacy serving usage.
+For per-service tokens/requests prefer uag_service_usage / uag_usage_summary; gateway_usage_daily covers all model traffic per endpoint and user.
 """
 _CURATED_TABLES = [
     "discovered_agents", "gateway_usage_daily", "user_analytics_daily", "user_analytics_heatmap",

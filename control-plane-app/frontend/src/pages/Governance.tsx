@@ -8,6 +8,10 @@ import {
   type BillingPageData,
   type CostByTagRow,
   type ExternalModelSpendRow,
+  useUnitEconomics,
+  useTagSpend,
+  type UnitEconomicsRow,
+  type TagSpendRow,
 } from '@/api/hooks'
 import { usePersistedWorkspaceFilter } from '@/lib/usePersistedWorkspaceFilter'
 import { WorkspaceSelect, workspaceOption, type WorkspaceOption } from '@/components/WorkspaceSelect'
@@ -718,11 +722,15 @@ function ServiceCostTab({ data }: { data?: BillingPageData }) {
 
   if (rows.length === 0) {
     return (
+      <div className="space-y-6">
       <Card><CardContent className="py-12 text-center text-gray-400 dark:text-gray-500">
         No Unity Gateway-attributed serving cost in this window. Cost is attributed to a service only for
         traffic routed through Unity Gateway (pay-per-token models) — legacy serving-endpoint cost is under
         <strong> By Serving Endpoint</strong>.
       </CardContent></Card>
+      <UnitEconomicsCard />
+      <TagSpendCard />
+      </div>
     )
   }
   return (
@@ -799,7 +807,106 @@ function ServiceCostTab({ data }: { data?: BillingPageData }) {
           <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
         </CardContent>
       </Card>
+      <UnitEconomicsCard />
+      <TagSpendCard />
     </div>
+  )
+}
+
+function UnitEconomicsCard() {
+  const { data, isLoading } = useUnitEconomics()
+  const { sort, toggle } = useSort<string>('cost_usd', 'desc')
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
+  const rows = data?.services ?? []
+  const sorted = useMemo(() => sortRows(rows, sort, (r: UnitEconomicsRow, k) =>
+    k === 'service_name' ? r.service_name.toLowerCase() : Number((r as any)[k] ?? -1)), [rows, sort])
+  if (isLoading || data?.restricted || rows.length === 0) return null
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Unit Economics (30 days)</CardTitle>
+        <p className="text-[11px] text-gray-400 dark:text-gray-500">
+          Effective rate = attributed list-price $ ÷ tokens or requests through Unity Gateway. Input tokens include cache
+          reads (billed at a discount), so heavily cached workloads show a lower effective $/1M than the list price.
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="border-b dark:border-gray-700">
+              <tr>
+                <SortableHeader label="Service" sortKey="service_name" current={sort} onToggle={toggle} />
+                <SortableHeader label="Cost" sortKey="cost_usd" current={sort} onToggle={toggle} align="right" />
+                <SortableHeader label="Requests" sortKey="requests" current={sort} onToggle={toggle} align="right" />
+                <SortableHeader label="Effective $/1M tokens" sortKey="usd_per_1m_tokens" current={sort} onToggle={toggle} align="right" />
+                <SortableHeader label="$/1k requests" sortKey="usd_per_1k_requests" current={sort} onToggle={toggle} align="right" />
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.slice(page * pageSize, (page + 1) * pageSize).map((r) => (
+                <tr key={r.service_name} className="border-b border-gray-100 dark:border-gray-700/50">
+                  <td className="py-2 px-2 font-mono text-xs truncate max-w-[340px]" title={r.service_name}>{r.service_name}</td>
+                  <td className="py-2 px-2 text-right tabular-nums">{fmtCost(Number(r.cost_usd || 0))}</td>
+                  <td className="py-2 px-2 text-right tabular-nums">{fmtNumber(Number(r.requests || 0))}</td>
+                  <td className="py-2 px-2 text-right tabular-nums">{r.usd_per_1m_tokens == null ? '—' : `$${Number(r.usd_per_1m_tokens).toFixed(2)}`}</td>
+                  <td className="py-2 px-2 text-right tabular-nums">{r.usd_per_1k_requests == null ? '—' : `$${Number(r.usd_per_1k_requests).toFixed(2)}`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+      </CardContent>
+    </Card>
+  )
+}
+
+function TagSpendCard() {
+  const { data, isLoading } = useTagSpend()
+  const rows = data?.tags ?? []
+  const keys = useMemo(() => {
+    const totals = new Map<string, number>()
+    rows.forEach((r) => totals.set(r.tag_key, (totals.get(r.tag_key) || 0) + Number(r.cost_usd || 0)))
+    return Array.from(totals.entries()).sort((a, b) => b[1] - a[1]).map(([k]) => k)
+  }, [rows])
+  const [key, setKey] = useState<string>('')
+  const activeKey = key || keys.find((k) => !k.startsWith('ai.')) || keys[0] || ''
+  if (isLoading || data?.restricted || rows.length === 0) return null
+  const shown: TagSpendRow[] = rows.filter((r) => r.tag_key === activeKey).sort((a, b) => Number(b.cost_usd) - Number(a.cost_usd))
+  const total = shown.reduce((t, r) => t + Number(r.cost_usd || 0), 0)
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2"><Tag className="w-4 h-4 text-db-red" /> Spend by Service Tag (30 days)</CardTitle>
+        <p className="text-[11px] text-gray-400 dark:text-gray-500">
+          Attributed spend of each Unity Gateway service, rolled up by the tags on the service (e.g. team, project, budget).
+          <code> ai.*</code> tags are set by Databricks on <code>system.ai</code> models. A service with several tag values counts under each.
+        </p>
+        <div className="flex flex-wrap gap-1 pt-2">
+          {keys.map((k) => (
+            <button key={k} onClick={() => setKey(k)}
+              className={`px-2.5 py-1 rounded-md text-xs font-medium ${k === activeKey ? 'bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}>
+              {k}
+            </button>
+          ))}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-1.5">
+        {shown.slice(0, 15).map((r) => {
+          const pct = total ? (Number(r.cost_usd) / total) * 100 : 0
+          return (
+            <div key={r.tag_value} className="text-sm">
+              <div className="flex justify-between gap-2">
+                <span className="truncate" title={r.tag_value}>{r.tag_value || '(empty)'} <span className="text-xs text-gray-400">· {r.services} service{r.services === 1 ? '' : 's'}</span></span>
+                <span className="tabular-nums">{fmtCost(Number(r.cost_usd || 0))}</span>
+              </div>
+              <div className="h-1.5 rounded bg-gray-100 dark:bg-gray-800 mt-0.5"><div className="h-1.5 rounded bg-db-red/70" style={{ width: `${Math.max(pct, 1)}%` }} /></div>
+            </div>
+          )
+        })}
+      </CardContent>
+    </Card>
   )
 }
 
