@@ -100,6 +100,7 @@ def _all_chunks(resp: dict) -> list:
     rows = list(result.get("data_array") or [])
     nxt, sid = result.get("next_chunk_index"), resp.get("statement_id")
     if nxt is not None and sid:
+        from databricks.sdk import WorkspaceClient  # local: not every notebook imports it at module level
         client = WorkspaceClient().api_client
         while nxt is not None:
             chunk = client.do("GET", f"/api/2.0/sql/statements/{sid}/result/chunks/{nxt}")
