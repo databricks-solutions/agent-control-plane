@@ -82,7 +82,8 @@ def get_usage_explorer(
     selected = [w for w in (workspace_ids or []) if w]
     if allowed_workspace_ids is not None:
         allowed = set(allowed_workspace_ids)
-        scope = [w for w in selected if w in allowed] if selected else list(allowed)
+        # keep a deterministic order (the caller's / the selection's), not set order
+        scope = [w for w in selected if w in allowed] if selected else list(allowed_workspace_ids)
     else:
         scope = selected or None
 
