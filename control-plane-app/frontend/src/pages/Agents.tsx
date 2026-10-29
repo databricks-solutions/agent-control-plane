@@ -51,7 +51,7 @@ import {
 
 const TABS = [
   { key: 'overview',      label: 'Overview',   icon: LayoutDashboard },
-  { key: 'operations',    label: 'Serving Metrics', icon: Activity },
+  { key: 'operations',    label: 'Model Usage', icon: Activity },
   { key: 'operations_rt', label: 'Operations', icon: Server },
 ] as const
 
