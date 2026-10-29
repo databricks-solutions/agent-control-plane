@@ -2,8 +2,8 @@
 # MAGIC %md
 # MAGIC # Billing Discovery Job
 # MAGIC
-# MAGIC Queries `system.billing.usage`, `system.billing.list_prices`, and
-# MAGIC `system.serving.endpoint_usage` and writes four Delta billing tables
+# MAGIC Queries `system.billing.usage`, `system.billing.list_prices`,
+# MAGIC `system.ai_gateway.usage` and `system.serving.endpoint_usage` and writes four Delta billing tables
 # MAGIC for the sync task (`02_sync_to_lakebase`) to mirror into Lakebase.
 # MAGIC
 # MAGIC **Tables written:**
@@ -310,6 +310,83 @@ def _execute_sql(sql: str) -> List[Dict[str, Any]]:
         )
     return rows
 
+
+def _gateway_usage_readable() -> bool:
+    """One probe per run: can this run read system.ai_gateway.usage?
+
+    The table is account-admin scoped by default, so on many accounts the
+    workflow identity can't read it. Without this probe the combined query would
+    fail outright and (in these notebooks) overwrite good tables with empty ones
+    or fail the task. Polls so a cold warehouse isn't mistaken for "no access".
+    """
+    try:
+        client = WorkspaceClient().api_client
+        resp = client.do("POST", "/api/2.0/sql/statements", body={
+            "warehouse_id": WAREHOUSE_ID,
+            "statement": "SELECT 1 FROM system.ai_gateway.usage LIMIT 1",
+            "wait_timeout": "30s", "disposition": "INLINE", "format": "JSON_ARRAY"})
+        sid = resp.get("statement_id")
+        for _ in range(30):
+            state = resp.get("status", {}).get("state", "")
+            if state not in ("PENDING", "RUNNING") or not sid:
+                break
+            time.sleep(3)
+            resp = client.do("GET", f"/api/2.0/sql/statements/{sid}")
+        ok = resp.get("status", {}).get("state") == "SUCCEEDED"
+        if not ok:
+            err = resp.get("status", {}).get("error", {}).get("message", "")
+            print(f"  ⚠️  system.ai_gateway.usage not readable ({err[:160]}) — counting endpoint_usage only")
+        return ok
+    except Exception as exc:
+        print(f"  ⚠️  system.ai_gateway.usage probe failed ({exc}) — counting endpoint_usage only")
+        return False
+
+
+GATEWAY_USAGE_READABLE = _gateway_usage_readable()
+
+
+def _model_requests_cte(since: str) -> str:
+    """WITH clause defining `model_requests`: one row per model call since `since`.
+
+    system.ai_gateway.usage logs every call through Unity Gateway, including the
+    system.ai.* model services and ai_query retries that endpoint_usage misses.
+    endpoint_usage adds the traffic that bypasses the gateway; its rows whose
+    request id the gateway also logged are dropped, so nothing counts twice.
+
+    If the gateway table isn't readable, falls back to endpoint_usage alone (the
+    pre-gateway behaviour) rather than failing. Gateway rows without an
+    endpoint_name are excluded (endpoint_name is a key column downstream).
+    """
+    eu = f"""
+        SELECT u.request_time, u.workspace_id, se.endpoint_name, u.requester,
+               u.input_token_count AS input_tokens, u.output_token_count AS output_tokens, u.status_code
+        FROM system.serving.endpoint_usage u
+        JOIN system.serving.served_entities se
+            ON u.served_entity_id = se.served_entity_id
+        {{anti}}
+        WHERE u.request_time >= {since}"""
+    if not GATEWAY_USAGE_READABLE:
+        return f"""
+    WITH model_requests AS ({eu.format(anti="")}
+    )
+    """
+    return f"""
+    WITH gw AS (
+        SELECT request_id, event_time AS request_time, workspace_id, endpoint_name,
+               requester, input_tokens, output_tokens, status_code
+        FROM system.ai_gateway.usage
+        WHERE event_time >= {since}
+          AND service_type IS DISTINCT FROM 'MCP_SERVICE'  -- tool calls, no tokens
+          AND endpoint_name IS NOT NULL
+    ),
+    model_requests AS (
+        SELECT request_time, workspace_id, endpoint_name, requester,
+               input_tokens, output_tokens, status_code
+        FROM gw
+        UNION ALL{eu.format(anti="LEFT ANTI JOIN gw ON gw.request_id = u.databricks_request_id")}
+    )
+    """
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -363,23 +440,20 @@ print(f"  ✅ {len(serving_rows)} serving-cost rows")
 
 # COMMAND ----------
 
-print(f"▸ Querying system.serving.endpoint_usage for token usage ({RETENTION_DAYS} days) …")
-token_rows = _execute_sql(f"""
+print(f"▸ Querying system.ai_gateway.usage + endpoint_usage for token usage ({RETENTION_DAYS} days) …")
+token_rows = _execute_sql(_model_requests_cte(f"current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS") + """
     SELECT
         CAST(DATE(eu.request_time) AS STRING)       AS usage_date,
         eu.workspace_id,
-        se.endpoint_name,
+        eu.endpoint_name,
         COUNT(*)                                     AS request_count,
-        COALESCE(SUM(eu.input_token_count), 0)       AS input_tokens,
-        COALESCE(SUM(eu.output_token_count), 0)      AS output_tokens,
-        ROUND(AVG(eu.input_token_count), 2)          AS avg_input_tokens,
-        ROUND(AVG(eu.output_token_count), 2)         AS avg_output_tokens
-    FROM system.serving.endpoint_usage eu
-    JOIN system.serving.served_entities se
-        ON eu.served_entity_id = se.served_entity_id
-    WHERE eu.request_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
-      AND eu.workspace_id IS NOT NULL
-    GROUP BY DATE(eu.request_time), eu.workspace_id, se.endpoint_name
+        COALESCE(SUM(eu.input_tokens), 0)            AS input_tokens,
+        COALESCE(SUM(eu.output_tokens), 0)           AS output_tokens,
+        ROUND(AVG(eu.input_tokens), 2)               AS avg_input_tokens,
+        ROUND(AVG(eu.output_tokens), 2)              AS avg_output_tokens
+    FROM model_requests eu
+    WHERE eu.workspace_id IS NOT NULL
+    GROUP BY DATE(eu.request_time), eu.workspace_id, eu.endpoint_name
 """)
 print(f"  ✅ {len(token_rows)} token-usage rows")
 
@@ -419,27 +493,24 @@ print(f"  ✅ {len(product_rows)} product-cost rows")
 
 # COMMAND ----------
 
-print(f"▸ Querying system.serving.endpoint_usage for per-user usage ({RETENTION_DAYS} days) …")
-user_ep_rows = _execute_sql(f"""
+print(f"▸ Querying system.ai_gateway.usage + endpoint_usage for per-user usage ({RETENTION_DAYS} days) …")
+user_ep_rows = _execute_sql(_model_requests_cte(f"current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS") + """
     SELECT
         CAST(DATE(eu.request_time) AS STRING)        AS usage_date,
         eu.workspace_id,
-        se.endpoint_name,
+        eu.endpoint_name,
         COALESCE(eu.requester, 'unknown')             AS user_identity,
         COUNT(*)                                       AS request_count,
-        COALESCE(SUM(eu.input_token_count), 0)         AS input_tokens,
-        COALESCE(SUM(eu.output_token_count), 0)        AS output_tokens
-    FROM system.serving.endpoint_usage eu
-    JOIN system.serving.served_entities se
-        ON eu.served_entity_id = se.served_entity_id
-    WHERE eu.request_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
-      AND eu.workspace_id IS NOT NULL
+        COALESCE(SUM(eu.input_tokens), 0)              AS input_tokens,
+        COALESCE(SUM(eu.output_tokens), 0)             AS output_tokens
+    FROM model_requests eu
+    WHERE eu.workspace_id IS NOT NULL
     -- Group on the COALESCEd user_identity (not raw eu.requester) so a NULL and a
     -- literal 'unknown' requester collapse into ONE row. Grouping on raw requester
     -- emits two rows sharing the same (usage_date, workspace_id, endpoint_name,
     -- user_identity) PK → the Lakebase ON CONFLICT upsert fails with "cannot affect
     -- row a second time" (matches the pattern already used in queries 3/5/ext-spend).
-    GROUP BY DATE(eu.request_time), eu.workspace_id, se.endpoint_name, COALESCE(eu.requester, 'unknown')
+    GROUP BY DATE(eu.request_time), eu.workspace_id, eu.endpoint_name, COALESCE(eu.requester, 'unknown')
 """)
 print(f"  ✅ {len(user_ep_rows)} user-endpoint rows")
 
