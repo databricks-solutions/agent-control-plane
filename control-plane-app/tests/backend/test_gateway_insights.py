@@ -50,6 +50,16 @@ class TestUsageExplorer:
         assert all(c[1].get("ws") in (["ws1", "ws2"], None) for c in rec.calls if "uag_usage_daily_fact f" in c[0])
         assert any(sorted(c[1].get("ws") or []) == ["ws1", "ws2"] for c in rec.calls)
 
+    def test_workspace_options_are_scoped(self):
+        """The filter's workspace list must not leak other workspaces' ids to a workspace admin."""
+        from backend.services import gateway_insights_service as g
+        rec = _Recorder()
+        with patch(f"{SVC}.execute_query", rec):
+            g.get_usage_explorer(None, None, [], None, None, allowed_workspace_ids=["ws1"])
+        opt = [c for c in rec.calls if "SELECT DISTINCT workspace_id" in c[0]]
+        assert len(opt) == 1
+        assert "workspace_id = ANY(%(ws)s)" in opt[0][0] and opt[0][1]["ws"] == ["ws1"]
+
     def test_tag_filter_is_parameterised(self):
         from backend.services import gateway_insights_service as g
         rec = _Recorder()
