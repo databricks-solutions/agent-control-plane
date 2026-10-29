@@ -123,6 +123,40 @@ def _execute_sql(sql):
     return [dict(zip(cols, row)) for row in resp.get("result", {}).get("data_array", [])]
 
 
+def _gateway_usage_readable() -> bool:
+    """One probe per run: can this run read system.ai_gateway.usage?
+
+    The table is account-admin scoped by default, so on many accounts the
+    workflow identity can't read it. Without this probe the combined query would
+    fail outright and (in these notebooks) overwrite good tables with empty ones
+    or fail the task. Polls so a cold warehouse isn't mistaken for "no access".
+    """
+    try:
+        client = WorkspaceClient().api_client
+        resp = client.do("POST", "/api/2.0/sql/statements", body={
+            "warehouse_id": WAREHOUSE_ID,
+            "statement": "SELECT 1 FROM system.ai_gateway.usage LIMIT 1",
+            "wait_timeout": "30s", "disposition": "INLINE", "format": "JSON_ARRAY"})
+        sid = resp.get("statement_id")
+        for _ in range(30):
+            state = resp.get("status", {}).get("state", "")
+            if state not in ("PENDING", "RUNNING") or not sid:
+                break
+            time.sleep(3)
+            resp = client.do("GET", f"/api/2.0/sql/statements/{sid}")
+        ok = resp.get("status", {}).get("state") == "SUCCEEDED"
+        if not ok:
+            err = resp.get("status", {}).get("error", {}).get("message", "")
+            print(f"  ⚠️  system.ai_gateway.usage not readable ({err[:160]}) — counting endpoint_usage only")
+        return ok
+    except Exception as exc:
+        print(f"  ⚠️  system.ai_gateway.usage probe failed ({exc}) — counting endpoint_usage only")
+        return False
+
+
+GATEWAY_USAGE_READABLE = _gateway_usage_readable()
+
+
 def _model_requests_cte(since: str) -> str:
     """WITH clause defining `model_requests`: one row per model call since `since`.
 
@@ -130,6 +164,23 @@ def _model_requests_cte(since: str) -> str:
     system.ai.* model services and ai_query retries that endpoint_usage misses.
     endpoint_usage adds the traffic that bypasses the gateway; its rows whose
     request id the gateway also logged are dropped, so nothing counts twice.
+
+    If the gateway table isn't readable, falls back to endpoint_usage alone (the
+    pre-gateway behaviour) rather than failing. Gateway rows without an
+    endpoint_name are excluded (endpoint_name is a key column downstream).
+    """
+    eu = f"""
+        SELECT u.request_time, u.workspace_id, se.endpoint_name, u.requester,
+               u.input_token_count AS input_tokens, u.output_token_count AS output_tokens, u.status_code
+        FROM system.serving.endpoint_usage u
+        JOIN system.serving.served_entities se
+            ON u.served_entity_id = se.served_entity_id
+        {{anti}}
+        WHERE u.request_time >= {since}"""
+    if not GATEWAY_USAGE_READABLE:
+        return f"""
+    WITH model_requests AS ({eu.format(anti="")}
+    )
     """
     return f"""
     WITH gw AS (
@@ -138,19 +189,13 @@ def _model_requests_cte(since: str) -> str:
         FROM system.ai_gateway.usage
         WHERE event_time >= {since}
           AND service_type IS DISTINCT FROM 'MCP_SERVICE'  -- tool calls, no tokens
+          AND endpoint_name IS NOT NULL
     ),
     model_requests AS (
         SELECT request_time, workspace_id, endpoint_name, requester,
                input_tokens, output_tokens, status_code
         FROM gw
-        UNION ALL
-        SELECT u.request_time, u.workspace_id, se.endpoint_name, u.requester,
-               u.input_token_count, u.output_token_count, u.status_code
-        FROM system.serving.endpoint_usage u
-        JOIN system.serving.served_entities se
-            ON u.served_entity_id = se.served_entity_id
-        LEFT ANTI JOIN gw ON gw.request_id = u.databricks_request_id
-        WHERE u.request_time >= {since}
+        UNION ALL{eu.format(anti="LEFT ANTI JOIN gw ON gw.request_id = u.databricks_request_id")}
     )
     """
 
