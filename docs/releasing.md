@@ -14,10 +14,12 @@ This project uses [Semantic Versioning](https://semver.org/) and GitHub Releases
 
 ### 1. Update the changelog
 
-Edit `CHANGELOG.md` and add a section for the new version:
+Edit `CHANGELOG.md` and add a section for the new version (keep an empty
+`## [Unreleased]` heading above it). An optional ` — Title` after the date becomes
+the GitHub Release title (`v0.2.0 — Title`); without it the title is just the tag.
 
 ```markdown
-## [0.2.0] - 2026-05-01
+## [0.2.0] - 2026-05-01 — Short release title
 
 ### Added
 - New feature X
@@ -42,10 +44,11 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-This triggers the GitHub Actions release workflow which:
-- Extracts the changelog section for this version
-- Creates a GitHub Release with the changelog as release notes
-- Marks pre-releases automatically for `-rc` or `-beta` tags
+This triggers the GitHub Actions release workflow (`.github/workflows/release.yml`), which:
+- Extracts the changelog section for this version (the job fails if it's missing or empty)
+- Creates a GitHub Release with that section as the release notes, marked **Latest**
+- Marks pre-releases automatically for `-rc`, `-beta` or `-alpha` tags
+- Leaves an already-existing release for the tag unchanged (safe to re-run)
 
 ### 4. Verify
 
