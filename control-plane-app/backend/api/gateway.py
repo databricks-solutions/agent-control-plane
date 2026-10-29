@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from pydantic import BaseModel
 from typing import Optional, List
 from backend.config import settings
-from backend.services import gateway_service
+from backend.services import gateway_service, gateway_insights_service
 from backend.utils.auth import get_current_user, require_admin, require_account_admin, UserInfo
 from backend.utils.access_scope import get_allowed_workspace_ids
 
@@ -394,3 +394,58 @@ def operational_metrics(
     return gateway_service.get_operational_metrics(
         hours, allowed_workspace_ids=get_allowed_workspace_ids(user),
     )
+
+
+# ── Usage-dashboard parity (gateway_insights_service) ─────────────────────────
+
+@router.get("/usage-explorer")
+def usage_explorer(
+    start_date: Optional[str] = Query(None, description="YYYY-MM-DD (clamped to the 30-day fact window)"),
+    end_date: Optional[str] = Query(None),
+    workspace_ids: Optional[str] = Query(None, description="comma-separated; intersected with the caller's scope"),
+    tag_key: Optional[str] = Query(None),
+    tag_value: Optional[str] = Query(None),
+    user: UserInfo = Depends(get_current_user),
+):
+    """Filterable Unity Gateway usage (date range, workspace, service tag) from the
+    daily fact. Scoped callers see only their workspaces."""
+    selected = [w.strip() for w in (workspace_ids or "").split(",") if w.strip()]
+    return gateway_insights_service.get_usage_explorer(
+        start_date, end_date, selected, tag_key or None, tag_value or None,
+        allowed_workspace_ids=get_allowed_workspace_ids(user))
+
+
+@router.get("/daily-activity")
+def daily_activity(user: UserInfo = Depends(get_current_user)):
+    """Daily active / MCP / coding-agent users (account-wide)."""
+    return gateway_insights_service.get_daily_activity(allowed_workspace_ids=get_allowed_workspace_ids(user))
+
+
+@router.get("/coding-sessions")
+def coding_sessions(user: UserInfo = Depends(get_current_user)):
+    """Coding-agent sessions: trend, harness × surface, top sessions by estimated spend."""
+    return gateway_insights_service.get_coding_sessions(allowed_workspace_ids=get_allowed_workspace_ids(user))
+
+
+@router.get("/unit-economics")
+def unit_economics(user: UserInfo = Depends(get_current_user)):
+    """$ per 1M tokens / per 1k requests per Unity Gateway service (30d)."""
+    return gateway_insights_service.get_unit_economics(allowed_workspace_ids=get_allowed_workspace_ids(user))
+
+
+@router.get("/tag-spend")
+def tag_spend(user: UserInfo = Depends(get_current_user)):
+    """Attributed spend by service tag key/value (30d)."""
+    return gateway_insights_service.get_cost_by_service_tag(allowed_workspace_ids=get_allowed_workspace_ids(user))
+
+
+@router.get("/model-performance")
+def model_performance(user: UserInfo = Depends(get_current_user)):
+    """Per-model latency, streaming TTFB, output tokens/sec, cache share (7d)."""
+    return gateway_insights_service.get_model_performance(allowed_workspace_ids=get_allowed_workspace_ids(user))
+
+
+@router.get("/skills")
+def skills(user: UserInfo = Depends(get_current_user)):
+    """Skill loads / adoption from audit (30d)."""
+    return gateway_insights_service.get_skills(allowed_workspace_ids=get_allowed_workspace_ids(user))

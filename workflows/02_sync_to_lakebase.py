@@ -2393,6 +2393,77 @@ uag_endpoint_map_count = _mirror(
     ["endpoint_id", "service_name", "service_type", "discovered_at"],
 )
 
+# ── Usage-dashboard parity tables (workflow 11) ──────────────────────────────
+_TS = "discovered_at TIMESTAMP WITH TIME ZONE, last_synced TIMESTAMP WITH TIME ZONE DEFAULT NOW()"
+_PARITY = [
+    ("uag_usage_daily_fact", f"""CREATE TABLE IF NOT EXISTS uag_usage_daily_fact (
+        usage_date DATE NOT NULL, workspace_id TEXT, service_type TEXT, service_name TEXT,
+        destination_model TEXT, requester_type TEXT, source TEXT, api_type TEXT, auth_mode TEXT,
+        request_count BIGINT DEFAULT 0, error_count BIGINT DEFAULT 0, throttled_count BIGINT DEFAULT 0,
+        input_tokens BIGINT DEFAULT 0, output_tokens BIGINT DEFAULT 0, cached_tokens BIGINT DEFAULT 0, {_TS})""",
+     ["usage_date", "workspace_id", "service_type", "service_name", "destination_model", "requester_type", "source",
+      "api_type", "auth_mode", "request_count", "error_count", "throttled_count", "input_tokens", "output_tokens",
+      "cached_tokens", "discovered_at"]),
+    ("uag_service_tags", f"""CREATE TABLE IF NOT EXISTS uag_service_tags (
+        service_name TEXT NOT NULL, tag_key TEXT NOT NULL, tag_value TEXT, {_TS})""",
+     ["service_name", "tag_key", "tag_value", "discovered_at"]),
+    ("uag_daily_activity", f"""CREATE TABLE IF NOT EXISTS uag_daily_activity (
+        usage_date DATE NOT NULL, active_users BIGINT DEFAULT 0, mcp_requests BIGINT DEFAULT 0,
+        mcp_users BIGINT DEFAULT 0, coding_sessions BIGINT DEFAULT 0, coding_users BIGINT DEFAULT 0, {_TS},
+        PRIMARY KEY (usage_date))""",
+     ["usage_date", "active_users", "mcp_requests", "mcp_users", "coding_sessions", "coding_users", "discovered_at"]),
+    ("uag_coding_sessions_daily", f"""CREATE TABLE IF NOT EXISTS uag_coding_sessions_daily (
+        usage_date DATE NOT NULL, coding_agent TEXT, surface TEXT, sessions BIGINT DEFAULT 0, users BIGINT DEFAULT 0,
+        subagents BIGINT DEFAULT 0, requests BIGINT DEFAULT 0, input_tokens BIGINT DEFAULT 0,
+        output_tokens BIGINT DEFAULT 0, reasoning_tokens BIGINT DEFAULT 0, est_cost_usd DOUBLE PRECISION DEFAULT 0, {_TS})""",
+     ["usage_date", "coding_agent", "surface", "sessions", "users", "subagents", "requests", "input_tokens",
+      "output_tokens", "reasoning_tokens", "est_cost_usd", "discovered_at"]),
+    ("uag_coding_sessions_top", f"""CREATE TABLE IF NOT EXISTS uag_coding_sessions_top (
+        session_id TEXT NOT NULL, requester TEXT, coding_agent TEXT, surface TEXT, agent_version TEXT,
+        reasoning_effort TEXT, models TEXT, first_seen TEXT, last_seen TEXT, requests BIGINT DEFAULT 0,
+        subagents BIGINT DEFAULT 0, input_tokens BIGINT DEFAULT 0, output_tokens BIGINT DEFAULT 0,
+        reasoning_tokens BIGINT DEFAULT 0, est_cost_usd DOUBLE PRECISION DEFAULT 0, {_TS})""",
+     ["session_id", "requester", "coding_agent", "surface", "agent_version", "reasoning_effort", "models",
+      "first_seen", "last_seen", "requests", "subagents", "input_tokens", "output_tokens", "reasoning_tokens",
+      "est_cost_usd", "discovered_at"]),
+    ("uag_service_unit_cost", f"""CREATE TABLE IF NOT EXISTS uag_service_unit_cost (
+        service_name TEXT NOT NULL, service_type TEXT, cost_usd DOUBLE PRECISION DEFAULT 0, requests BIGINT DEFAULT 0,
+        input_tokens BIGINT DEFAULT 0, output_tokens BIGINT DEFAULT 0, usd_per_1m_tokens DOUBLE PRECISION,
+        usd_per_1k_requests DOUBLE PRECISION, {_TS})""",
+     ["service_name", "service_type", "cost_usd", "requests", "input_tokens", "output_tokens", "usd_per_1m_tokens",
+      "usd_per_1k_requests", "discovered_at"]),
+    ("uag_cost_by_service_tag", f"""CREATE TABLE IF NOT EXISTS uag_cost_by_service_tag (
+        tag_key TEXT NOT NULL, tag_value TEXT, cost_usd DOUBLE PRECISION DEFAULT 0, services BIGINT DEFAULT 0,
+        requests BIGINT DEFAULT 0, {_TS})""",
+     ["tag_key", "tag_value", "cost_usd", "services", "requests", "discovered_at"]),
+    ("uag_model_performance", f"""CREATE TABLE IF NOT EXISTS uag_model_performance (
+        destination_model TEXT NOT NULL, requests BIGINT DEFAULT 0, error_count BIGINT DEFAULT 0,
+        throttled_count BIGINT DEFAULT 0, streaming_requests BIGINT DEFAULT 0, p50_latency_ms BIGINT,
+        p95_latency_ms BIGINT, p50_ttfb_ms BIGINT, p95_ttfb_ms BIGINT, p50_output_tps DOUBLE PRECISION,
+        input_tokens BIGINT DEFAULT 0, cache_read_tokens BIGINT DEFAULT 0, reasoning_tokens BIGINT DEFAULT 0, {_TS})""",
+     ["destination_model", "requests", "error_count", "throttled_count", "streaming_requests", "p50_latency_ms",
+      "p95_latency_ms", "p50_ttfb_ms", "p95_ttfb_ms", "p50_output_tps", "input_tokens", "cache_read_tokens",
+      "reasoning_tokens", "discovered_at"]),
+    ("uag_skill_usage", f"""CREATE TABLE IF NOT EXISTS uag_skill_usage (
+        skill_name TEXT NOT NULL, loads BIGINT DEFAULT 0, bundle_fetches BIGINT DEFAULT 0, users BIGINT DEFAULT 0,
+        last_used TEXT, {_TS})""",
+     ["skill_name", "loads", "bundle_fetches", "users", "last_used", "discovered_at"]),
+    ("uag_skill_users", f"""CREATE TABLE IF NOT EXISTS uag_skill_users (
+        skill_name TEXT NOT NULL, user_name TEXT, loads BIGINT DEFAULT 0, last_used TEXT, {_TS})""",
+     ["skill_name", "user_name", "loads", "last_used", "discovered_at"]),
+]
+parity_sync_counts = {}
+for _tbl, _ddl, _cols in _PARITY:
+    parity_sync_counts[_tbl] = _mirror(f"{CATALOG}.{SCHEMA}.{_tbl}", _tbl, _ddl, _cols)
+try:
+    with uag_conn.cursor() as cur:
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_uudf_date ON uag_usage_daily_fact (usage_date)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ust_svc ON uag_service_tags (service_name)")
+    uag_conn.commit()
+except Exception as exc:
+    uag_conn.rollback()
+    print(f"  index warning: {exc}")
+
 uag_conn.close()
 
 # COMMAND ----------

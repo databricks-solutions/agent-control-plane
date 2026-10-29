@@ -339,7 +339,10 @@ try:
     bd_rows = _execute_sql(f"""
         WITH base AS (
             SELECT requester_type, destination_model, api_type, service_type,
-                   invocation_metadata.source AS source, workspace_id,
+                   invocation_metadata.source AS source, workspace_id, auth_mode,
+                   mcp_metadata.json_rpc_method AS mcp_method,
+                   session_metadata.coding_agent AS coding_agent,
+                   session_metadata.reasoning_effort AS reasoning_effort,
                    CAST(status_code AS STRING) AS status_code, input_tokens, output_tokens,
                    COALESCE(token_details.cache_read_input_tokens, 0)
                  + COALESCE(token_details.cache_creation_input_tokens, 0) AS cached
@@ -377,6 +380,25 @@ try:
         SELECT 'workspace_id', COALESCE(NULLIF(CAST(workspace_id AS STRING), ''), 'unknown'),
                COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
         FROM base GROUP BY workspace_id
+        UNION ALL
+        -- auth_mode: PAT vs OAUTH — a credential-hygiene signal (PATs are long-lived)
+        SELECT 'auth_mode', COALESCE(NULLIF(auth_mode, ''), 'unknown'),
+               COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
+        FROM base GROUP BY 2
+        UNION ALL
+        -- mcp_method: tools/call vs tools/list vs initialize (MCP rows only)
+        SELECT 'mcp_method', COALESCE(NULLIF(mcp_method, ''), 'unknown'),
+               COUNT(*), 0, 0, 0
+        FROM base WHERE service_type = 'MCP_SERVICE' GROUP BY 2
+        UNION ALL
+        -- coding_agent / reasoning_effort: coding-agent session traffic only
+        SELECT 'coding_agent', coding_agent,
+               COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
+        FROM base WHERE coding_agent IS NOT NULL AND coding_agent != '' GROUP BY coding_agent
+        UNION ALL
+        SELECT 'reasoning_effort', reasoning_effort,
+               COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cached), 0)
+        FROM base WHERE reasoning_effort IS NOT NULL AND reasoning_effort != '' GROUP BY reasoning_effort
         UNION ALL
         -- service_type: exclude legacy untyped rows so the model/MCP/provider split is meaningful
         SELECT 'service_type', service_type,
@@ -710,7 +732,289 @@ print(f"✅ Wrote {len(map_rows_raw)} rows to {UAG_ENDPOINT_SERVICE_MAP_TABLE}")
 
 # COMMAND ----------
 
-result = {"status": "success", "uag_service_rows": len(sv_rows_raw), "uag_endpoint_service_map_rows": len(map_rows_raw), "kept_previous": _KEPT_PREVIOUS, "uag_endpoint_rows": len(rows_raw), "uag_breakdown_rows": len(bd_rows),
+# MAGIC %md
+# MAGIC ## Usage-dashboard parity (coding sessions, unit cost, tag spend, model performance, filters, skills)
+# MAGIC
+# MAGIC Mirrors the built-in Unity Gateway usage dashboard's tabs that the app lacked. These
+# MAGIC run through `spark.sql` and write DataFrames straight to Delta (the daily fact is too
+# MAGIC large for the Statement API's INLINE result). Each block keeps the previous snapshot
+# MAGIC if its query fails; on a first run it writes an empty table from the explicit schema.
+# MAGIC
+# MAGIC **Estimated spend** = tokens × a blended $/token per gateway endpoint, derived from
+# MAGIC `system.billing.usage` (MODEL_SERVING, attributed via `usage_metadata.ai_gateway.endpoint_id`)
+# MAGIC over the same window. Input and output tokens are weighted equally (blended rate).
+
+# COMMAND ----------
+
+from pyspark.sql import functions as F
+
+DETAIL_DAYS = 30  # window for the filterable fact, sessions, unit cost, tag spend, skills
+
+_U = f"system.ai_gateway.usage WHERE event_time >= current_timestamp() - INTERVAL {DETAIL_DAYS} DAYS"
+
+# $/token per gateway endpoint from attributed billing (blended in+out).
+_RATE_CTE = f"""
+    bill AS (
+        SELECT u.usage_metadata.ai_gateway.endpoint_id AS endpoint_id,
+               SUM(u.usage_quantity * COALESCE(lp.pricing.effective_list.default, lp.pricing.default)) AS cost
+        FROM system.billing.usage u
+        LEFT JOIN system.billing.list_prices lp
+            ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud
+            AND u.usage_unit = lp.usage_unit AND lp.price_end_time IS NULL
+        WHERE u.billing_origin_product = 'MODEL_SERVING'
+          AND u.usage_date >= current_date() - INTERVAL {DETAIL_DAYS} DAYS
+          AND u.usage_metadata.ai_gateway.endpoint_id IS NOT NULL
+        GROUP BY 1
+    ),
+    toks AS (
+        SELECT endpoint_id, SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS tokens
+        FROM {_U} AND endpoint_id IS NOT NULL
+        GROUP BY 1
+    ),
+    rate AS (
+        SELECT b.endpoint_id, b.cost, b.cost / NULLIF(t.tokens, 0) AS usd_per_token
+        FROM bill b JOIN toks t ON b.endpoint_id = t.endpoint_id
+    )"""
+
+
+def _spark_snapshot(sql: str, table: str, empty_schema: str, label: str) -> int:
+    """Run sql → overwrite `table`. On failure keep the previous snapshot (or, on a first
+    run, create an empty table from `empty_schema` so sync/smoke find it)."""
+    print(f"▸ {label} …")
+    try:
+        df = spark.sql(sql).withColumn("discovered_at", F.lit(now))
+        df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(table)
+        n = spark.table(table).count()
+        print(f"  ✅ {n} rows → {table}")
+        return n
+    except Exception as exc:
+        print(f"  ⚠️  {label} unavailable: {str(exc)[:300]}")
+        if spark.catalog.tableExists(table):
+            _KEPT_PREVIOUS.append(table.split(".")[-1])
+            print(f"  ↺ keeping previous snapshot of {table}")
+        else:
+            spark.createDataFrame([], f"{empty_schema}, discovered_at TIMESTAMP") \
+                .write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(table)
+        return 0
+
+
+T = lambda name: f"{CATALOG}.{SCHEMA}.{name}"  # noqa: E731
+
+# 1. Filterable daily fact — drives the Usage tab's date / workspace / service-tag filters.
+n_fact = _spark_snapshot(f"""
+    SELECT CAST(CAST(event_time AS DATE) AS STRING)               AS usage_date,
+           COALESCE(CAST(workspace_id AS STRING), '')            AS workspace_id,
+           COALESCE(service_type, '')                            AS service_type,
+           COALESCE(service_name, '')                            AS service_name,
+           COALESCE(destination_model, '')                       AS destination_model,
+           COALESCE(requester_type, '')                          AS requester_type,
+           COALESCE(invocation_metadata.source, '')              AS source,
+           COALESCE(api_type, '')                                AS api_type,
+           COALESCE(auth_mode, '')                               AS auth_mode,
+           COUNT(*)                                              AS request_count,
+           SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END)   AS error_count,
+           SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END)    AS throttled_count,
+           COALESCE(SUM(input_tokens), 0)                        AS input_tokens,
+           COALESCE(SUM(output_tokens), 0)                       AS output_tokens,
+           COALESCE(SUM(COALESCE(token_details.cache_read_input_tokens, 0)
+                      + COALESCE(token_details.cache_creation_input_tokens, 0)), 0) AS cached_tokens
+    FROM {_U}
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
+""", T("uag_usage_daily_fact"),
+    "usage_date STRING, workspace_id STRING, service_type STRING, service_name STRING, destination_model STRING, "
+    "requester_type STRING, source STRING, api_type STRING, auth_mode STRING, request_count BIGINT, error_count BIGINT, "
+    "throttled_count BIGINT, input_tokens BIGINT, output_tokens BIGINT, cached_tokens BIGINT",
+    "Usage daily fact (filterable)")
+
+# 2. Service tags (for the service-tag filter + tag spend).
+n_tags = _spark_snapshot(f"""
+    SELECT DISTINCT service_name, k AS tag_key, v AS tag_value
+    FROM system.ai_gateway.usage LATERAL VIEW explode(service_tags) t AS k, v
+    WHERE event_time >= current_timestamp() - INTERVAL {DETAIL_DAYS} DAYS
+      AND service_name IS NOT NULL AND service_name != ''
+""", T("uag_service_tags"), "service_name STRING, tag_key STRING, tag_value STRING", "Service tags")
+
+# 3. Daily activity (non-additive distinct counts the fact can't provide).
+n_activity = _spark_snapshot(f"""
+    SELECT CAST(CAST(event_time AS DATE) AS STRING)                                         AS usage_date,
+           COUNT(DISTINCT requester)                                                       AS active_users,
+           SUM(CASE WHEN service_type = 'MCP_SERVICE' THEN 1 ELSE 0 END)                   AS mcp_requests,
+           COUNT(DISTINCT CASE WHEN service_type = 'MCP_SERVICE' THEN requester END)       AS mcp_users,
+           COUNT(DISTINCT session_metadata.client_session_id)                              AS coding_sessions,
+           COUNT(DISTINCT CASE WHEN session_metadata.client_session_id IS NOT NULL
+                               THEN requester END)                                         AS coding_users
+    FROM {_U}
+    GROUP BY 1
+""", T("uag_daily_activity"),
+    "usage_date STRING, active_users BIGINT, mcp_requests BIGINT, mcp_users BIGINT, coding_sessions BIGINT, coding_users BIGINT",
+    "Daily activity")
+
+# 4. Coding-agent sessions per day × harness × surface (session_metadata).
+n_coding_daily = _spark_snapshot(f"""
+    WITH {_RATE_CTE}
+    SELECT CAST(CAST(u.event_time AS DATE) AS STRING)                    AS usage_date,
+           COALESCE(u.session_metadata.coding_agent, 'unknown')         AS coding_agent,
+           COALESCE(u.session_metadata.surface, 'unknown')              AS surface,
+           COUNT(DISTINCT u.session_metadata.client_session_id)         AS sessions,
+           COUNT(DISTINCT u.requester)                                  AS users,
+           COUNT(DISTINCT u.session_metadata.client_subagent_id)        AS subagents,
+           COUNT(*)                                                     AS requests,
+           COALESCE(SUM(u.input_tokens), 0)                             AS input_tokens,
+           COALESCE(SUM(u.output_tokens), 0)                            AS output_tokens,
+           COALESCE(SUM(u.token_details.output_reasoning_tokens), 0)    AS reasoning_tokens,
+           ROUND(COALESCE(SUM((COALESCE(u.input_tokens, 0) + COALESCE(u.output_tokens, 0)) * r.usd_per_token), 0), 4) AS est_cost_usd
+    FROM system.ai_gateway.usage u
+    LEFT JOIN rate r ON r.endpoint_id = u.endpoint_id
+    WHERE u.event_time >= current_timestamp() - INTERVAL {DETAIL_DAYS} DAYS
+      AND u.session_metadata.client_session_id IS NOT NULL
+    GROUP BY 1, 2, 3
+""", T("uag_coding_sessions_daily"),
+    "usage_date STRING, coding_agent STRING, surface STRING, sessions BIGINT, users BIGINT, subagents BIGINT, requests BIGINT, "
+    "input_tokens BIGINT, output_tokens BIGINT, reasoning_tokens BIGINT, est_cost_usd DOUBLE",
+    "Coding sessions daily")
+
+# 5. Top sessions by estimated spend (session drilldown).
+n_coding_top = _spark_snapshot(f"""
+    WITH {_RATE_CTE},
+    s AS (
+        SELECT u.session_metadata.client_session_id                            AS session_id,
+               MAX(u.requester)                                                AS requester,
+               MAX(u.session_metadata.coding_agent)                            AS coding_agent,
+               MAX(u.session_metadata.surface)                                 AS surface,
+               MAX(u.session_metadata.agent_version)                           AS agent_version,
+               MAX(u.session_metadata.reasoning_effort)                        AS reasoning_effort,
+               concat_ws(', ', slice(array_sort(collect_set(u.destination_model)), 1, 5)) AS models,
+               CAST(MIN(u.event_time) AS STRING)                               AS first_seen,
+               CAST(MAX(u.event_time) AS STRING)                               AS last_seen,
+               COUNT(*)                                                        AS requests,
+               COUNT(DISTINCT u.session_metadata.client_subagent_id)           AS subagents,
+               COALESCE(SUM(u.input_tokens), 0)                                AS input_tokens,
+               COALESCE(SUM(u.output_tokens), 0)                               AS output_tokens,
+               COALESCE(SUM(u.token_details.output_reasoning_tokens), 0)       AS reasoning_tokens,
+               ROUND(COALESCE(SUM((COALESCE(u.input_tokens, 0) + COALESCE(u.output_tokens, 0)) * r.usd_per_token), 0), 4) AS est_cost_usd
+        FROM system.ai_gateway.usage u
+        LEFT JOIN rate r ON r.endpoint_id = u.endpoint_id
+        WHERE u.event_time >= current_timestamp() - INTERVAL {DETAIL_DAYS} DAYS
+          AND u.session_metadata.client_session_id IS NOT NULL
+        GROUP BY 1
+    )
+    SELECT * FROM s ORDER BY est_cost_usd DESC, requests DESC LIMIT 200
+""", T("uag_coding_sessions_top"),
+    "session_id STRING, requester STRING, coding_agent STRING, surface STRING, agent_version STRING, reasoning_effort STRING, "
+    "models STRING, first_seen STRING, last_seen STRING, requests BIGINT, subagents BIGINT, input_tokens BIGINT, "
+    "output_tokens BIGINT, reasoning_tokens BIGINT, est_cost_usd DOUBLE",
+    "Top coding sessions")
+
+# 6. Unit economics per service ($ / 1M tokens, $ / 1k requests) from attributed billing.
+_SVC_COST_CTE = f"""
+    {_RATE_CTE},
+    ep_svc AS (
+        SELECT endpoint_id, MAX(service_name) AS service_name, MAX(service_type) AS service_type,
+               COUNT(*) AS requests,
+               COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens
+        FROM {_U} AND endpoint_id IS NOT NULL AND service_name IS NOT NULL AND service_name != ''
+        GROUP BY 1
+    ),
+    svc AS (
+        SELECT e.service_name, MAX(e.service_type) AS service_type,
+               SUM(COALESCE(r.cost, 0)) AS cost_usd, SUM(e.requests) AS requests,
+               SUM(e.input_tokens) AS input_tokens, SUM(e.output_tokens) AS output_tokens
+        FROM ep_svc e LEFT JOIN rate r ON r.endpoint_id = e.endpoint_id
+        GROUP BY 1
+    )"""
+n_unit = _spark_snapshot(f"""
+    WITH {_SVC_COST_CTE}
+    SELECT service_name, service_type, ROUND(cost_usd, 4) AS cost_usd, requests, input_tokens, output_tokens,
+           ROUND(cost_usd * 1e6 / NULLIF(input_tokens + output_tokens, 0), 4) AS usd_per_1m_tokens,
+           ROUND(cost_usd * 1e3 / NULLIF(requests, 0), 4)                     AS usd_per_1k_requests
+    FROM svc WHERE cost_usd > 0
+""", T("uag_service_unit_cost"),
+    "service_name STRING, service_type STRING, cost_usd DOUBLE, requests BIGINT, input_tokens BIGINT, output_tokens BIGINT, "
+    "usd_per_1m_tokens DOUBLE, usd_per_1k_requests DOUBLE",
+    "Service unit cost")
+
+# 7. Spend by service tag (attributed cost of each service, rolled up by its tags).
+n_tag_cost = _spark_snapshot(f"""
+    WITH {_SVC_COST_CTE},
+    tags AS (
+        SELECT DISTINCT service_name, k AS tag_key, v AS tag_value
+        FROM system.ai_gateway.usage LATERAL VIEW explode(service_tags) t AS k, v
+        WHERE event_time >= current_timestamp() - INTERVAL {DETAIL_DAYS} DAYS AND service_name IS NOT NULL
+    )
+    SELECT t.tag_key, t.tag_value, ROUND(SUM(s.cost_usd), 4) AS cost_usd,
+           COUNT(DISTINCT s.service_name) AS services, SUM(s.requests) AS requests
+    FROM svc s JOIN tags t ON t.service_name = s.service_name
+    WHERE s.cost_usd > 0
+    GROUP BY 1, 2
+""", T("uag_cost_by_service_tag"),
+    "tag_key STRING, tag_value STRING, cost_usd DOUBLE, services BIGINT, requests BIGINT",
+    "Spend by service tag")
+
+# 8. Performance per model (7d): latency, streaming TTFB, output tokens/sec, cache, errors.
+# Throughput only on streaming responses — non-streaming latency ≈ TTFB and yields
+# meaningless tokens/sec.
+n_perf = _spark_snapshot(f"""
+    SELECT destination_model,
+           COUNT(*)                                                                    AS requests,
+           SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END)                         AS error_count,
+           SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END)                          AS throttled_count,
+           SUM(CASE WHEN response_content_type LIKE 'text/event-stream%' THEN 1 ELSE 0 END) AS streaming_requests,
+           CAST(PERCENTILE_APPROX(latency_ms, 0.5) AS BIGINT)                          AS p50_latency_ms,
+           CAST(PERCENTILE_APPROX(latency_ms, 0.95) AS BIGINT)                         AS p95_latency_ms,
+           CAST(PERCENTILE_APPROX(CASE WHEN response_content_type LIKE 'text/event-stream%'
+                                       THEN time_to_first_byte_ms END, 0.5) AS BIGINT)  AS p50_ttfb_ms,
+           CAST(PERCENTILE_APPROX(CASE WHEN response_content_type LIKE 'text/event-stream%'
+                                       THEN time_to_first_byte_ms END, 0.95) AS BIGINT) AS p95_ttfb_ms,
+           ROUND(PERCENTILE_APPROX(CASE WHEN response_content_type LIKE 'text/event-stream%'
+                                         AND output_tokens > 50 AND latency_ms > time_to_first_byte_ms
+                                        THEN output_tokens * 1000.0 / (latency_ms - time_to_first_byte_ms) END, 0.5), 1)
+                                                                                       AS p50_output_tps,
+           COALESCE(SUM(input_tokens), 0)                                              AS input_tokens,
+           COALESCE(SUM(token_details.cache_read_input_tokens), 0)                     AS cache_read_tokens,
+           COALESCE(SUM(token_details.output_reasoning_tokens), 0)                     AS reasoning_tokens
+    FROM system.ai_gateway.usage
+    WHERE event_time >= current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS
+      AND destination_model IS NOT NULL AND destination_model != ''
+    GROUP BY 1
+""", T("uag_model_performance"),
+    "destination_model STRING, requests BIGINT, error_count BIGINT, throttled_count BIGINT, streaming_requests BIGINT, "
+    "p50_latency_ms BIGINT, p95_latency_ms BIGINT, p50_ttfb_ms BIGINT, p95_ttfb_ms BIGINT, p50_output_tps DOUBLE, "
+    "input_tokens BIGINT, cache_read_tokens BIGINT, reasoning_tokens BIGINT",
+    "Model performance")
+
+# 9. Skills activity — not in the usage table; audit service `aiGatewaySkills`.
+_SKILL_SRC = f"""
+    system.access.audit
+    WHERE event_date >= current_date() - INTERVAL {DETAIL_DAYS} DAYS
+      AND service_name = 'aiGatewaySkills'
+      AND request_params['fully_qualified_name'] IS NOT NULL"""
+n_skills = _spark_snapshot(f"""
+    SELECT request_params['fully_qualified_name']                                       AS skill_name,
+           SUM(CASE WHEN action_name = 'skillLoad' THEN 1 ELSE 0 END)                   AS loads,
+           SUM(CASE WHEN action_name = 'skillFetchBundleFiles' THEN 1 ELSE 0 END)       AS bundle_fetches,
+           COUNT(DISTINCT user_identity.email)                                          AS users,
+           CAST(MAX(event_time) AS STRING)                                              AS last_used
+    FROM {_SKILL_SRC}
+    GROUP BY 1
+""", T("uag_skill_usage"),
+    "skill_name STRING, loads BIGINT, bundle_fetches BIGINT, users BIGINT, last_used STRING", "Skill usage")
+n_skill_users = _spark_snapshot(f"""
+    SELECT request_params['fully_qualified_name'] AS skill_name,
+           COALESCE(user_identity.email, 'unknown') AS user_name,
+           SUM(CASE WHEN action_name = 'skillLoad' THEN 1 ELSE 0 END) AS loads,
+           CAST(MAX(event_time) AS STRING) AS last_used
+    FROM {_SKILL_SRC}
+    GROUP BY 1, 2
+""", T("uag_skill_users"), "skill_name STRING, user_name STRING, loads BIGINT, last_used STRING", "Skill users")
+
+parity_counts = {"usage_daily_fact": n_fact, "service_tags": n_tags, "daily_activity": n_activity,
+                 "coding_sessions_daily": n_coding_daily, "coding_sessions_top": n_coding_top,
+                 "service_unit_cost": n_unit, "cost_by_service_tag": n_tag_cost,
+                 "model_performance": n_perf, "skill_usage": n_skills, "skill_users": n_skill_users}
+
+# COMMAND ----------
+
+result = {"status": "success", "parity": parity_counts, "uag_service_rows": len(sv_rows_raw), "uag_endpoint_service_map_rows": len(map_rows_raw), "kept_previous": _KEPT_PREVIOUS, "uag_endpoint_rows": len(rows_raw), "uag_breakdown_rows": len(bd_rows),
           "uag_mcp_tool_rows": len(mcp_rows_raw), "uag_guardrail_rows": len(gr_rows_raw),
           "uag_timeseries_rows": len(ts_rows_raw), "uag_coding_agent_rows": len(ca_rows_raw),
           "uag_throttling_rows": len(th_rows_raw), "uag_fallback_rows": len(fb_rows_raw),
