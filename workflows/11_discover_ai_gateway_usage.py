@@ -281,9 +281,10 @@ def _execute_sql(sql: str) -> List[Dict[str, Any]]:
     if status != "SUCCEEDED":
         print(f"  SQL {status}: {msg[:300]}")
         return []
+    rows = _all_chunks(resp)  # may raise — the flag stays "failed" so the block keeps its snapshot
     _LAST_QUERY_FAILED = False
     cols = [c["name"] for c in resp.get("manifest", {}).get("schema", {}).get("columns", [])]
-    return [dict(zip(cols, row)) for row in _all_chunks(resp)]
+    return [dict(zip(cols, row)) for row in rows]
 
 
 def _empty_or_keep(schema, table: str) -> None:
