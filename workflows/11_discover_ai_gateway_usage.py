@@ -215,6 +215,28 @@ def _is_rate_limited(msg: str) -> bool:
     return "429" in m or "REQUEST_LIMIT_EXCEEDED" in m or "TOO MANY REQUESTS" in m
 
 
+def _all_chunks(resp: dict) -> list:
+    """All result rows of a SUCCEEDED INLINE statement, following next_chunk_index.
+
+    INLINE results are paged: the response carries only chunk 0 (~43k rows here) and
+    the rest must be fetched from /result/chunks/{i}. Reading only data_array
+    silently truncated large results. A failed page raises (the task retries)
+    rather than letting a truncated table be written."""
+    result = resp.get("result", {}) or {}
+    rows = list(result.get("data_array") or [])
+    nxt, sid = result.get("next_chunk_index"), resp.get("statement_id")
+    if nxt is not None and sid:
+        client = WorkspaceClient().api_client
+        while nxt is not None:
+            chunk = client.do("GET", f"/api/2.0/sql/statements/{sid}/result/chunks/{nxt}")
+            rows.extend(chunk.get("data_array") or [])
+            nxt = chunk.get("next_chunk_index")
+    expected = (resp.get("manifest") or {}).get("total_row_count")
+    if expected is not None and len(rows) != int(expected):
+        raise RuntimeError(f"SQL result incomplete: got {len(rows)} of {expected} rows")
+    return rows
+
+
 def _execute_sql(sql: str) -> List[Dict[str, Any]]:
     global _LAST_QUERY_FAILED
     _LAST_QUERY_FAILED = True  # cleared only on success
@@ -260,7 +282,7 @@ def _execute_sql(sql: str) -> List[Dict[str, Any]]:
         return []
     _LAST_QUERY_FAILED = False
     cols = [c["name"] for c in resp.get("manifest", {}).get("schema", {}).get("columns", [])]
-    return [dict(zip(cols, row)) for row in resp.get("result", {}).get("data_array", [])]
+    return [dict(zip(cols, row)) for row in _all_chunks(resp)]
 
 
 def _empty_or_keep(schema, table: str) -> None:

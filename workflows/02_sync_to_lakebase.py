@@ -477,6 +477,28 @@ def _find_warehouse_id():
     return None
 
 
+def _all_chunks(resp: dict) -> list:
+    """All result rows of a SUCCEEDED INLINE statement, following next_chunk_index.
+
+    INLINE results are paged: the response carries only chunk 0 (~43k rows here) and
+    the rest must be fetched from /result/chunks/{i}. Reading only data_array
+    silently truncated large results. A failed page raises (the task retries)
+    rather than letting a truncated table be written."""
+    result = resp.get("result", {}) or {}
+    rows = list(result.get("data_array") or [])
+    nxt, sid = result.get("next_chunk_index"), resp.get("statement_id")
+    if nxt is not None and sid:
+        client = WorkspaceClient().api_client
+        while nxt is not None:
+            chunk = client.do("GET", f"/api/2.0/sql/statements/{sid}/result/chunks/{nxt}")
+            rows.extend(chunk.get("data_array") or [])
+            nxt = chunk.get("next_chunk_index")
+    expected = (resp.get("manifest") or {}).get("total_row_count")
+    if expected is not None and len(rows) != int(expected):
+        raise RuntimeError(f"SQL result incomplete: got {len(rows)} of {expected} rows")
+    return rows
+
+
 def _execute_system_sql(sql):
     """Execute SQL via SQL Statements API and return list of dicts."""
     wh_id = _find_warehouse_id()
@@ -522,7 +544,7 @@ def _execute_system_sql(sql):
         return []
 
     columns = [c["name"] for c in resp_json.get("manifest", {}).get("schema", {}).get("columns", [])]
-    rows = resp_json.get("result", {}).get("data_array", [])
+    rows = _all_chunks(resp_json)
     return [dict(zip(columns, row)) for row in rows]
 
 # COMMAND ----------
