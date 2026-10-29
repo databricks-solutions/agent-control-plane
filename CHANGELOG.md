@@ -7,7 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-29
+
+**Unity Gateway first.** This release reorganizes the app around Unity Gateway (UC
+services) as the primary source of truth for AI usage, cost and governance, brings
+it to parity with the built-in Unity Gateway usage dashboard, and fixes several
+data-correctness bugs that were silently under-reporting usage on large accounts.
+Legacy per-serving-endpoint views remain, clearly labeled, as the only source for
+custom CPU/GPU endpoints and agents on Model Serving.
+
 ### Added
+- **Unity Gateway Services hub** (new default tab). Every UC service — model, MCP,
+  model-provider and agent services — with owner, rate limits, inference table,
+  routing destinations and live UC grants, merged with 7-day traffic (requests,
+  users, error %, 429s, p95). Services seen in traffic but not listable by the
+  discovery identity still appear (traffic only).
+- **Usage-dashboard parity** with the built-in Unity Gateway usage dashboard:
+  - **Usage Explorer** — date range (30 days), workspace multi-select and
+    service-tag filters over a daily fact; KPIs, trend, 7 breakdowns, top services,
+    and daily active / MCP / coding-agent users. Workspace admins now see usage for
+    the workspaces they administer.
+  - **Coding Agents** tab — sessions/day, estimated spend/day, harness × surface,
+    reasoning-effort mix, and the top 200 sessions by estimated spend
+    (`session_metadata`).
+  - **Performance** tab — per-model p50/p95 latency, streaming time-to-first-byte,
+    output tokens/sec (streaming only), cache-read share, error and 429 rates.
+  - **Auth method** (PAT vs OAuth) and **MCP method** (tools/call vs list vs
+    initialize) breakdowns.
+  - **Tools › Skills** — skill loads, bundle fetches and adopting users (audit
+    `aiGatewaySkills`).
+- **Governance › By Gateway Service** — gateway-attributed serving cost per UC
+  service and per user × service, effective $/1M tokens and $/1k requests, and
+  spend by service tag.
+- **Retrieval & Memory** (formerly Knowledge Bases) — Vector Search index usage
+  (queries, errors, top callers per index, Agent Bricks badge) from the audit log;
+  Lakebase operational health (connections, database size, top wait events) from
+  `system.lakebase.*`; Lakebase cost by project.
+- **Budget management** — live read of native account budgets plus create / edit /
+  delete through the account Budgets API (account-admin gated; the platform owns
+  storage and enforcement).
+- **App-served agent discovery** — account-wide app discovery from
+  `system.access.audit` with a multi-signal agent taxonomy (confirmed / structural /
+  candidate), and a unified tiered model classifier (MLflow artifact → name regex →
+  LLM → compute type) for empty-task custom models.
+- **Ask Genie** — enabled by default, moved to the header, and its space is now
+  auto-provisioned by the discovery workflow (`setup_genie_space` task) and resolved
+  by the app with no redeploy. Curated tables include the Unity Gateway tables.
+- **Workspace picker** — multi-select, searchable by name or id, across all pages;
+  workspace names shown instead of raw ids on the Workspaces page
+  (thanks @sigmalgebra, #75).
+- **Workspace-admin scoping** — non-account admins see the workspaces they
+  administer (read visibility; writes stay admin-gated).
 - **Access mode toggle (Admin → App Settings).** A runtime, admin-editable
   setting controls how much a non-admin sees: **`open`** (default) — any
   authenticated user sees all workspaces read-only, for teams that want a shared
@@ -20,12 +70,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the deploy-time `OBO_ENABLED` env flag); backend `GET`/`PUT /settings`.
 
 ### Changed
+- **Unity Gateway page restructured**: Services → Usage → Coding Agents →
+  Performance → Budgets → Legacy AI Gateway. The served-entity inventory moved under
+  Legacy; header controls only show where they apply; legacy data loads only on
+  that tab. Stale internal "UAG v2" identifiers renamed (routes `/gateway/unity-usage`
+  and `/unity-timeseries`; the old `/uag-v2-*` paths remain as aliases).
+- **v1 data labeled honestly** — endpoint-level AI Gateway config is no longer
+  called "Unity Gateway"; Governance "Endpoint Costs" → "By Serving Endpoint";
+  Agents "Metrics" → "Model Usage".
+- **Per-endpoint usage tables now mean all model traffic** (see Fixed) — the Genie
+  instructions say so, and note that one model can appear under both its gateway
+  service name (`system.ai.<model>`) and its serving-endpoint name.
 - **Consistent "Unity Gateway" naming.** Renamed remaining "AI Gateway" /
   "Mosaic AI Gateway" / "Unity AI Gateway" product references to **Unity
   Gateway** across the README, docs, UI labels/headings, and code
-  comments/docstrings. The gateway page is now titled "Unity Gateway" with an
-  "Overview" tab (was a redundant "Unity Gateway" tab); the deprecated v1 view
-  keeps its "Legacy AI Gateway" label. Technical identifiers are unchanged —
+  comments/docstrings; the deprecated v1 view keeps its "Legacy AI Gateway"
+  label. Technical identifiers are unchanged —
   the `system.ai_gateway.*` system tables, the `ai_gateway` serving-endpoint
   config field, the `/ai-gateway` route, and the `uag_*` cache tables keep
   their names.
@@ -39,6 +99,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   being hardcoded to "Connected". The identity pill now distinguishes
   **Account Admin** (purple) from **Workspace Admin** (amber) instead of a
   generic "Admin".
+- App-registry DDL has a single source (`backend/app_schema.py`) with smoke-check
+  coverage; README, architecture graphic and installation docs refreshed
+  (budgets setup, account-admin requirements).
+
+### Fixed
+- **Large SQL results were silently truncated.** The Statement API returns INLINE
+  results in chunks (~43k rows each); several workflow helpers and the backend read
+  only the first. On prod the 90-day per-user/endpoint query returned 96,975 rows in
+  3 chunks but only 43,253 were written, so User Activity and per-endpoint usage were
+  undercounted. All helpers now follow every chunk and verify the row count; a failed
+  page fails the task instead of writing a partial table.
+- **Per-user and per-endpoint usage now count Unity Gateway traffic.** The
+  user-analytics, gateway-usage and billing discovery notebooks read only
+  `system.serving.endpoint_usage`, which misses `system.ai.*` model services and
+  most `ai_query` traffic (each retry is a separate gateway call). They now read
+  `system.ai_gateway.usage` and add only the `endpoint_usage` rows whose request id
+  the gateway did not log, so nothing counts twice. On one account this took 90 days
+  from 0.45M to 17.8M requests, and a Claude Code user from 4.5K to 2.4B tokens.
+  If `system.ai_gateway.usage` isn't readable, they fall back to `endpoint_usage`
+  alone instead of failing. (Thanks @sigmalgebra, #78.)
+- **Genie spaces on serverless keep their real title and workspace.** On
+  serverless compute `01_discover_agents` couldn't read the notebook-context
+  `orgId`, so `_get_workspace_id()` fell back to a hash of the host URL and every
+  API-sourced row (e.g. `/api/2.0/genie/spaces`) was stored under that phantom
+  `workspace_id`. Those rows never deduped against the audit-log rows for the
+  same space, so each space appeared twice — titled, under a fake workspace, and
+  as `Genie Space <id>` under the real one — and `strict`-mode users only saw
+  the placeholder. The ID is now also resolved from
+  `spark.databricks.clusterUsageTags.orgId` and the `x-databricks-org-id` header
+  (SCIM `/Me`) before the hash fallback, and when the Genie API row wins dedup it
+  keeps the audit-log usage stats (`conversation_count`, `unique_users`,
+  `tables`, `warehouse_id`). (Thanks @Shubham0809, #68.)
+- **Workspace admins no longer see "No workspace access".** `get_allowed_workspace_ids`
+  resolved a non-account-admin's scope solely from the `workspace_admins` cache
+  (populated via the account permission-assignments API). When that cache is empty
+  or the account API is unreachable, a verified workspace admin fell through to
+  `[]` and the whole dashboard blanked. It now also trusts `user.is_admin` for the
+  deploy workspace the caller's token authenticated against — unioned with any
+  cross-workspace cache rows — so an admin always sees the deploy workspace.
+- Config no longer performs a live Databricks identity call at import time
+  (it hung `pytest` collection offline); the diagnostic runs at app startup.
+- Removed the orphaned `test_budgets_service.py` (tested a module deleted in
+  #13); added a GitHub Actions CI workflow (backend lint+tests, frontend
+  typecheck+build) and declared `ruff` as a dev dependency.
+- **Numbers that were wrong or always empty**: Ask Genie surfaced upstream errors as
+  HTTP 200 and timed out after 90 s; AgentDetail metrics and Admin "Users / Consumers"
+  read a table nothing writes (`request_logs`) — now built from synced tables and
+  scoped to the agent's workspace; User Activity cost / agents / agent list were
+  hard-coded to 0; empty states now distinguish "account-admin only" from "no
+  traffic"; Vector Search uptime showed 100% with no data.
+- **Operations page usage was always empty** — it selected a column
+  (`endpoint_usage.execution_time_ms`) that doesn't exist; counts now come from
+  `endpoint_usage` and latency from `system.ai_gateway.usage`.
+- **Lakebase Autoscaling-only workspaces failed every discovery run** — discovery now
+  lists both Provisioned instances and Autoscaling projects (deduped), and
+  `lakebase_instances` is no longer required by the smoke check.
+- **Discovery resilience** — task retries (2 × 2 min), backoff on Unity Catalog 429
+  rate limits, and failed queries keep the previous snapshot instead of overwriting
+  a good table with an empty one.
+- Sync and billing: last-good Lakebase data kept on a failed sync, intra-batch upsert
+  conflicts deduped, real list prices (no $0.07 / $0 fallbacks), `workspace_registry`
+  populated unconditionally, two multi-select runtime bugs, app-managed tables
+  ensured at startup.
+
+### Removed
+- Dead frontend code: unrouted Operations / Topology pages and 30 unused hooks
+  (~1.6k lines).
 
 ### Security
 - **Removed caller-controlled credential-forwarding paths.** Deleted the
@@ -77,39 +204,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agent_permissions_cache`, and `discovery_service`). Custom PrivateLink /
   vanity workspace domains are added via the `EXTRA_WORKSPACE_HOST_SUFFIXES` env
   var so they aren't silently dropped.
-
-### Fixed
-- **Per-user and per-endpoint usage now count Unity Gateway traffic.** The
-  user-analytics, gateway-usage and billing discovery notebooks read only
-  `system.serving.endpoint_usage`, which misses `system.ai.*` model services and
-  most `ai_query` traffic (each retry is a separate gateway call). They now read
-  `system.ai_gateway.usage` and add only the `endpoint_usage` rows whose request id
-  the gateway did not log, so nothing counts twice. On one account this took 90 days
-  from 0.45M to 17.8M requests, and a Claude Code user from 4.5K to 2.4B tokens.
-- **Genie spaces on serverless keep their real title and workspace.** On
-  serverless compute `01_discover_agents` couldn't read the notebook-context
-  `orgId`, so `_get_workspace_id()` fell back to a hash of the host URL and every
-  API-sourced row (e.g. `/api/2.0/genie/spaces`) was stored under that phantom
-  `workspace_id`. Those rows never deduped against the audit-log rows for the
-  same space, so each space appeared twice — titled, under a fake workspace, and
-  as `Genie Space <id>` under the real one — and `strict`-mode users only saw
-  the placeholder. The ID is now also resolved from
-  `spark.databricks.clusterUsageTags.orgId` and the `x-databricks-org-id` header
-  (SCIM `/Me`) before the hash fallback, and when the Genie API row wins dedup it
-  keeps the audit-log usage stats (`conversation_count`, `unique_users`,
-  `tables`, `warehouse_id`).
-- **Workspace admins no longer see "No workspace access".** `get_allowed_workspace_ids`
-  resolved a non-account-admin's scope solely from the `workspace_admins` cache
-  (populated via the account permission-assignments API). When that cache is empty
-  or the account API is unreachable, a verified workspace admin fell through to
-  `[]` and the whole dashboard blanked. It now also trusts `user.is_admin` for the
-  deploy workspace the caller's token authenticated against — unioned with any
-  cross-workspace cache rows — so an admin always sees the deploy workspace.
-- Config no longer performs a live Databricks identity call at import time
-  (it hung `pytest` collection offline); the diagnostic runs at app startup.
-- Removed the orphaned `test_budgets_service.py` (tested a module deleted in
-  #13); added a GitHub Actions CI workflow (backend lint+tests, frontend
-  typecheck+build) and declared `ruff` as a dev dependency.
 
 ## [0.1.3] - 2026-08-26
 
