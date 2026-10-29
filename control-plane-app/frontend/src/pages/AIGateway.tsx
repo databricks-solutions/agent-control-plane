@@ -13,7 +13,6 @@ import {
   useGatewayUsageByUser,
   useUnityUsage,
   useUnityTimeseries,
-  useUagCodingAgents,
   useUagMcpTools,
   useGuardrailCoverage,
   useThrottling,
@@ -37,7 +36,16 @@ import {
   useRefreshGateway,
   useCurrentUser,
   useSeesAccountWide,
+  useUsageExplorer,
+  useDailyActivity,
+  useCodingSessions,
+  useModelPerformance,
+  useWorkspaceDirectory,
+  type ExplorerBreakdownRow,
+  type CodingSessionRow,
+  type ModelPerformanceRow,
 } from '@/api/hooks'
+import { WorkspaceSelect, workspaceOption } from '@/components/WorkspaceSelect'
 import { RefreshButton } from '@/components/RefreshButton'
 import { formatAsOf } from '@/lib/formatters'
 import { SortableHeader, useSort, sortRows } from '@/components/SortableTable'
@@ -77,12 +85,16 @@ import {
   Wallet,
   Layers,
   Activity,
+  Terminal,
+  Gauge,
 } from 'lucide-react'
 
 /* ── tab definitions ─────────────────────────────────────────── */
 const baseTabs = [
   { id: 'services', label: 'Services', icon: Layers },
   { id: 'unity', label: 'Usage', icon: Activity },
+  { id: 'coding', label: 'Coding Agents', icon: Terminal },
+  { id: 'performance', label: 'Performance', icon: Gauge },
   { id: 'budgets', label: 'Budgets', icon: Wallet },
   { id: 'legacy', label: 'Legacy AI Gateway', icon: Archive },
 ] as const
@@ -114,7 +126,7 @@ const legacyTabs = [
   { id: 'rate-limits', label: 'Rate Limits & Guardrails', icon: ShieldAlert },
 ] as const
 
-type TabId = 'services' | 'unity' | 'budgets' | 'legacy'
+type TabId = 'services' | 'unity' | 'coding' | 'performance' | 'budgets' | 'legacy'
 type LegacyTabId = 'overview' | 'inventory' | 'metrics' | 'permissions' | 'rate-limits'
 
 export default function AIGatewayPage() {
@@ -223,8 +235,25 @@ export default function AIGatewayPage() {
       {/* Services — every Unity Gateway UC service, its config and traffic */}
       {activeTab === 'services' && <ServicesSection />}
 
-      {/* Usage — system.ai_gateway.usage */}
-      {activeTab === 'unity' && <UnityUsageSection />}
+      {/* Usage — system.ai_gateway.usage: filterable explorer, then window-level detail */}
+      {activeTab === 'unity' && (
+        <div className="space-y-6">
+          <UsageExplorerSection />
+          <UnityUsageSection />
+        </div>
+      )}
+
+      {/* Coding agents — session_metadata */}
+      {activeTab === 'coding' && <CodingAgentsTab />}
+
+      {/* Performance — per-model latency / TTFB / throughput, throttling, fallbacks */}
+      {activeTab === 'performance' && (
+        <div className="space-y-6">
+          <ModelPerformanceCard />
+          <ThrottlingCard />
+          <FallbackRoutingCard />
+        </div>
+      )}
 
       {/* Budgets — native account budgets (read-only), config + MTD spend vs cap */}
       {activeTab === 'budgets' && <BudgetsTab />}
@@ -1055,6 +1084,357 @@ function EndpointInventorySection() {
   )
 }
 
+/* ── Usage explorer (filterable: date range / workspace / service tag) ── */
+
+const isoDay = (d: Date) => d.toISOString().slice(0, 10)
+const fmtInt = (v: number | null | undefined) => (v === null || v === undefined ? '—' : Math.round(v).toLocaleString())
+const fmtCompact = (v: number | null | undefined) => {
+  if (v === null || v === undefined) return '—'
+  const a = Math.abs(v)
+  if (a >= 1e9) return `${(v / 1e9).toFixed(1)}B`
+  if (a >= 1e6) return `${(v / 1e6).toFixed(1)}M`
+  if (a >= 1e3) return `${(v / 1e3).toFixed(1)}K`
+  return String(Math.round(v))
+}
+const fmtUsd = (v: number | null | undefined) =>
+  v === null || v === undefined ? '—' : v >= 1000 ? `$${(v / 1000).toFixed(1)}k` : `$${v.toFixed(2)}`
+
+const EXPLORER_DIM_LABELS: Record<string, { title: string; labels?: Record<string, string> }> = {
+  service_type: { title: 'Service Type', labels: { MODEL_SERVICE: 'Model', MCP_SERVICE: 'MCP', MODEL_PROVIDER_SERVICE: 'Provider', '': 'Untyped' } },
+  destination_model: { title: 'Model' },
+  source: { title: 'Traffic Source', labels: { AI_QUERY: 'ai_query (SQL)', EXTERNAL_CLIENT: 'External client', DATABRICKS_APPS: 'Databricks Apps', GENIE_CODE: 'Genie Code', GENIE_ONE: 'Genie One', GUARDRAIL: 'Guardrail check', MANAGED_AGENT: 'Managed agent', AI_PLAYGROUND: 'Playground' } },
+  requester_type: { title: 'Requester Type' },
+  auth_mode: { title: 'Auth Method', labels: { PAT: 'Personal access token', OAUTH: 'OAuth', '': 'Not reported' } },
+  api_type: { title: 'API Type' },
+  workspace_id: { title: 'Workspace' },
+}
+
+function ExplorerBreakdown({ dim, rows }: { dim: string; rows: ExplorerBreakdownRow[] }) {
+  const meta = EXPLORER_DIM_LABELS[dim] || { title: dim }
+  const total = rows.reduce((t, r) => t + r.requests, 0)
+  return (
+    <Card>
+      <CardHeader><CardTitle className="text-sm">{meta.title}</CardTitle></CardHeader>
+      <CardContent className="space-y-1.5">
+        {rows.length === 0 && <div className="text-xs text-gray-400 dark:text-gray-500">No data</div>}
+        {rows.slice(0, 8).map((r) => {
+          const pct = total ? (r.requests / total) * 100 : 0
+          const label = meta.labels?.[r.key] ?? (r.key === '' ? 'Unknown' : r.key)
+          return (
+            <div key={r.key} className="text-xs">
+              <div className="flex justify-between gap-2">
+                <span className="truncate" title={r.key}>{label}</span>
+                <span className="tabular-nums text-gray-500 dark:text-gray-400">{fmtCompact(r.requests)} · {pct.toFixed(1)}%</span>
+              </div>
+              <div className="h-1.5 rounded bg-gray-100 dark:bg-gray-800 mt-0.5">
+                <div className="h-1.5 rounded bg-db-red/70" style={{ width: `${Math.max(pct, 1)}%` }} />
+              </div>
+            </div>
+          )
+        })}
+      </CardContent>
+    </Card>
+  )
+}
+
+function UsageExplorerSection() {
+  const today = new Date()
+  const [start, setStart] = useState(isoDay(new Date(today.getTime() - 7 * 864e5)))
+  const [end, setEnd] = useState(isoDay(today))
+  const [wsIds, setWsIds] = useState<string[]>([])
+  const [tagKey, setTagKey] = useState('')
+  const [tagValue, setTagValue] = useState('')
+  const { data, isLoading, isFetching } = useUsageExplorer({ start_date: start, end_date: end, workspace_ids: wsIds, tag_key: tagKey, tag_value: tagValue })
+  const { data: wsDir } = useWorkspaceDirectory()
+  const minDay = isoDay(new Date(today.getTime() - 30 * 864e5))
+  const t = data?.totals ?? {}
+  const tagKeys = data?.options.tag_keys ?? {}
+  const trend = (data?.trend ?? []).map((r) => ({ timestamp: r.usage_date, value: r.requests, errors: r.errors }))
+  const inputCls = 'text-xs border border-gray-300 dark:border-gray-600 rounded-md px-2.5 py-1.5 bg-white dark:bg-gray-800 dark:text-gray-200'
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            Usage Explorer
+            <span className="group relative inline-flex">
+              <Info className="w-3.5 h-3.5 text-gray-400 cursor-help" tabIndex={0} />
+              <span role="tooltip" className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 hidden w-80 rounded-lg border border-gray-200 bg-white p-3 text-left text-[11px] font-normal leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">
+                Daily Unity Gateway usage from <code>system.ai_gateway.usage</code> (last 30 days), filterable by date,
+                workspace and service tag. Workspace admins see only their own workspaces.
+              </span>
+            </span>
+            {isFetching && !isLoading && <span className="text-[10px] font-normal text-gray-400">updating…</span>}
+          </CardTitle>
+          <div className="flex flex-wrap items-center gap-2 pt-2">
+            <label className="text-xs text-gray-500 dark:text-gray-400">From</label>
+            <input type="date" className={inputCls} value={start} min={minDay} max={end} onChange={(e) => setStart(e.target.value)} />
+            <label className="text-xs text-gray-500 dark:text-gray-400">to</label>
+            <input type="date" className={inputCls} value={end} min={start} max={isoDay(today)} onChange={(e) => setEnd(e.target.value)} />
+            <WorkspaceSelect
+              multiple values={wsIds} onChangeMulti={setWsIds} allValue="" allLabel="All workspaces"
+              options={(data?.options.workspaces ?? []).map((id) => workspaceOption(id, wsDir))}
+              className={inputCls}
+            />
+            <select className={inputCls} value={tagKey} onChange={(e) => { setTagKey(e.target.value); setTagValue('') }}>
+              <option value="">Any service tag</option>
+              {Object.keys(tagKeys).sort().map((k) => <option key={k} value={k}>{k}</option>)}
+            </select>
+            {tagKey && (
+              <select className={inputCls} value={tagValue} onChange={(e) => setTagValue(e.target.value)}>
+                <option value="">Any value</option>
+                {(tagKeys[tagKey] || []).map((v) => <option key={v} value={v}>{v}</option>)}
+              </select>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="py-10 text-center text-gray-400 dark:text-gray-500">Loading…</div>
+          ) : !t.requests ? (
+            <div className="py-10 text-center text-gray-400 dark:text-gray-500">
+              No Unity Gateway traffic for these filters{data?.scoped ? ' in the workspaces you administer' : ''}.
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                <KpiCard title="Requests" value={fmtCompact(t.requests)} />
+                <KpiCard title="Error Rate" value={t.error_rate == null ? '—' : `${t.error_rate.toFixed(2)}%`} />
+                <KpiCard title="Rate-Limited (429)" value={fmtCompact(t.throttled)} />
+                <KpiCard title="Input Tokens" value={fmtCompact(t.input_tokens)} />
+                <KpiCard title="Output Tokens" value={fmtCompact(t.output_tokens)} />
+                <KpiCard title="Cached Share" value={t.cache_share == null ? '—' : `${t.cache_share}%`} />
+              </div>
+              <LineChart data={trend} name="Requests" series={{ errors: 'Errors' }} color={DB_CHART.primary} height={220} />
+            </div>
+          )}
+        </CardContent>
+      </Card>
+      {!!t.requests && (
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {Object.keys(EXPLORER_DIM_LABELS).map((dim) => (
+              <ExplorerBreakdown key={dim} dim={dim} rows={data?.breakdowns[dim] ?? []} />
+            ))}
+          </div>
+          <Card>
+            <CardHeader><CardTitle className="text-sm">Top Services</CardTitle></CardHeader>
+            <CardContent>
+              <table className="w-full text-sm">
+                <thead className="border-b dark:border-gray-700 text-left text-xs text-gray-500 dark:text-gray-400">
+                  <tr><th className="py-2 px-2">Service</th><th className="py-2 px-2">Type</th><th className="py-2 px-2 text-right">Requests</th><th className="py-2 px-2 text-right">Tokens</th><th className="py-2 px-2 text-right">Error %</th></tr>
+                </thead>
+                <tbody>
+                  {(data?.top_services ?? []).map((r) => (
+                    <tr key={r.service_name} className="border-b border-gray-100 dark:border-gray-700/50">
+                      <td className="py-1.5 px-2 font-mono text-xs truncate max-w-[340px]" title={r.service_name}>{r.service_name}</td>
+                      <td className="py-1.5 px-2 text-xs">{SERVICE_TYPE_LABEL[r.service_type || ''] || r.service_type || '—'}</td>
+                      <td className="py-1.5 px-2 text-right tabular-nums">{fmtInt(r.requests)}</td>
+                      <td className="py-1.5 px-2 text-right tabular-nums">{fmtCompact(r.tokens)}</td>
+                      <td className="py-1.5 px-2 text-right tabular-nums">{r.requests ? `${(r.errors * 100 / r.requests).toFixed(1)}%` : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+        </>
+      )}
+      <DailyActivityCard />
+      <div className="text-[11px] text-gray-400 dark:text-gray-500 px-1">
+        Below: all gateway traffic over the last 7 days (not affected by the filters above) — latency percentiles, routing and guardrail coverage.
+      </div>
+    </div>
+  )
+}
+
+function DailyActivityCard() {
+  const { data } = useDailyActivity()
+  if (!data || data.restricted || data.days.length === 0) return null
+  const series = data.days.map((d) => ({ timestamp: d.usage_date, value: d.active_users, mcp: d.mcp_users, coding: d.coding_users }))
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">Active Users (daily)</CardTitle>
+        <p className="text-[11px] text-gray-400 dark:text-gray-500">Distinct gateway users per day, and those using MCP services or coding agents (last 30 days, all workspaces).</p>
+      </CardHeader>
+      <CardContent>
+        <LineChart data={series} name="All users" series={{ mcp: 'MCP users', coding: 'Coding-agent users' }} color={DB_CHART.primary} height={220} />
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ── Coding agents (session_metadata) ──────────────────────────── */
+
+function CodingAgentsTab() {
+  const { data, isLoading } = useCodingSessions()
+  const { data: uag } = useUnityUsage()
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
+  const { sort, toggle } = useSort<string>('est_cost_usd', 'desc')
+  const sessions = data?.top_sessions ?? []
+  const sorted = useMemo(() => sortRows(sessions, sort, (r: CodingSessionRow, k) =>
+    typeof (r as any)[k] === 'number' ? (r as any)[k] : String((r as any)[k] || '').toLowerCase()), [sessions, sort])
+  if (isLoading) return <div className="py-12 text-center text-gray-400 dark:text-gray-500">Loading…</div>
+  if (data?.restricted) return <RestrictedNotice />
+  if (!data || data.by_harness.length === 0) {
+    return <Card><CardContent className="py-12 text-center text-gray-400 dark:text-gray-500">
+      No coding-agent sessions in the last 30 days. Sessions appear when coding agents (Claude Code, Codex, …) run through Unity Gateway, e.g. via the <code>ug</code> CLI.
+    </CardContent></Card>
+  }
+  const t = data.totals
+  const trendSessions = data.trend.map((r) => ({ timestamp: r.usage_date, value: r.sessions }))
+  const trendCost = data.trend.map((r) => ({ timestamp: r.usage_date, value: Math.round(r.est_cost_usd * 100) / 100 }))
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <KpiCard title="Session-days (30d)" value={fmtCompact(t.session_days)} />
+        <KpiCard title="Requests" value={fmtCompact(t.requests)} />
+        <KpiCard title="Est. Spend" value={fmtUsd(t.est_cost_usd)} />
+        <KpiCard title="Reasoning Tokens" value={fmtCompact(t.reasoning_tokens)} />
+        <KpiCard title="Harnesses" value={t.harnesses ?? 0} format="number" />
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card><CardHeader><CardTitle className="text-sm">Sessions per Day</CardTitle></CardHeader>
+          <CardContent><LineChart data={trendSessions} name="Sessions" color={DB_CHART.primary} height={220} /></CardContent></Card>
+        <Card><CardHeader><CardTitle className="text-sm">Estimated Spend per Day</CardTitle></CardHeader>
+          <CardContent><LineChart data={trendCost} name="Est. $" color={DB_CHART.success} height={220} valueFormatter={(v) => `$${v}`} /></CardContent></Card>
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <Card className="lg:col-span-2">
+          <CardHeader><CardTitle className="text-sm">By Harness &amp; Surface</CardTitle></CardHeader>
+          <CardContent>
+            <table className="w-full text-sm">
+              <thead className="border-b dark:border-gray-700 text-left text-xs text-gray-500 dark:text-gray-400">
+                <tr><th className="py-2 px-2">Harness</th><th className="py-2 px-2">Surface</th><th className="py-2 px-2 text-right">Session-days</th><th className="py-2 px-2 text-right">Peak users/day</th><th className="py-2 px-2 text-right">Requests</th><th className="py-2 px-2 text-right">Est. $</th></tr>
+              </thead>
+              <tbody>
+                {data.by_harness.slice(0, 15).map((h) => (
+                  <tr key={`${h.coding_agent}|${h.surface}`} className="border-b border-gray-100 dark:border-gray-700/50">
+                    <td className="py-1.5 px-2">{h.coding_agent}</td>
+                    <td className="py-1.5 px-2 text-xs text-gray-500 dark:text-gray-400 truncate max-w-[220px]" title={h.surface}>{h.surface}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtInt(h.session_days)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtInt(h.peak_daily_users)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtCompact(h.requests)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtUsd(h.est_cost_usd)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+        <UagBreakdownCard title="Reasoning Effort" subtitle="Coding-agent requests by reasoning effort (7d)" rows={uag?.breakdowns?.reasoning_effort} />
+      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm">Top Sessions by Estimated Spend</CardTitle>
+          <p className="text-[11px] text-gray-400 dark:text-gray-500">
+            Estimated = session tokens × a blended $/token per gateway endpoint from attributed billing (system.billing.usage). Top 200 sessions, last 30 days.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="border-b dark:border-gray-700">
+                <tr>
+                  <SortableHeader label="User" sortKey="requester" current={sort} onToggle={toggle} />
+                  <SortableHeader label="Harness" sortKey="coding_agent" current={sort} onToggle={toggle} />
+                  <th className="py-2 px-2 text-left text-xs text-gray-500 dark:text-gray-400">Models</th>
+                  <SortableHeader label="Requests" sortKey="requests" current={sort} onToggle={toggle} align="right" />
+                  <SortableHeader label="Subagents" sortKey="subagents" current={sort} onToggle={toggle} align="right" />
+                  <SortableHeader label="Tokens" sortKey="input_tokens" current={sort} onToggle={toggle} align="right" />
+                  <SortableHeader label="Est. $" sortKey="est_cost_usd" current={sort} onToggle={toggle} align="right" />
+                  <SortableHeader label="Last Seen" sortKey="last_seen" current={sort} onToggle={toggle} />
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.slice(page * pageSize, (page + 1) * pageSize).map((r) => (
+                  <tr key={r.session_id} className="border-b border-gray-100 dark:border-gray-700/50" title={`session ${r.session_id}${r.agent_version ? ` · v${r.agent_version}` : ''}${r.reasoning_effort ? ` · effort ${r.reasoning_effort}` : ''}`}>
+                    <td className="py-1.5 px-2 truncate max-w-[200px]" title={r.requester}>{r.requester}</td>
+                    <td className="py-1.5 px-2 text-xs">{r.coding_agent || '—'}<span className="text-gray-400"> · {r.surface || '—'}</span></td>
+                    <td className="py-1.5 px-2 text-xs text-gray-500 dark:text-gray-400 truncate max-w-[240px]" title={r.models}>{r.models || '—'}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtInt(r.requests)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtInt(r.subagents)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtCompact(r.input_tokens + r.output_tokens)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtUsd(r.est_cost_usd)}</td>
+                    <td className="py-1.5 px-2 text-xs text-gray-500 dark:text-gray-400">{r.last_seen ? formatAsOf(r.last_seen) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+/* ── Performance per model ─────────────────────────────────────── */
+
+function ModelPerformanceCard() {
+  const { data, isLoading } = useModelPerformance()
+  const { sort, toggle } = useSort<string>('requests', 'desc')
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(15)
+  const models = data?.models ?? []
+  const sorted = useMemo(() => sortRows(models, sort, (r: ModelPerformanceRow, k) =>
+    k === 'destination_model' ? r.destination_model.toLowerCase() : Number((r as any)[k] ?? -1)), [models, sort])
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2"><Gauge className="w-4 h-4 text-db-red" /> Model Performance</CardTitle>
+        <p className="text-[11px] text-gray-400 dark:text-gray-500">
+          Per destination model, last 7 days. TTFB and output tokens/sec are measured on streaming responses only
+          (non-streaming responses return everything at once, so throughput isn't meaningful there).
+        </p>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? <div className="py-10 text-center text-gray-400 dark:text-gray-500">Loading…</div>
+          : data?.restricted ? <RestrictedNotice />
+          : models.length === 0 ? <div className="py-10 text-center text-gray-400 dark:text-gray-500">No model traffic in the last 7 days.</div>
+          : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="border-b dark:border-gray-700">
+                    <tr>
+                      <SortableHeader label="Model" sortKey="destination_model" current={sort} onToggle={toggle} />
+                      <SortableHeader label="Requests" sortKey="requests" current={sort} onToggle={toggle} align="right" />
+                      <SortableHeader label="p50 / p95 latency" sortKey="p95_latency_ms" current={sort} onToggle={toggle} align="right" />
+                      <SortableHeader label="p50 / p95 TTFB" sortKey="p95_ttfb_ms" current={sort} onToggle={toggle} align="right" />
+                      <SortableHeader label="Output tok/s" sortKey="p50_output_tps" current={sort} onToggle={toggle} align="right" />
+                      <SortableHeader label="Cache read" sortKey="cache_read_share" current={sort} onToggle={toggle} align="right" />
+                      <SortableHeader label="Error %" sortKey="error_rate" current={sort} onToggle={toggle} align="right" />
+                      <SortableHeader label="429 %" sortKey="throttle_rate" current={sort} onToggle={toggle} align="right" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sorted.slice(page * pageSize, (page + 1) * pageSize).map((m) => (
+                      <tr key={m.destination_model} className="border-b border-gray-100 dark:border-gray-700/50">
+                        <td className="py-1.5 px-2 font-mono text-xs truncate max-w-[260px]" title={m.destination_model}>{m.destination_model}</td>
+                        <td className="py-1.5 px-2 text-right tabular-nums">{fmtCompact(m.requests)}</td>
+                        <td className="py-1.5 px-2 text-right tabular-nums text-xs">{fmtInt(m.p50_latency_ms)} / {fmtInt(m.p95_latency_ms)} ms</td>
+                        <td className="py-1.5 px-2 text-right tabular-nums text-xs">{m.streaming_requests ? `${fmtInt(m.p50_ttfb_ms)} / ${fmtInt(m.p95_ttfb_ms)} ms` : '—'}</td>
+                        <td className="py-1.5 px-2 text-right tabular-nums">{m.p50_output_tps == null ? '—' : m.p50_output_tps.toFixed(0)}</td>
+                        <td className="py-1.5 px-2 text-right tabular-nums">{m.cache_read_share == null ? '—' : `${m.cache_read_share}%`}</td>
+                        <td className={`py-1.5 px-2 text-right tabular-nums ${(m.error_rate ?? 0) >= 5 ? 'text-red-600 dark:text-red-400' : ''}`}>{m.error_rate == null ? '—' : `${m.error_rate.toFixed(1)}%`}</td>
+                        <td className={`py-1.5 px-2 text-right tabular-nums ${(m.throttle_rate ?? 0) > 0 ? 'text-amber-600 dark:text-amber-400' : ''}`}>{m.throttle_rate == null ? '—' : `${m.throttle_rate.toFixed(1)}%`}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+            </>
+          )}
+      </CardContent>
+    </Card>
+  )
+}
+
 /* ── Unity Gateway Section ───────────────────────── */
 
 function UnityUsageSection() {
@@ -1212,14 +1592,22 @@ function UnityUsageSection() {
             rows={uag.breakdowns.workspace_id}
             limit={8}
           />
+          <UagBreakdownCard
+            title="Auth Method"
+            subtitle="PAT vs OAuth — PATs are long-lived credentials"
+            rows={uag.breakdowns.auth_mode}
+            labelMap={{ PAT: 'Personal access token', OAUTH: 'OAuth', unknown: 'Not reported' }}
+          />
+          <UagBreakdownCard
+            title="MCP Methods"
+            subtitle="tools/call vs tools/list vs initialize"
+            rows={uag.breakdowns.mcp_method}
+          />
         </div>
       )}
 
-      <CodingAgentsCard />
       <UagMcpToolsCard />
       <GuardrailCoverageCard />
-      <ThrottlingCard />
-      <FallbackRoutingCard />
     </div>
   )
 }
@@ -1245,55 +1633,6 @@ function UnityTrendCard() {
         <CardContent><LineChart data={tokenData} name="Total Tokens" color={DB_CHART.success} /></CardContent>
       </Card>
     </div>
-  )
-}
-
-/* Coding-agent activity (uag_coding_agent_usage) — Claude Code / Codex / Cursor /
- * Gemini CLI classified from user_agent. Activity only (no sessions/commits/LOC —
- * not in the usage table). Hidden when no coding-agent traffic. */
-function CodingAgentsCard() {
-  const { data, isLoading } = useUagCodingAgents()
-  const sort = useSort('request_count', 'desc')
-  const agents = data?.agents || []
-  const sorted = useMemo(() => sortRows(agents, sort.sort, (a: any, k) =>
-    k === 'coding_agent' ? (a.coding_agent || '').toLowerCase() : Number(a[k] || 0)
-  ), [agents, sort.sort])
-  if (isLoading || agents.length === 0) return null
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">Coding Agents</CardTitle>
-        <p className="text-[11px] text-gray-400 dark:text-gray-500">
-          Activity by coding agent (classified from client user-agent). Requests / users / active days / tokens —
-          sessions &amp; commits aren't in the gateway usage table.
-          {data?.as_of && <> · as of {formatAsOf(data.as_of)}</>}
-        </p>
-      </CardHeader>
-      <CardContent>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700">
-              <SortableHeader label="Coding Agent" sortKey="coding_agent" current={sort.sort} onToggle={sort.toggle} />
-              <SortableHeader label="Requests" sortKey="request_count" current={sort.sort} onToggle={sort.toggle} align="right" />
-              <SortableHeader label="Users" sortKey="unique_users" current={sort.sort} onToggle={sort.toggle} align="right" />
-              <SortableHeader label="Active Days" sortKey="active_days" current={sort.sort} onToggle={sort.toggle} align="right" />
-              <SortableHeader label="Tokens" sortKey="total_tokens" current={sort.sort} onToggle={sort.toggle} align="right" />
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.map((a: any) => (
-              <tr key={a.coding_agent} className="border-b border-gray-50 dark:border-gray-800 last:border-0">
-                <td className="py-1.5 font-medium">{a.coding_agent}</td>
-                <td className="py-1.5 text-right tabular-nums">{a.request_count.toLocaleString()}</td>
-                <td className="py-1.5 text-right tabular-nums">{a.unique_users.toLocaleString()}</td>
-                <td className="py-1.5 text-right tabular-nums">{a.active_days.toLocaleString()}</td>
-                <td className="py-1.5 text-right tabular-nums">{a.total_tokens.toLocaleString()}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </CardContent>
-    </Card>
   )
 }
 

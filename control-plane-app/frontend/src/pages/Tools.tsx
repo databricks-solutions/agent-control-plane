@@ -6,6 +6,8 @@ import {
   useUcFunctions,
   useToolUsage,
   useSyncTools,
+  useGatewaySkills,
+  type SkillUsageRow,
 } from '@/api/hooks'
 import { RefreshButton } from '@/components/RefreshButton'
 import { SortableHeader, useSort, sortRows } from '@/components/SortableTable'
@@ -22,9 +24,10 @@ import {
   Search,
   LayoutDashboard,
   Info,
+  Sparkles,
 } from 'lucide-react'
 
-type TabKey = 'overview' | 'mcp' | 'functions' | 'usage'
+type TabKey = 'overview' | 'mcp' | 'functions' | 'skills' | 'usage'
 
 export default function ToolsPage() {
   const [tab, setTab] = useState<TabKey>('overview')
@@ -97,6 +100,7 @@ export default function ToolsPage() {
     { key: 'overview',   label: 'Overview',     icon: LayoutDashboard },
     { key: 'mcp',        label: 'MCP Servers',   icon: Server },
     { key: 'functions',  label: 'UC Functions',  icon: Code2 },
+    { key: 'skills',     label: 'Skills',        icon: Sparkles },
     { key: 'usage',      label: 'Usage',         icon: Zap },
   ]
 
@@ -430,6 +434,8 @@ export default function ToolsPage() {
       })()}
 
       {/* TAB: Usage */}
+      {tab === 'skills' && <SkillsSection query={q} />}
+
       {tab === 'usage' && (() => {
         const sorted = sortRows(filteredUsage, usageSort.sort, (r: any, k) => {
           if (k === 'tool_name') return (r.tool_name || '').toLowerCase()
@@ -506,7 +512,7 @@ export default function ToolsPage() {
   )
 }
 
-/* MCP usage via Unity Gateway v2 (uag_mcp_tool_daily). Server-grouped, with a
+/* MCP usage via Unity Gateway (uag_mcp_tool_daily). Server-grouped, with a
  * managed (system.ai.*) vs UC-registered split — a distinct namespace from the
  * connection inventory below, so it's shown as its own panel. Hidden when no MCP
  * traffic has routed through the gateway. */
@@ -614,5 +620,84 @@ function McpUsageSection({ query }: { query: string }) {
         <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
       </CardContent>
     </Card>
+  )
+}
+
+/* Skills (Unity Gateway): loads / bundle fetches / adopting users from the audit log
+ * (service aiGatewaySkills). Skills are UC securables used by coding agents. */
+function SkillsSection({ query }: { query: string }) {
+  const { data, isLoading } = useGatewaySkills()
+  const { sort, toggle } = useSort<string>('loads', 'desc')
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(10)
+  const skills = (data?.skills ?? []).filter((s) => !query || s.skill_name.toLowerCase().includes(query))
+  const sorted = useMemo(() => sortRows(skills, sort, (r: SkillUsageRow, k) =>
+    k === 'skill_name' || k === 'last_used' ? String((r as any)[k] || '').toLowerCase() : Number((r as any)[k] ?? 0)), [skills, sort])
+  if (isLoading) return <div className="py-12 text-center text-gray-400 dark:text-gray-500">Loading…</div>
+  if (data?.restricted) {
+    return <Card><CardContent className="py-12 text-center text-gray-400 dark:text-gray-500">
+      Skill activity is account-wide, so it's only shown to account admins.
+    </CardContent></Card>
+  }
+  const all = data?.skills ?? []
+  if (all.length === 0) {
+    return <Card><CardContent className="py-12 text-center text-gray-400 dark:text-gray-500">
+      No skill loads in the last 30 days. Skills are Unity Catalog securables that coding agents load through Unity Gateway.
+    </CardContent></Card>
+  }
+  const users = data?.users ?? []
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <KpiCard title="Skills Used (30d)" value={all.length} format="number" />
+        <KpiCard title="Loads" value={all.reduce((t, s) => t + Number(s.loads || 0), 0)} format="number" />
+        <KpiCard title="Bundle Fetches" value={all.reduce((t, s) => t + Number(s.bundle_fetches || 0), 0)} format="number" />
+        <KpiCard title="Adopting Users" value={users.length} format="number" />
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle className="text-base">Skills by Adoption</CardTitle>
+            <p className="text-[11px] text-gray-400 dark:text-gray-500">From the audit log (service <code>aiGatewaySkills</code>), last 30 days.</p>
+          </CardHeader>
+          <CardContent>
+            <table className="w-full text-sm">
+              <thead className="border-b dark:border-gray-700">
+                <tr>
+                  <SortableHeader label="Skill" sortKey="skill_name" current={sort} onToggle={toggle} />
+                  <SortableHeader label="Loads" sortKey="loads" current={sort} onToggle={toggle} align="right" />
+                  <SortableHeader label="Bundle Fetches" sortKey="bundle_fetches" current={sort} onToggle={toggle} align="right" />
+                  <SortableHeader label="Users" sortKey="users" current={sort} onToggle={toggle} align="right" />
+                  <SortableHeader label="Last Used" sortKey="last_used" current={sort} onToggle={toggle} />
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.slice(page * pageSize, (page + 1) * pageSize).map((r) => (
+                  <tr key={r.skill_name} className="border-b border-gray-100 dark:border-gray-700/50">
+                    <td className="py-2 font-mono text-xs truncate max-w-[340px]" title={r.skill_name}>{r.skill_name}</td>
+                    <td className="py-2 text-right tabular-nums">{r.loads}</td>
+                    <td className="py-2 text-right tabular-nums">{r.bundle_fetches}</td>
+                    <td className="py-2 text-right tabular-nums">{r.users}</td>
+                    <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{r.last_used ? formatAsOf(r.last_used) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <TablePagination page={page} totalItems={sorted.length} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader><CardTitle className="text-base">Activity by User</CardTitle></CardHeader>
+          <CardContent className="space-y-1.5">
+            {users.slice(0, 15).map((u) => (
+              <div key={u.user_name} className="flex justify-between gap-2 text-sm">
+                <span className="truncate" title={u.user_name}>{u.user_name}</span>
+                <span className="tabular-nums text-gray-500 dark:text-gray-400">{u.loads} loads · {u.skills} skill{u.skills === 1 ? '' : 's'}</span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
   )
 }
