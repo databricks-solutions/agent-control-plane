@@ -1260,7 +1260,7 @@ function VectorSearchTab({ days, setDays, selectedWsIds }: { days: number; setDa
                     <th className="pb-2 pr-4 font-medium">Source Table</th>
                     <th className="pb-2 pr-4 font-medium">Embedding Model</th>
                     <th className="pb-2 pr-4 font-medium">Pipeline</th>
-                    <th className="pb-2 font-medium"><span className="sr-only">Access</span></th>
+                    <th className="pb-2 font-medium">Access</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
@@ -1585,18 +1585,20 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
                     <th className="pb-2 pr-4 font-medium">State</th>
                     <th className="pb-2 pr-4 font-medium">Capacity</th>
                     <th className="pb-2 pr-4 font-medium">PG Version</th>
-                    <th className="pb-2 font-medium"><span className="sr-only">Access</span></th>
+                    <th className="pb-2 font-medium">Access</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
                   {safeInstances.map((inst: any, i: number) => {
                     const state = (inst.state || inst.status || 'UNKNOWN').toUpperCase()
                     const isAvailable = state === 'AVAILABLE' || state === 'RUNNING' || state === 'ACTIVE'
-                    const open = !!inst.name && lbAccess === inst.name
+                    // The synced lakebase_instances table names the column instance_name.
+                    const lbName: string = inst.instance_name || inst.name || ''
+                    const open = !!lbName && lbAccess === lbName
                     return (
-                      <Fragment key={inst.name || i}>
+                      <Fragment key={lbName || i}>
                       <tr className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
-                        <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100">{inst.name || '\u2014'}</td>
+                        <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100">{lbName || '\u2014'}</td>
                         <td className="py-2 pr-4">
                           <Badge
                             variant={isAvailable ? 'success' : 'error'}
@@ -1608,11 +1610,11 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
                         <td className="py-2 pr-4 text-gray-700 dark:text-gray-300">{inst.capacity || inst.size || '\u2014'}</td>
                         <td className="py-2 pr-4 text-gray-700 dark:text-gray-300">{inst.pg_version || inst.engine_version || '\u2014'}</td>
                         <td className="py-2 text-right">
-                          {inst.name && (
+                          {lbName && (
                             <button
                               type="button"
                               aria-expanded={open}
-                              onClick={() => setLbAccess(open ? null : inst.name)}
+                              onClick={() => setLbAccess(open ? null : lbName)}
                               className="text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400"
                             >
                               {open ? 'Hide access' : 'Access'}
@@ -1622,7 +1624,7 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
                       </tr>
                       {open && (
                         <tr className="bg-gray-50 dark:bg-gray-800/50">
-                          <td colSpan={5} className="px-4 py-3"><AccessPanel kind="lakebase" name={inst.name} /></td>
+                          <td colSpan={5} className="px-4 py-3"><AccessPanel kind="lakebase" name={lbName} /></td>
                         </tr>
                       )}
                       </Fragment>

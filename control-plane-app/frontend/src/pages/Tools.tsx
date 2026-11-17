@@ -405,7 +405,7 @@ export default function ToolsPage() {
                           <SortableHeader label="Schema" sortKey="schema" current={fnSort.sort} onToggle={fnSort.toggle} />
                           <SortableHeader label="Type" sortKey="type" current={fnSort.sort} onToggle={fnSort.toggle} />
                           <SortableHeader label="Description" sortKey="description" current={fnSort.sort} onToggle={fnSort.toggle} />
-                          <th className="py-2 font-medium"><span className="sr-only">Access</span></th>
+                          <th className="py-2 font-medium">Access</th>
                         </tr>
                       </thead>
                       <tbody>
