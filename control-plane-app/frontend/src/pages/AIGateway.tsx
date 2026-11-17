@@ -29,9 +29,8 @@ import {
   fetchBudgetRaw,
   type BudgetWritePayload,
   useGatewayServices,
-  useServiceGrants,
   type GatewayService,
-  type GatewayServiceType,
+  type GrantKind,
   useAppConfig,
   useRefreshGateway,
   useCurrentUser,
@@ -57,6 +56,7 @@ import { TablePagination } from '@/components/TablePagination'
 import { LineChart } from '@/components/charts/LineChart'
 import { BarChart } from '@/components/charts/BarChart'
 import { PrincipalAutocomplete } from '@/components/PrincipalAutocomplete'
+import { AccessPanel } from '@/components/AccessPanel'
 import { DB_CHART } from '@/lib/brand'
 import { format } from 'date-fns'
 import {
@@ -782,24 +782,6 @@ function fmtRateLimit(rl: { key?: string; principal?: string; renewal_period?: s
   return `${scope}: ${blocked ? 'blocked (0)' : `${parts.join(', ')}/${per}`}`
 }
 
-function ServiceGrants({ fullName, serviceType }: { fullName: string; serviceType: GatewayServiceType | null }) {
-  const { data, isLoading } = useServiceGrants(fullName, serviceType)
-  const grants = data?.grants ?? []
-  if (isLoading) return <div className="text-xs text-gray-400 dark:text-gray-500">Loading grants…</div>
-  return (
-    <div className="space-y-1">
-      {data?.error && <div className="text-xs text-amber-600 dark:text-amber-400">{data.error}</div>}
-      {!data?.error && grants.length === 0 && <div className="text-xs text-gray-400 dark:text-gray-500">No direct grants</div>}
-      {grants.map((g) => (
-        <div key={g.principal} className="flex items-center gap-2 text-xs">
-          <span className="font-mono truncate max-w-[260px]" title={g.principal}>{g.principal}</span>
-          {g.privileges.map((p) => <Badge key={p} variant="info" className="text-[10px]">{p}</Badge>)}
-        </div>
-      ))}
-    </div>
-  )
-}
-
 function ServiceDetail({ s }: { s: GatewayService }) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-4 px-4 py-3 text-xs">
@@ -823,8 +805,10 @@ function ServiceDetail({ s }: { s: GatewayService }) {
           : s.rate_limits.map((rl, i) => <div key={i}>{fmtRateLimit(rl)}</div>)}
       </div>
       <div className="space-y-1.5">
-        <div className="font-medium text-gray-700 dark:text-gray-300">UC grants</div>
-        {s.in_inventory ? <ServiceGrants fullName={s.full_name} serviceType={s.service_type} /> : <div className="text-gray-400 dark:text-gray-500">—</div>}
+        <div className="font-medium text-gray-700 dark:text-gray-300">Access</div>
+        {s.in_inventory && s.service_type
+          ? <AccessPanel kind={s.service_type.toLowerCase() as GrantKind} name={s.full_name} />
+          : <div className="text-gray-400 dark:text-gray-500">—</div>}
       </div>
     </div>
   )

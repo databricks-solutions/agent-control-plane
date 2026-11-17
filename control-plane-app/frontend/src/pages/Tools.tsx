@@ -10,6 +10,7 @@ import {
   type SkillUsageRow,
 } from '@/api/hooks'
 import { RefreshButton } from '@/components/RefreshButton'
+import { AccessPanel } from '@/components/AccessPanel'
 import { SortableHeader, useSort, sortRows } from '@/components/SortableTable'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -38,6 +39,7 @@ export default function ToolsPage() {
   const [mcpPageSize, setMcpPageSize] = useState(10)
   const [fnPage, setFnPage] = useState(0)
   const [fnPageSize, setFnPageSize] = useState(10)
+  const [fnAccess, setFnAccess] = useState<string | null>(null)
   const [usagePage, setUsagePage] = useState(0)
   const [usagePageSize, setUsagePageSize] = useState(10)
 
@@ -403,11 +405,16 @@ export default function ToolsPage() {
                           <SortableHeader label="Schema" sortKey="schema" current={fnSort.sort} onToggle={fnSort.toggle} />
                           <SortableHeader label="Type" sortKey="type" current={fnSort.sort} onToggle={fnSort.toggle} />
                           <SortableHeader label="Description" sortKey="description" current={fnSort.sort} onToggle={fnSort.toggle} />
+                          <th className="py-2 font-medium"><span className="sr-only">Access</span></th>
                         </tr>
                       </thead>
                       <tbody>
-                        {pagedFn.map((fn: any) => (
-                          <tr key={fn.tool_id} className="border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                        {pagedFn.map((fn: any) => {
+                          const fullName = `${fn.catalog_name}.${fn.schema_name}.${fn.name}`
+                          const open = fnAccess === fullName
+                          return (
+                          <Fragment key={fn.tool_id}>
+                          <tr className="border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800/50">
                             <td className="py-2.5">
                               <div className="flex items-center gap-2">
                                 <Code2 className="w-4 h-4 text-purple-500" />
@@ -420,8 +427,25 @@ export default function ToolsPage() {
                               <Badge variant="default" className="text-xs">{fn.sub_type || 'FUNCTION'}</Badge>
                             </td>
                             <td className="py-2.5 text-xs text-gray-500 dark:text-gray-400 max-w-xs truncate">{fn.description || '—'}</td>
+                            <td className="py-2.5 text-right">
+                              <button
+                                type="button"
+                                aria-expanded={open}
+                                onClick={() => setFnAccess(open ? null : fullName)}
+                                className="text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400"
+                              >
+                                {open ? 'Hide access' : 'Access'}
+                              </button>
+                            </td>
                           </tr>
-                        ))}
+                          {open && (
+                            <tr className="border-b border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
+                              <td colSpan={6} className="px-4 py-3"><AccessPanel kind="function" name={fullName} /></td>
+                            </tr>
+                          )}
+                          </Fragment>
+                          )
+                        })}
                       </tbody>
                     </table>
                   </div>

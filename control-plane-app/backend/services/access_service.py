@@ -377,6 +377,8 @@ def search_principals(
                             "id": sp.id or "",
                             "type": "service_principal",
                             "email": None,
+                            # UC grants and workspace ACLs address SPs by application id.
+                            "application_id": sp.application_id or "",
                         })
                         if len(results) >= limit:
                             break

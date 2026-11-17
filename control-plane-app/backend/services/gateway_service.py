@@ -1288,21 +1288,13 @@ _UC_FULL_NAME = re.compile(r"^[\w\-]+\.[\w\-]+\.[\w\-.]+$")
 
 
 def get_service_grants(full_name: str, service_type: str = "MODEL_SERVICE", user_token: str = "") -> Dict[str, Any]:
-    """UC grants on one Unity Gateway service (model / MCP / provider / agent)."""
-    securable = _SERVICE_SECURABLE.get((service_type or "").upper())
-    if not securable:
+    """UC grants on one Unity Gateway service (model / MCP / provider / agent),
+    read as the caller. See ``grants_service``."""
+    from backend.services import grants_service
+    kind = (service_type or "").lower()
+    if kind not in _SERVICE_SECURABLE.values():
         return {"grants": [], "error": f"unknown service type {service_type!r}"}
-    if not _UC_FULL_NAME.match(full_name or ""):
-        return {"grants": [], "error": "invalid service name"}
-    body = _uc_get_json(f"/api/2.1/unity-catalog/permissions/{securable}/{full_name}", user_token)
-    if body is None:
-        return {"grants": [], "error": "grants not readable (insufficient privileges)"}
-    return {
-        "grants": [
-            {"principal": pa.get("principal", ""), "privileges": pa.get("privileges", [])}
-            for pa in body.get("privilege_assignments", [])
-        ]
-    }
+    return grants_service.get_grants(kind, full_name, user_token)
 
 
 def get_gateway_services(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -1429,28 +1421,11 @@ def set_model_service_grant(
     full_name: str, principal: str, add: Optional[List[str]] = None,
     remove: Optional[List[str]] = None, user_token: str = "",
 ) -> Dict[str, Any]:
-    """Add/remove UC privileges for a principal on a model service. Prefers the
-    caller's OBO token (UC-enforced), but Apps OBO can't carry the required
-    `unity-catalog` scope today, so it falls back to the app SP (which has MANAGE).
-    The route gates this on require_admin; when the SP path is used the authorization
-    boundary is that admin gate, not per-user UC enforcement, and the write is
-    SP-attributed. NOTE: currently dormant — the UI is read-only (see
-    ideas/model-services-write-path.md for the planned user-MANAGE-checked design)."""
-    body = {"changes": [{"principal": principal, "add": add or [], "remove": remove or []}]}
-    path = f"/api/2.1/unity-catalog/permissions/model_service/{full_name}"
-    # OBO can't carry the `unity-catalog` scope (not grantable to Apps OBO), so fall
-    # back to the app SP — same pattern as v1 local permission writes. The route gates
-    # this on require_admin; UC still enforces the SP has MANAGE on the securable.
-    last = "no attempt"
-    for tok in ([user_token, ""] if user_token else [""]):
-        try:
-            resp = _uc_call("PATCH", path, tok, json_body=body)
-            if resp.status_code == 200:
-                return {"ok": True, "via": "obo" if tok else "sp"}
-            last = f"{resp.status_code}: {resp.text[:220]}"
-        except Exception as exc:
-            last = str(exc)[:220]
-    return {"ok": False, "error": last}
+    """Add/remove UC privileges for a principal on a model service — as the caller
+    when ``user_token`` is set (SQL GRANT/REVOKE, UC-enforced), else as the app SP.
+    See ``grants_service``."""
+    from backend.services import grants_service
+    return grants_service.update_grants("model_service", full_name, principal, add, remove, user_token)
 
 
 def get_uag_mcp_tools(allowed_workspace_ids: Optional[List[str]] = None) -> Dict[str, Any]:

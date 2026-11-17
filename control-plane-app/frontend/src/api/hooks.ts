@@ -1036,6 +1036,52 @@ export function useSetModelServiceGrant() {
   })
 }
 
+// ── Access management (/grants) — read and changed as the signed-in user ──────
+
+/** Object kinds the Access panel manages. UC kinds go through SQL GRANT/REVOKE;
+ *  workspace kinds through the Permissions API (app's own workspace only). */
+export type GrantKind =
+  | 'model_service' | 'mcp_service' | 'model_provider_service' | 'agent_service' | 'skill'
+  | 'catalog' | 'schema' | 'table' | 'volume' | 'function' | 'connection'
+  | 'app' | 'genie_space' | 'vector_search_endpoint' | 'lakebase'
+
+export interface ObjectGrant {
+  principal: string
+  privileges: string[]                                   // direct — revocable here
+  inherited: Array<{ privilege: string; from: string }>  // from a parent object
+}
+
+export interface ObjectGrants {
+  kind: GrantKind
+  name: string
+  writable?: boolean
+  privileges?: string[]   // suggested privileges / permission levels for this kind
+  via?: 'user' | 'app'
+  grants: ObjectGrant[]
+  error?: string
+  notice?: string  // e.g. read-only because the SQL warehouse can't be used
+}
+
+export function useGrants(kind: GrantKind, name: string | null) {
+  return useQuery({
+    queryKey: ['grants', kind, name],
+    enabled: !!name,
+    queryFn: async () => (await apiClient.get('/grants', { params: { kind, name } })).data as ObjectGrants,
+    staleTime: 30_000,
+  })
+}
+
+export function useUpdateGrants() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (body: { kind: GrantKind; name: string; principal: string; add?: string[]; remove?: string[] }) =>
+      (await apiClient.post('/grants', body)).data as { ok: boolean; via: 'user' | 'app'; error?: string },
+    onSuccess: (_d, vars) => {
+      qc.invalidateQueries({ queryKey: ['grants', vars.kind, vars.name] })
+    },
+  })
+}
+
 /** Per-tool MCP activity from system.ai_gateway.usage (service_type = MCP_SERVICE). */
 export function useUagMcpTools() {
   return useQuery({
@@ -1393,6 +1439,7 @@ export function useSearchPrincipals(query: string, type?: string) {
         id: string
         type: 'user' | 'group' | 'service_principal'
         email?: string
+        application_id?: string
       }>
     },
     enabled: query.length >= 2,

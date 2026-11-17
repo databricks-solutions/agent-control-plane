@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge'
 interface PrincipalAutocompleteProps {
   value: string
   onChange: (value: string) => void
-  onSelect?: (principal: { display_name: string; id: string; type: string; email?: string }) => void
+  onSelect?: (principal: { display_name: string; id: string; type: string; email?: string; application_id?: string }) => void
   principalType?: string  // filter to specific type
   placeholder?: string
   className?: string
@@ -46,8 +46,11 @@ export function PrincipalAutocomplete({
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
-  const handleSelect = useCallback((principal: { display_name: string; id: string; type: string; email?: string }) => {
-    const displayValue = principal.email || principal.display_name
+  const handleSelect = useCallback((principal: { display_name: string; id: string; type: string; email?: string; application_id?: string }) => {
+    // Grants and ACLs address users by email and service principals by application id.
+    const displayValue = principal.email
+      || (principal.type === 'service_principal' && principal.application_id)
+      || principal.display_name
     onChange(displayValue)
     onSelect?.(principal)
     setIsOpen(false)

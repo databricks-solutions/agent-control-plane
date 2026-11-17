@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Access panels — manage who can use an object, as yourself.** Unity Gateway
+  services (model, MCP, model-provider), UC functions, Vector Search indexes and
+  endpoints, Lakebase, Genie spaces and apps now show their grants, and you can
+  grant or revoke from the app. Changes run with your own sign-in, so the platform
+  checks your privileges (MANAGE or ownership) and the audit log shows you — object
+  owners don't need to be workspace admins. Unity Catalog grants go through SQL
+  `GRANT` / `REVOKE` (Databricks Apps can't request the scope the UC permissions
+  API needs), which requires `CAN_USE` on the app's SQL warehouse. Inherited grants
+  are shown for context. Agent services and skills are read-only for now: they
+  have no SQL grant syntax yet. Workspace objects can only be managed in the app's
+  own workspace.
+
+### Fixed
+- Picking a service principal in a principal search now fills in its application
+  id, which grants and permission lists require, instead of its display name.
+
 ## [0.1.4] - 2026-10-29
 
 **Unity Gateway first.** This release reorganizes the app around Unity Gateway (UC

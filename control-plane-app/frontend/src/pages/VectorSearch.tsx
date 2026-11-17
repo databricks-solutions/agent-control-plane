@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, Fragment } from 'react'
 import { useQueryClient, useIsFetching } from '@tanstack/react-query'
 import {
   useVectorSearchOverview,
@@ -33,6 +33,7 @@ import {
 } from '@/api/hooks'
 import { apiClient } from '@/api/client'
 import { RefreshButton } from '@/components/RefreshButton'
+import { AccessPanel } from '@/components/AccessPanel'
 import { WorkspaceSelect, workspaceOption } from '@/components/WorkspaceSelect'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -968,6 +969,7 @@ function VectorSearchTab({ days, setDays, selectedWsIds }: { days: number; setDa
   const { data: indexDetails, isLoading: idxLoading } = useVectorSearchIndexDetails()
   const { data: healthHistory } = useVectorSearchHealthHistory(days)
   const { data: vsTopWsDaily } = useVSTopWorkspacesDaily(days)
+  const [indexAccess, setIndexAccess] = useState<string | null>(null)
 
   const [sortCol, setSortCol] = useState<string>('total_cost_usd')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
@@ -1257,12 +1259,17 @@ function VectorSearchTab({ days, setDays, selectedWsIds }: { days: number; setDa
                     <th className="pb-2 pr-4 font-medium text-right">Rows</th>
                     <th className="pb-2 pr-4 font-medium">Source Table</th>
                     <th className="pb-2 pr-4 font-medium">Embedding Model</th>
-                    <th className="pb-2 font-medium">Pipeline</th>
+                    <th className="pb-2 pr-4 font-medium">Pipeline</th>
+                    <th className="pb-2 font-medium"><span className="sr-only">Access</span></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                  {safeIndexDetails.map((idx: any) => (
-                    <tr key={`${idx.endpoint_name}-${idx.index_name}`} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                  {safeIndexDetails.map((idx: any) => {
+                    const rowKey = `${idx.endpoint_name}-${idx.index_name}`
+                    const open = indexAccess === rowKey
+                    return (
+                    <Fragment key={rowKey}>
+                    <tr className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
                       <td className="py-2 pr-4">
                         <div className="font-medium text-gray-900 dark:text-gray-100 text-xs truncate max-w-[200px]" title={idx.index_name}>
                           {idx.index_name?.split('.').pop() || idx.index_name}
@@ -1283,11 +1290,39 @@ function VectorSearchTab({ days, setDays, selectedWsIds }: { days: number; setDa
                       <td className="py-2 pr-4 text-xs text-gray-500">
                         {idx.embedding_model || '\u2014'}
                       </td>
-                      <td className="py-2 text-xs text-gray-500">
+                      <td className="py-2 pr-4 text-xs text-gray-500">
                         {idx.pipeline_type || '\u2014'}
                       </td>
+                      <td className="py-2 text-right">
+                        <button
+                          type="button"
+                          aria-expanded={open}
+                          onClick={() => setIndexAccess(open ? null : rowKey)}
+                          className="text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400"
+                        >
+                          {open ? 'Hide access' : 'Access'}
+                        </button>
+                      </td>
                     </tr>
-                  ))}
+                    {open && (
+                      <tr className="bg-gray-50 dark:bg-gray-800/50">
+                        <td colSpan={7} className="px-4 py-3">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div className="space-y-1.5">
+                              <div className="text-xs font-medium text-gray-700 dark:text-gray-300">Index <span className="font-normal text-gray-400">(query access, Unity Catalog)</span></div>
+                              {idx.index_name ? <AccessPanel kind="table" name={idx.index_name} /> : <div className="text-xs text-gray-400">—</div>}
+                            </div>
+                            <div className="space-y-1.5">
+                              <div className="text-xs font-medium text-gray-700 dark:text-gray-300">Endpoint <span className="font-normal text-gray-400">{idx.endpoint_name}</span></div>
+                              {idx.endpoint_name ? <AccessPanel kind="vector_search_endpoint" name={idx.endpoint_name} /> : <div className="text-xs text-gray-400">—</div>}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1351,6 +1386,7 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
   const { data: costByWorkspace, isLoading: wsByWsLoading } = useLakebaseCostByWorkspace(days)
   const { data: costByType } = useLakebaseCostByType(days)
   const { data: lbTopWsDaily } = useLBTopWorkspacesDaily(days)
+  const [lbAccess, setLbAccess] = useState<string | null>(null)
 
   const [sortCol, setSortCol] = useState<string>('total_cost_usd')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
@@ -1548,15 +1584,18 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
                     <th className="pb-2 pr-4 font-medium">Name</th>
                     <th className="pb-2 pr-4 font-medium">State</th>
                     <th className="pb-2 pr-4 font-medium">Capacity</th>
-                    <th className="pb-2 font-medium">PG Version</th>
+                    <th className="pb-2 pr-4 font-medium">PG Version</th>
+                    <th className="pb-2 font-medium"><span className="sr-only">Access</span></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
                   {safeInstances.map((inst: any, i: number) => {
                     const state = (inst.state || inst.status || 'UNKNOWN').toUpperCase()
                     const isAvailable = state === 'AVAILABLE' || state === 'RUNNING' || state === 'ACTIVE'
+                    const open = !!inst.name && lbAccess === inst.name
                     return (
-                      <tr key={inst.name || i} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                      <Fragment key={inst.name || i}>
+                      <tr className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
                         <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100">{inst.name || '\u2014'}</td>
                         <td className="py-2 pr-4">
                           <Badge
@@ -1567,8 +1606,26 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
                           </Badge>
                         </td>
                         <td className="py-2 pr-4 text-gray-700 dark:text-gray-300">{inst.capacity || inst.size || '\u2014'}</td>
-                        <td className="py-2 text-gray-700 dark:text-gray-300">{inst.pg_version || inst.engine_version || '\u2014'}</td>
+                        <td className="py-2 pr-4 text-gray-700 dark:text-gray-300">{inst.pg_version || inst.engine_version || '\u2014'}</td>
+                        <td className="py-2 text-right">
+                          {inst.name && (
+                            <button
+                              type="button"
+                              aria-expanded={open}
+                              onClick={() => setLbAccess(open ? null : inst.name)}
+                              className="text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400"
+                            >
+                              {open ? 'Hide access' : 'Access'}
+                            </button>
+                          )}
+                        </td>
                       </tr>
+                      {open && (
+                        <tr className="bg-gray-50 dark:bg-gray-800/50">
+                          <td colSpan={5} className="px-4 py-3"><AccessPanel kind="lakebase" name={inst.name} /></td>
+                        </tr>
+                      )}
+                      </Fragment>
                     )
                   })}
                 </tbody>
