@@ -387,11 +387,8 @@ if _os.path.isdir(_dist_dir):
         candidate = _os.path.join(_dist_dir, full_path)
         if full_path and _os.path.isfile(candidate):
             return FileResponse(candidate)
-        # Otherwise return index.html for client-side routing. It must be
-        # revalidated on every load: it names the hashed bundles, so a cached copy
-        # keeps serving the previous release's UI after a deploy. (The hashed
-        # /assets files themselves stay cacheable.)
-        return FileResponse(_index_html, headers={"Cache-Control": "no-cache"})
+        # Otherwise return index.html for client-side routing
+        return FileResponse(_index_html)
 else:
     logger.warning("dist/ folder not found — frontend not built yet.")
 
