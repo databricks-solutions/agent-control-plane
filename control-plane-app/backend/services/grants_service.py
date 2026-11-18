@@ -312,6 +312,9 @@ def _update_ws_grants(kind: str, name: str, principal: str, add: List[str], remo
         if remove:
             # The API can't drop one entry, so re-set the direct ACL without the
             # principal's removed levels. Everyone else's direct entries are kept.
+            # Ownership isn't settable through this ACL, so IS_OWNER is left out
+            # rather than sent back. A grant made by someone else between this
+            # read and the PUT is lost — the API offers no single-entry delete.
             keep: List[dict] = []
             for entry in acl:
                 p_name, p_type = _acl_principal(entry)
@@ -319,7 +322,7 @@ def _update_ws_grants(kind: str, name: str, principal: str, add: List[str], remo
                     continue
                 for p in entry.get("all_permissions") or []:
                     level = p.get("permission_level")
-                    if p.get("inherited") or not level:
+                    if p.get("inherited") or not level or level == "IS_OWNER":
                         continue
                     if p_name == principal and level in remove:
                         continue
@@ -364,6 +367,18 @@ def get_grants(kind: str, name: str, user_token: str = "") -> Dict[str, Any]:
         body = _get_ws_grants(kind, name, user_token)
     return {"kind": kind, "name": name, "writable": writable,
             "privileges": meta["privileges"], "via": _via(user_token), **body}
+
+
+def remove_principal(kind: str, name: str, principal: str, user_token: str = "") -> Dict[str, Any]:
+    """Revoke every *direct* grant ``principal`` holds on the object (inherited
+    ones can't be removed here). Same identity rules as ``update_grants``."""
+    current = get_grants(kind, name, user_token)
+    if current.get("error"):
+        return {"ok": False, "via": _via(user_token), "error": current["error"]}
+    direct = next((g["privileges"] for g in current["grants"] if g["principal"] == principal), [])
+    if not direct:
+        return {"ok": True, "via": _via(user_token)}  # nothing direct to remove
+    return update_grants(kind, name, principal, remove=direct, user_token=user_token)
 
 
 def update_grants(

@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from backend.config import settings
 from backend.services import gateway_service, gateway_insights_service
-from backend.utils.auth import get_current_user, require_admin, require_account_admin, UserInfo
+from backend.utils.auth import get_current_user, require_admin, require_account_admin, UserInfo, _is_sp_fallback
 from backend.utils.access_scope import get_allowed_workspace_ids
 
 router = APIRouter(prefix="/gateway", tags=["ai-gateway"], dependencies=[Depends(get_current_user)])
@@ -17,6 +17,16 @@ class PermissionUpdate(BaseModel):
     permission_level: str  # "CAN_QUERY" | "CAN_MANAGE" | "CAN_VIEW"
     resource_type: Optional[str] = None  # "serving_endpoint" | "app" | "genie_space"
     workspace_id: Optional[str] = None  # for cross-workspace operations
+
+
+# Local Genie spaces and apps go through grants_service as the signed-in user, so
+# the platform checks their privileges and the change is attributed to them.
+# Serving endpoints (being deprecated) keep the app-SP path.
+_AS_USER_KINDS = {"genie_space": "genie_space", "app": "app"}
+
+
+def _caller_token(user: UserInfo) -> str:
+    return "" if _is_sp_fallback(user) else (user.token or "")
 
 
 class PermissionRemove(BaseModel):
@@ -85,7 +95,8 @@ def endpoints_with_permissions(user: UserInfo = Depends(get_current_user)):
 def update_permission(body: PermissionUpdate, request: Request, user: UserInfo = Depends(require_admin)):
     """Grant or update a permission on a serving endpoint, app, or genie space.
 
-    For local workspace: requires workspace admin.
+    For local workspace: requires workspace admin. Genie spaces and apps are
+    changed as the caller (grants_service); serving endpoints as the app SP.
     For cross-workspace (workspace_id set): requires account admin + OBO token.
     """
     if body.workspace_id:
@@ -100,6 +111,15 @@ def update_permission(body: PermissionUpdate, request: Request, user: UserInfo =
             body.principal_type, body.permission_level,
             resource_type=body.resource_type, user_token=user_token,
         )
+    elif body.resource_type in _AS_USER_KINDS and _caller_token(user):
+        from backend.services import grants_service
+        r = grants_service.update_grants(
+            _AS_USER_KINDS[body.resource_type], body.endpoint_name, body.principal,
+            add=[body.permission_level], user_token=_caller_token(user),
+        )
+        result = ({"ok": True, "endpoint": body.endpoint_name, "principal": body.principal,
+                   "level": body.permission_level, "resource_type": body.resource_type, "acted_by": "user"}
+                  if r["ok"] else {"error": r.get("error")})
     else:
         result = gateway_service.update_endpoint_permission(
             body.endpoint_name, body.principal, body.principal_type, body.permission_level,
@@ -132,6 +152,15 @@ def remove_permission(body: PermissionRemove, request: Request, user: UserInfo =
             body.workspace_id, body.endpoint_name, body.principal,
             body.principal_type, resource_type=body.resource_type, user_token=user_token,
         )
+    elif body.resource_type in _AS_USER_KINDS and _caller_token(user):
+        from backend.services import grants_service
+        r = grants_service.remove_principal(
+            _AS_USER_KINDS[body.resource_type], body.endpoint_name, body.principal,
+            user_token=_caller_token(user),
+        )
+        result = ({"ok": True, "endpoint": body.endpoint_name, "removed": body.principal,
+                   "resource_type": body.resource_type, "acted_by": "user"}
+                  if r["ok"] else {"error": r.get("error")})
     else:
         result = gateway_service.remove_endpoint_permission(
             body.endpoint_name, body.principal, body.principal_type,

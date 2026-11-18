@@ -260,3 +260,132 @@ class TestRoutes:
         with patch("backend.services.grants_service.get_grants", return_value={"grants": []}) as get:
             assert app_client.get("/api/v1/grants", params={"kind": "app", "name": "a"}).status_code == 200
         assert get.call_args.kwargs["user_token"] == ""
+
+
+class TestRemovePrincipal:
+    def test_revokes_only_direct_grants(self):
+        from backend.services import grants_service as gs
+        current = {"grants": [{"principal": "g", "privileges": ["CAN_RUN"], "inherited": [{"privilege": "CAN_MANAGE", "from": "x"}]}]}
+        with patch.object(gs, "get_grants", return_value=current), \
+             patch.object(gs, "update_grants", return_value={"ok": True, "via": "user"}) as up:
+            assert gs.remove_principal("genie_space", "sp1", "g", "tok")["ok"]
+        assert up.call_args.kwargs["remove"] == ["CAN_RUN"]
+
+    def test_nothing_direct_is_a_no_op(self):
+        from backend.services import grants_service as gs
+        with patch.object(gs, "get_grants", return_value={"grants": []}), \
+             patch.object(gs, "update_grants") as up:
+            assert gs.remove_principal("app", "a", "g", "tok")["ok"]
+        up.assert_not_called()
+
+
+class TestAdminPageRoutesRunAsUser:
+    """The Admin page's existing editors now change Genie / apps / UC grants as the
+    caller; serving endpoints (being deprecated) keep the app-SP path."""
+
+    def test_genie_update_goes_through_grants_service(self, app_client):
+        with patch("backend.services.grants_service.update_grants", return_value={"ok": True, "via": "user"}) as up, \
+             patch("backend.services.gateway_service.update_endpoint_permission") as sp, \
+             patch("backend.services.agent_permissions_cache.update_cached_acl_for_endpoint"):
+            r = app_client.post("/api/v1/gateway/permissions/update", json={
+                "endpoint_name": "sp1", "principal": "g", "principal_type": "group",
+                "permission_level": "CAN_RUN", "resource_type": "genie_space"})
+        assert r.json()["ok"] and r.json()["acted_by"] == "user"
+        assert up.call_args.args[:3] == ("genie_space", "sp1", "g") and up.call_args.kwargs["user_token"] == "test-token"
+        sp.assert_not_called()
+
+    def test_app_remove_goes_through_grants_service(self, app_client):
+        with patch("backend.services.grants_service.remove_principal", return_value={"ok": True, "via": "user"}) as rm, \
+             patch("backend.services.gateway_service.remove_endpoint_permission") as sp, \
+             patch("backend.services.agent_permissions_cache.update_cached_acl_for_endpoint"):
+            r = app_client.post("/api/v1/gateway/permissions/remove", json={
+                "endpoint_name": "my-app", "principal": "u@x.com", "principal_type": "user", "resource_type": "app"})
+        assert r.json()["ok"]
+        assert rm.call_args.args[:3] == ("app", "my-app", "u@x.com")
+        sp.assert_not_called()
+
+    def test_serving_endpoints_keep_the_sp_path(self, app_client):
+        with patch("backend.services.grants_service.update_grants") as up, \
+             patch("backend.services.gateway_service.update_endpoint_permission", return_value={"ok": True}) as sp, \
+             patch("backend.services.agent_permissions_cache.update_cached_acl_for_endpoint"):
+            app_client.post("/api/v1/gateway/permissions/update", json={
+                "endpoint_name": "ep", "principal": "g", "principal_type": "group",
+                "permission_level": "CAN_QUERY", "resource_type": "serving_endpoint"})
+        sp.assert_called_once()
+        up.assert_not_called()
+
+    def test_admin_uc_grant_runs_as_user_and_surfaces_refusals(self, app_client):
+        with patch("backend.services.grants_service.update_grants",
+                   return_value={"ok": False, "via": "user", "error": "PERMISSION_DENIED: no MANAGE"}) as up:
+            r = app_client.post("/api/v1/admin/permissions/grant", json={
+                "resource_type": "function", "resource_name": "system.ai.python_exec",
+                "principal": "g", "privileges": ["EXECUTE"]})
+        assert r.status_code == 400 and "no MANAGE" in r.json()["detail"]
+        assert up.call_args.kwargs["user_token"] == "test-token"
+
+    def test_admin_uc_revoke_runs_as_user(self, app_client):
+        with patch("backend.services.grants_service.update_grants", return_value={"ok": True, "via": "user"}) as up:
+            r = app_client.post("/api/v1/admin/permissions/revoke", json={
+                "resource_type": "schema", "resource_name": "c.s", "principal": "g", "privileges": ["USE SCHEMA"]})
+        assert r.status_code == 200 and up.call_args.kwargs["remove"] == ["USE SCHEMA"]
+
+
+class TestAdminPageFallbacks:
+    """Paths that must NOT go through grants_service, and failure handling."""
+
+    def _sp(self, mock_user_info, monkeypatch):
+        from backend.config import settings
+        monkeypatch.setattr(settings, "obo_enabled", False)
+        mock_user_info.username, mock_user_info.token = "service-principal", ""
+
+    def test_admin_grant_serving_endpoint_uses_legacy_path(self, app_client):
+        with patch("backend.services.grants_service.update_grants") as up, \
+             patch("backend.api.access.grant_permission", return_value=True) as legacy:
+            r = app_client.post("/api/v1/admin/permissions/grant", json={
+                "resource_type": "serving_endpoint", "resource_name": "ep", "principal": "g", "privileges": ["CAN_QUERY"]})
+        assert r.status_code == 200
+        legacy.assert_called_once()
+        up.assert_not_called()
+
+    def test_admin_grant_as_sp_fallback_uses_legacy_path(self, app_client, mock_user_info, monkeypatch):
+        self._sp(mock_user_info, monkeypatch)
+        with patch("backend.services.grants_service.update_grants") as up, \
+             patch("backend.api.access.grant_permission", return_value=True) as legacy:
+            r = app_client.post("/api/v1/admin/permissions/grant", json={
+                "resource_type": "function", "resource_name": "c.s.f", "principal": "g", "privileges": ["EXECUTE"]})
+        assert r.status_code == 200
+        legacy.assert_called_once()
+        up.assert_not_called()
+
+    def test_gateway_update_failure_returns_error_and_skips_cache(self, app_client):
+        with patch("backend.services.grants_service.update_grants", return_value={"ok": False, "via": "user", "error": "denied"}), \
+             patch("backend.services.agent_permissions_cache.update_cached_acl_for_endpoint") as cache:
+            r = app_client.post("/api/v1/gateway/permissions/update", json={
+                "endpoint_name": "sp1", "principal": "g", "principal_type": "group",
+                "permission_level": "CAN_RUN", "resource_type": "genie_space"})
+        assert r.json() == {"error": "denied"}
+        cache.assert_not_called()
+
+    def test_gateway_update_as_sp_fallback_uses_legacy_path(self, app_client, mock_user_info, monkeypatch):
+        self._sp(mock_user_info, monkeypatch)
+        with patch("backend.services.grants_service.update_grants") as up, \
+             patch("backend.services.gateway_service.update_endpoint_permission", return_value={"ok": True}) as legacy, \
+             patch("backend.services.agent_permissions_cache.update_cached_acl_for_endpoint"):
+            app_client.post("/api/v1/gateway/permissions/update", json={
+                "endpoint_name": "sp1", "principal": "g", "principal_type": "group",
+                "permission_level": "CAN_RUN", "resource_type": "genie_space"})
+        legacy.assert_called_once()
+        up.assert_not_called()
+
+
+def test_remove_leaves_is_owner_out_of_the_reset_acl(http):
+    from backend.services import grants_service as gs
+    acl = {"access_control_list": [
+        {"user_name": "owner@x.com", "all_permissions": [{"permission_level": "IS_OWNER", "inherited": False}]},
+        {"group_name": "data", "all_permissions": [{"permission_level": "CAN_RUN", "inherited": False}]},
+        {"group_name": "eng", "all_permissions": [{"permission_level": "CAN_VIEW", "inherited": False}]},
+    ]}
+    h = http(routes={("GET", "/permissions/genie/sp1"): (200, acl), ("PUT", "/permissions/genie/sp1"): (200, {})})
+    assert gs.update_grants("genie_space", "sp1", "data", [], ["CAN_RUN"], "tok")["ok"]
+    put = [kw for m, _, kw in h.calls if m == "PUT"][0]
+    assert put["json"] == {"access_control_list": [{"group_name": "eng", "permission_level": "CAN_VIEW"}]}

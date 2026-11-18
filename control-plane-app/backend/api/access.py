@@ -12,7 +12,7 @@ from backend.services.access_service import (
     revoke_permission,
     get_all_principals,
 )
-from backend.utils.auth import get_current_user, require_admin, UserInfo
+from backend.utils.auth import get_current_user, require_admin, UserInfo, _is_sp_fallback
 from backend.utils.access_scope import get_allowed_workspace_ids
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_current_user)])
@@ -46,9 +46,29 @@ def list_permissions(
     return get_resource_permissions(resource_type, resource_name)
 
 
+def _as_user(resource_type: str, user: UserInfo) -> Optional[str]:
+    """The caller's token when this resource is a UC securable changed via
+    grants_service (SQL GRANT/REVOKE as the user); None → legacy app-SP path."""
+    from backend.services.grants_service import UC_KINDS
+    token = "" if _is_sp_fallback(user) else (user.token or "")
+    return token if (resource_type in UC_KINDS and token) else None
+
+
+def _raise_if_failed(r: Dict[str, Any], action: str) -> None:
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=f"{action} failed: {r.get('error') or 'unknown error'}")
+
+
 @router.post("/permissions/grant")
 def grant(body: GrantRequest, user: UserInfo = Depends(require_admin)) -> Dict[str, Any]:
-    """Grant permissions on a resource (admin only)."""
+    """Grant permissions on a resource (admin only). UC securables are changed as
+    the caller; serving endpoints as the app SP."""
+    token = _as_user(body.resource_type, user)
+    if token:
+        from backend.services import grants_service
+        _raise_if_failed(grants_service.update_grants(
+            body.resource_type, body.resource_name, body.principal, add=body.privileges, user_token=token), "Grant")
+        return {"status": "ok", "message": f"Granted {body.privileges} to {body.principal}", "granted_by": user.username}
     ok = grant_permission(
         body.resource_type,
         body.resource_name,
@@ -63,7 +83,14 @@ def grant(body: GrantRequest, user: UserInfo = Depends(require_admin)) -> Dict[s
 
 @router.post("/permissions/revoke")
 def revoke(body: RevokeRequest, user: UserInfo = Depends(require_admin)) -> Dict[str, Any]:
-    """Revoke permissions from a resource (admin only)."""
+    """Revoke permissions from a resource (admin only). UC securables are changed
+    as the caller; serving endpoints as the app SP."""
+    token = _as_user(body.resource_type, user)
+    if token:
+        from backend.services import grants_service
+        _raise_if_failed(grants_service.update_grants(
+            body.resource_type, body.resource_name, body.principal, remove=body.privileges, user_token=token), "Revoke")
+        return {"status": "ok", "message": f"Revoked {body.privileges} from {body.principal}", "revoked_by": user.username}
     ok = revoke_permission(
         body.resource_type,
         body.resource_name,

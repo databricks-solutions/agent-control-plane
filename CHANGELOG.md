@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   panel shows the catalog's UC grants (any workspace) and the project's own
   permissions (this workspace only). Unregistered databases in other workspaces
   still appear only in the cost views — the table says so.
+- **Admin page access changes now run as you too.** Its agent permission editor
+  (Genie spaces and apps in this workspace) and its UC grant form (functions,
+  schemas) go through the same path as the Access panels, so the change is checked
+  against and attributed to the signed-in admin instead of the app's service
+  principal. Serving endpoints and cross-workspace changes keep their existing path.
 
 ### Fixed
 - Picking a service principal in a principal search now fills in its application
