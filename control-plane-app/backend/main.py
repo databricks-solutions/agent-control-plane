@@ -12,7 +12,7 @@ from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from backend.config import settings, get_databricks_host
-from backend.api import agents, requests, kpis, analytics, health, websocket, gateway, mlflow, billing, tools, access, serving, workspaces, user_analytics, topology, operations, vector_search, gateway_logs, genie, settings as settings_api
+from backend.api import agents, requests, kpis, analytics, health, websocket, gateway, mlflow, billing, tools, access, serving, workspaces, user_analytics, topology, operations, vector_search, gateway_logs, genie, grants, settings as settings_api
 from backend.utils.auth import get_current_user
 
 
@@ -348,6 +348,7 @@ app.include_router(vector_search.router, prefix=settings.api_prefix)
 app.include_router(gateway_logs.router, prefix=settings.api_prefix)
 app.include_router(genie.router, prefix=settings.api_prefix)
 app.include_router(settings_api.router, prefix=settings.api_prefix)
+app.include_router(grants.router, prefix=settings.api_prefix)
 app.include_router(websocket.router)
 
 # ── Serve React SPA from the built dist/ folder ──────────────────

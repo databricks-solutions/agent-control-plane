@@ -65,29 +65,23 @@ def test_bad_rate_limit_json_is_tolerated():
 
 
 class TestServiceGrants:
-    def test_mcp_service_uses_mcp_securable(self):
-        from backend.services import gateway_service as g
-        with patch.object(g, "_uc_get_json", return_value={"privilege_assignments": [
-                {"principal": "account users", "privileges": ["EXECUTE"]}]}) as get:
-            out = g.get_service_grants("system.ai.slack", "MCP_SERVICE")
-        assert get.call_args.args[0] == "/api/2.1/unity-catalog/permissions/mcp_service/system.ai.slack"
-        assert out["grants"] == [{"principal": "account users", "privileges": ["EXECUTE"]}]
+    """gateway_service's service-grant entry points delegate to grants_service."""
 
-    def test_rejects_names_that_could_alter_the_path(self):
+    def test_service_type_maps_to_grants_kind(self):
         from backend.services import gateway_service as g
-        with patch.object(g, "_uc_get_json") as get:
-            for bad in ("../../permissions/catalog/x", "a.b", "cat.sch.x?y=1", "cat/sch.x.y", ""):
-                assert g.get_service_grants(bad, "MODEL_SERVICE")["error"] == "invalid service name"
-        get.assert_not_called()
+        with patch("backend.services.grants_service.get_grants", return_value={"grants": []}) as get:
+            g.get_service_grants("system.ai.slack", "MCP_SERVICE", user_token="tok")
+        assert get.call_args.args == ("mcp_service", "system.ai.slack", "tok")
 
     def test_unknown_type(self):
         from backend.services import gateway_service as g
         assert "unknown service type" in g.get_service_grants("a.b.c", "TABLE")["error"]
 
-    def test_model_service_wrapper_still_works(self):
+    def test_model_service_write_delegates(self):
         from backend.services import gateway_service as g
-        with patch.object(g, "_uc_get_json", return_value=None):
-            assert g.get_model_service_grants("a.b.c")["error"].startswith("grants not readable")
+        with patch("backend.services.grants_service.update_grants", return_value={"ok": True, "via": "user"}) as up:
+            assert g.set_model_service_grant("a.b.c", "u@x.com", ["EXECUTE"], [], user_token="tok")["ok"]
+        assert up.call_args.args == ("model_service", "a.b.c", "u@x.com", ["EXECUTE"], [], "tok")
 
 
 def test_legacy_route_aliases_still_resolve(app_client):

@@ -13,7 +13,10 @@ import {
   useGatewayUsageTimeseries,
   useGatewayUsageByUser,
   useWorkspaceDirectory,
+  useCurrentUser,
+  type GrantKind,
 } from '@/api/hooks'
+import { AccessPanel } from '@/components/AccessPanel'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { StatusBadge } from '@/components/StatusBadge'
@@ -104,6 +107,10 @@ export default function AgentsPage() {
 
 const ALL_WORKSPACES = '__all__'
 
+/** Agent types whose access the Access panel manages (endpoint_name is the
+ *  Genie space id / the app name). */
+const ACCESS_KIND: Record<string, GrantKind> = { genie_space: 'genie_space', custom_app: 'app' }
+
 function resolveAgentType(agent: any): string {
   const ep = (agent.endpoint_name || '').toLowerCase()
   if (ep.startsWith('kie')) return 'information_extraction'
@@ -128,6 +135,7 @@ function OverviewTab() {
   const syncAgents = useSyncAgents()
   const { pinned, togglePin } = usePinnedAgents()
   const { data: wsDir } = useWorkspaceDirectory()
+  const { data: currentUser } = useCurrentUser()
 
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
@@ -632,6 +640,20 @@ function OverviewTab() {
                       )}
                     </div>
                   </div>
+                  {(() => {
+                    // Access is managed as the signed-in user, whose token only works
+                    // in the app's own workspace.
+                    const kind = ACCESS_KIND[agent.type]
+                    const local = !agent.workspace_id || agent.workspace_id === 'current'
+                      || agent.workspace_id === currentUser?.current_workspace_id
+                    if (!kind || !agent.endpoint_name || !local) return null
+                    return (
+                      <div className="mt-4 pt-4 border-t dark:border-gray-700 space-y-2">
+                        <h4 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Access</h4>
+                        <AccessPanel kind={kind} name={agent.endpoint_name} />
+                      </div>
+                    )
+                  })()}
                 </div>
               )}
             </Card>

@@ -25,6 +25,14 @@ We will acknowledge receipt within 48 hours and provide a timeline for a fix.
   deployment intentionally run as a single SP identity (no per-user OBO) must set
   `OBO_ENABLED=false`, which makes the SP fallback unrestricted (its historical
   read-only behavior) rather than blanking every endpoint
+- Access management (`/api/v1/grants`, the **Access** panels) reads and changes
+  grants **as the signed-in user**: Unity Catalog grants via SQL `SHOW GRANTS` /
+  `GRANT` / `REVOKE`, workspace-object ACLs via the Permissions API, both with the
+  caller's OBO token. The platform enforces the caller's own privileges (MANAGE or
+  ownership) and attributes the change to them; a refusal is final — there is no
+  fallback to the app's service principal. Only with `OBO_ENABLED=false` does the
+  app SP act instead. Object and principal names are validated and quoted before
+  reaching SQL or a URL path; privileges must match a strict keyword pattern
 
 ### Data Access
 - The app accesses data through the authenticated user's permissions

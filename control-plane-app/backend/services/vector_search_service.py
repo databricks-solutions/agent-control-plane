@@ -594,19 +594,56 @@ def get_cost_by_workload_type(days: int = 30, allowed_workspace_ids: Optional[Li
 # ══════════════════════════════════════════════════════════════
 
 def get_lakebase_instances(allowed_workspace_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    """Return Lakebase instances from cache (populated by workflow).
+    """Lakebase inventory: this workspace's Provisioned instances and Autoscaling
+    projects (``lakebase_instances`` — the Lakebase list APIs are workspace-scoped),
+    merged with every Lakebase database registered in Unity Catalog metastore-wide
+    (``lakebase_uc_catalogs``), matched on project / instance uid. Unregistered
+    databases in other workspaces don't appear.
 
-    ``lakebase_instances`` has no workspace_id column (account-wide instance
-    inventory) — suppressed entirely for a scoped (non-account-admin) caller,
-    same reasoning as billing_service's cost_by_tag / external_model_spend.
+    Each row adds ``workspace_id``, ``in_workspace_inventory`` (listed by this
+    workspace's API, so its project permissions can be managed here) and
+    ``uc_catalogs`` [{catalog_name, database_name, owner}]. A scoped caller sees
+    only rows for workspaces in their scope.
     """
-    if allowed_workspace_ids is not None:
-        return []
+    from backend.services.billing_service import get_current_workspace_id
     try:
-        return execute_query("SELECT * FROM lakebase_instances ORDER BY instance_name")
+        local = execute_query("SELECT * FROM lakebase_instances ORDER BY instance_name")
     except Exception as exc:
         logger.warning("Lakebase instances cache read failed: %s", exc)
-        return []
+        local = []
+    try:
+        registered = execute_query(
+            "SELECT catalog_name, owner, database_name, project_id, workspace_id "
+            "FROM lakebase_uc_catalogs ORDER BY catalog_name")
+    except Exception as exc:
+        logger.warning("Lakebase UC catalogs cache read failed: %s", exc)
+        registered = []
+
+    local_ws = str(get_current_workspace_id() or "") or None
+    by_project: Dict[str, List[Dict[str, Any]]] = {}
+    for c in registered:
+        by_project.setdefault(c.get("project_id") or "", []).append(c)
+
+    def _cats(cs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [{"catalog_name": c.get("catalog_name"), "database_name": c.get("database_name"),
+                 "owner": c.get("owner")} for c in cs]
+
+    rows: List[Dict[str, Any]] = []
+    for inst in local:
+        cats = by_project.pop(inst.get("instance_id") or "", []) if inst.get("instance_id") else []
+        rows.append({**inst, "workspace_id": local_ws, "in_workspace_inventory": True, "uc_catalogs": _cats(cats)})
+    # Registered elsewhere — only the UC catalog is known (no project name/state).
+    for pid, cats in by_project.items():
+        rows.append({
+            "instance_name": cats[0].get("catalog_name"), "instance_id": pid or None,
+            "workspace_id": cats[0].get("workspace_id") or None, "in_workspace_inventory": False,
+            "state": None, "capacity": None, "pg_version": None,
+            "creator": cats[0].get("owner"), "uc_catalogs": _cats(cats),
+        })
+    if allowed_workspace_ids is not None:
+        allowed = {str(w) for w in allowed_workspace_ids}
+        rows = [r for r in rows if str(r.get("workspace_id") or "") in allowed]
+    return rows
 
 
 def _normalize_lb_project(p: Dict[str, Any]) -> Dict[str, Any]:

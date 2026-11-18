@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, Fragment } from 'react'
 import { useQueryClient, useIsFetching } from '@tanstack/react-query'
 import {
   useVectorSearchOverview,
@@ -33,6 +33,7 @@ import {
 } from '@/api/hooks'
 import { apiClient } from '@/api/client'
 import { RefreshButton } from '@/components/RefreshButton'
+import { AccessPanel, AccessToggle } from '@/components/AccessPanel'
 import { WorkspaceSelect, workspaceOption } from '@/components/WorkspaceSelect'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -968,6 +969,7 @@ function VectorSearchTab({ days, setDays, selectedWsIds }: { days: number; setDa
   const { data: indexDetails, isLoading: idxLoading } = useVectorSearchIndexDetails()
   const { data: healthHistory } = useVectorSearchHealthHistory(days)
   const { data: vsTopWsDaily } = useVSTopWorkspacesDaily(days)
+  const [indexAccess, setIndexAccess] = useState<string | null>(null)
 
   const [sortCol, setSortCol] = useState<string>('total_cost_usd')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
@@ -1257,12 +1259,17 @@ function VectorSearchTab({ days, setDays, selectedWsIds }: { days: number; setDa
                     <th className="pb-2 pr-4 font-medium text-right">Rows</th>
                     <th className="pb-2 pr-4 font-medium">Source Table</th>
                     <th className="pb-2 pr-4 font-medium">Embedding Model</th>
-                    <th className="pb-2 font-medium">Pipeline</th>
+                    <th className="pb-2 pr-4 font-medium">Pipeline</th>
+                    <th className="pb-2 font-medium">Access</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                  {safeIndexDetails.map((idx: any) => (
-                    <tr key={`${idx.endpoint_name}-${idx.index_name}`} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                  {safeIndexDetails.map((idx: any) => {
+                    const rowKey = `${idx.endpoint_name}-${idx.index_name}`
+                    const open = indexAccess === rowKey
+                    return (
+                    <Fragment key={rowKey}>
+                    <tr className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
                       <td className="py-2 pr-4">
                         <div className="font-medium text-gray-900 dark:text-gray-100 text-xs truncate max-w-[200px]" title={idx.index_name}>
                           {idx.index_name?.split('.').pop() || idx.index_name}
@@ -1283,11 +1290,32 @@ function VectorSearchTab({ days, setDays, selectedWsIds }: { days: number; setDa
                       <td className="py-2 pr-4 text-xs text-gray-500">
                         {idx.embedding_model || '\u2014'}
                       </td>
-                      <td className="py-2 text-xs text-gray-500">
+                      <td className="py-2 pr-4 text-xs text-gray-500">
                         {idx.pipeline_type || '\u2014'}
                       </td>
+                      <td className="py-2 text-right">
+                        <AccessToggle open={open} onToggle={() => setIndexAccess(open ? null : rowKey)} />
+                      </td>
                     </tr>
-                  ))}
+                    {open && (
+                      <tr className="bg-gray-50 dark:bg-gray-800/50">
+                        <td colSpan={7} className="px-4 py-3">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div className="space-y-1.5">
+                              <div className="text-xs font-medium text-gray-700 dark:text-gray-300">Index <span className="font-normal text-gray-400">(query access, Unity Catalog)</span></div>
+                              {idx.index_name ? <AccessPanel kind="table" name={idx.index_name} /> : <div className="text-xs text-gray-400">—</div>}
+                            </div>
+                            <div className="space-y-1.5">
+                              <div className="text-xs font-medium text-gray-700 dark:text-gray-300">Endpoint <span className="font-normal text-gray-400">{idx.endpoint_name}</span></div>
+                              {idx.endpoint_name ? <AccessPanel kind="vector_search_endpoint" name={idx.endpoint_name} /> : <div className="text-xs text-gray-400">—</div>}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1351,6 +1379,8 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
   const { data: costByWorkspace, isLoading: wsByWsLoading } = useLakebaseCostByWorkspace(days)
   const { data: costByType } = useLakebaseCostByType(days)
   const { data: lbTopWsDaily } = useLBTopWorkspacesDaily(days)
+  const { data: wsDir } = useWorkspaceDirectory()
+  const [lbAccess, setLbAccess] = useState<string | null>(null)
 
   const [sortCol, setSortCol] = useState<string>('total_cost_usd')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
@@ -1360,6 +1390,10 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
   const isLoading = summaryLoading || trendLoading || instancesLoading
 
   const safeInstances = Array.isArray(instances) ? instances : []
+  // Rows carry their workspace now, so the page's workspace filter applies.
+  const visibleInstances = selectedWsIds.length
+    ? safeInstances.filter((inst: any) => selectedWsIds.includes(String(inst.workspace_id ?? '')))
+    : safeInstances
   const safeCostTrend = Array.isArray(costTrend) ? costTrend : []
   const safeCostByWorkspace = Array.isArray(costByWorkspace) ? costByWorkspace : []
   const safeCostByType = Array.isArray(costByType) ? costByType : []
@@ -1532,13 +1566,18 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
       {/* Per-project cost (LAKEBASE usage tagged with project_id) */}
       <LakebaseProjectCostCard days={days} wsIds={selectedWsIds} />
 
-      {/* Instances table */}
+      {/* Instances table: this workspace's Lakebase + UC-registered databases elsewhere */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Lakebase Instances</CardTitle>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            Lists every Lakebase instance and project in this workspace, plus databases in other
+            workspaces <span className="font-medium text-gray-700 dark:text-gray-300">only if they're registered in Unity Catalog</span>.
+            Unregistered databases elsewhere don't appear here; their cost is still shown above.
+          </p>
         </CardHeader>
         <CardContent>
-          {safeInstances.length === 0 ? (
+          {visibleInstances.length === 0 ? (
             <div className="text-center py-8 text-gray-400 dark:text-gray-500">No instances found.</div>
           ) : (
             <div className="overflow-x-auto">
@@ -1546,29 +1585,82 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
                 <thead>
                   <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-gray-500 dark:text-gray-400">
                     <th className="pb-2 pr-4 font-medium">Name</th>
+                    <th className="pb-2 pr-4 font-medium">Workspace</th>
                     <th className="pb-2 pr-4 font-medium">State</th>
                     <th className="pb-2 pr-4 font-medium">Capacity</th>
-                    <th className="pb-2 font-medium">PG Version</th>
+                    <th className="pb-2 pr-4 font-medium">PG Version</th>
+                    <th className="pb-2 pr-4 font-medium">Unity Catalog</th>
+                    <th className="pb-2 font-medium">Access</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                  {safeInstances.map((inst: any, i: number) => {
-                    const state = (inst.state || inst.status || 'UNKNOWN').toUpperCase()
+                  {visibleInstances.map((inst: any, i: number) => {
+                    const local = !!inst.in_workspace_inventory
+                    const state = (inst.state || inst.status || (local ? 'UNKNOWN' : '')).toUpperCase()
                     const isAvailable = state === 'AVAILABLE' || state === 'RUNNING' || state === 'ACTIVE'
+                    // The synced lakebase_instances table names the column instance_name.
+                    const lbName: string = inst.instance_name || inst.name || ''
+                    const rowKey = `${inst.workspace_id || ''}:${inst.instance_id || lbName || i}`
+                    const open = lbAccess === rowKey
+                    const catalogs: Array<{ catalog_name: string; database_name?: string }> = inst.uc_catalogs || []
+                    const wsLabel = inst.workspace_id ? workspaceOption(String(inst.workspace_id), wsDir).label : '\u2014'
                     return (
-                      <tr key={inst.name || i} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
-                        <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100">{inst.name || '\u2014'}</td>
+                      <Fragment key={rowKey}>
+                      <tr className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
                         <td className="py-2 pr-4">
-                          <Badge
-                            variant={isAvailable ? 'success' : 'error'}
-                            className="text-[10px]"
-                          >
-                            {state}
-                          </Badge>
+                          <div className="font-medium text-gray-900 dark:text-gray-100">{lbName || '\u2014'}</div>
+                          {!local && inst.instance_id && (
+                            <div className="text-[11px] text-gray-400 font-mono truncate max-w-[220px]" title={inst.instance_id}>project {inst.instance_id}</div>
+                          )}
+                        </td>
+                        <td className="py-2 pr-4 text-xs text-gray-700 dark:text-gray-300">
+                          {wsLabel}{local && <span className="text-gray-400"> · this workspace</span>}
+                        </td>
+                        <td className="py-2 pr-4">
+                          {state
+                            ? <Badge variant={isAvailable ? 'success' : 'error'} className="text-[10px]">{state}</Badge>
+                            : <span className="text-xs text-gray-400" title="Only the Unity Catalog registration is visible from this workspace">{"\u2014"}</span>}
                         </td>
                         <td className="py-2 pr-4 text-gray-700 dark:text-gray-300">{inst.capacity || inst.size || '\u2014'}</td>
-                        <td className="py-2 text-gray-700 dark:text-gray-300">{inst.pg_version || inst.engine_version || '\u2014'}</td>
+                        <td className="py-2 pr-4 text-gray-700 dark:text-gray-300">{inst.pg_version || inst.engine_version || '\u2014'}</td>
+                        <td className="py-2 pr-4">
+                          {catalogs.length > 0
+                            ? <div className="flex flex-wrap gap-1">{catalogs.map((c) => (
+                                <Badge key={c.catalog_name} variant="info" className="text-[10px] font-mono" title={c.database_name ? `database ${c.database_name}` : undefined}>{c.catalog_name}</Badge>
+                              ))}</div>
+                            : <span className="text-xs text-gray-400">Not registered</span>}
+                        </td>
+                        <td className="py-2 text-right">
+                          <AccessToggle open={open} onToggle={() => setLbAccess(open ? null : rowKey)} />
+                        </td>
                       </tr>
+                      {open && (
+                        <tr className="bg-gray-50 dark:bg-gray-800/50">
+                          <td colSpan={7} className="px-4 py-3">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs">
+                              <div className="space-y-2">
+                                <div className="font-medium text-gray-700 dark:text-gray-300">Unity Catalog access</div>
+                                {catalogs.length > 0 ? catalogs.map((c) => (
+                                  <div key={c.catalog_name} className="space-y-1">
+                                    <div className="font-mono text-gray-500 dark:text-gray-400">{c.catalog_name}{c.database_name ? ` (database ${c.database_name})` : ''}</div>
+                                    <AccessPanel kind="catalog" name={c.catalog_name} />
+                                  </div>
+                                )) : (
+                                  <div className="text-gray-400 dark:text-gray-500">Not registered in Unity Catalog. Register the database to govern query access with UC grants.</div>
+                                )}
+                                <div className="text-[10px] text-gray-400 dark:text-gray-500">UC grants cover queries through serverless compute; direct Postgres connections use Postgres roles.</div>
+                              </div>
+                              <div className="space-y-2">
+                                <div className="font-medium text-gray-700 dark:text-gray-300">Project permissions</div>
+                                {local
+                                  ? <AccessPanel kind="lakebase" name={lbName} />
+                                  : <div className="text-gray-400 dark:text-gray-500">This database is in {wsLabel}. Its project permissions can only be managed from that workspace.</div>}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     )
                   })}
                 </tbody>

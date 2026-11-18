@@ -95,21 +95,40 @@ class TestEndpointIndexScope:
             mock_q.assert_not_called()
 
 
-class TestLakebaseInstancesScope:
-    """lakebase_instances has no workspace_id column — must be suppressed
-    entirely for any scoped (non-account-admin) caller."""
+class TestLakebaseInventory:
+    """This workspace's Lakebase merged with UC-registered Lakebase catalogs."""
 
-    def test_suppressed_when_restricted(self):
-        with patch("backend.services.vector_search_service.execute_query") as mock_q:
-            from backend.services.vector_search_service import get_lakebase_instances
-            assert get_lakebase_instances(allowed_workspace_ids=["ws1"]) == []
-            mock_q.assert_not_called()
+    _LOCAL = [{"instance_name": "agent-cookbook", "instance_id": "uid-1", "state": "AVAILABLE"},
+              {"instance_name": "unregistered", "instance_id": "uid-2", "state": "AVAILABLE"}]
+    _UC = [{"catalog_name": "cookbook_cat", "owner": "a@x.com", "database_name": "db", "project_id": "uid-1", "workspace_id": "ws-home"},
+           {"catalog_name": "remote_b", "owner": "b@x.com", "database_name": "d2", "project_id": "uid-9", "workspace_id": "ws-other"},
+           {"catalog_name": "remote_a", "owner": "b@x.com", "database_name": "d1", "project_id": "uid-9", "workspace_id": "ws-other"}]
 
-    def test_unrestricted_still_queries(self):
-        with patch("backend.services.vector_search_service.execute_query", return_value=[{"instance_name": "x"}]):
-            from backend.services.vector_search_service import get_lakebase_instances
-            result = get_lakebase_instances(allowed_workspace_ids=None)
-            assert result == [{"instance_name": "x"}]
+    def _run(self, allowed=None):
+        from backend.services import vector_search_service as v
+        with patch.object(v, "execute_query", side_effect=[self._LOCAL, self._UC]), \
+             patch("backend.services.billing_service.get_current_workspace_id", return_value="ws-home"):
+            return {r["instance_name"]: r for r in v.get_lakebase_instances(allowed_workspace_ids=allowed)}
+
+    def test_merges_local_with_registered_catalogs(self):
+        rows = self._run()
+        assert rows["agent-cookbook"]["uc_catalogs"] == [{"catalog_name": "cookbook_cat", "database_name": "db", "owner": "a@x.com"}]
+        assert rows["agent-cookbook"]["in_workspace_inventory"] is True and rows["agent-cookbook"]["workspace_id"] == "ws-home"
+        assert rows["unregistered"]["uc_catalogs"] == []
+        remote = rows["remote_b"]  # first catalog (by the query's order) names the row
+        assert remote["in_workspace_inventory"] is False and remote["workspace_id"] == "ws-other"
+        assert [c["catalog_name"] for c in remote["uc_catalogs"]] == ["remote_b", "remote_a"]
+        assert len(rows) == 3
+
+    def test_scoped_caller_sees_only_their_workspaces(self):
+        assert set(self._run(allowed=["ws-other"])) == {"remote_b"}
+        assert set(self._run(allowed=["ws-home"])) == {"agent-cookbook", "unregistered"}
+
+    def test_missing_uc_table_still_returns_local(self):
+        from backend.services import vector_search_service as v
+        with patch.object(v, "execute_query", side_effect=[self._LOCAL, RuntimeError("no table")]), \
+             patch("backend.services.billing_service.get_current_workspace_id", return_value="ws-home"):
+            assert [r["instance_name"] for r in v.get_lakebase_instances()] == ["agent-cookbook", "unregistered"]
 
 
 class TestDiscoverLakebaseMerge:
