@@ -836,6 +836,59 @@ _n_lb_cost = _write_snapshot(lb_cost_raw, LB_COST_PROJECT_SCHEMA, LB_COST_PROJEC
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Lakebase databases registered in Unity Catalog (metastore-wide)
+# MAGIC Each registered database is a `MANAGED_ONLINE_CATALOG` whose properties name its
+# MAGIC project, branch and **workspace** — the only account-wide Lakebase inventory
+# MAGIC available (the Lakebase list APIs are workspace-scoped). Unregistered databases
+# MAGIC in other workspaces aren't visible here.
+
+# COMMAND ----------
+
+LB_UC_CATALOGS_TABLE = f"{CATALOG}.{SCHEMA}.lakebase_uc_catalogs"
+LB_UC_CATALOGS_SCHEMA = StructType([
+    StructField("catalog_name", StringType(), False),
+    StructField("owner", StringType(), True),
+    StructField("database_name", StringType(), True),
+    StructField("project_id", StringType(), True),    # project / instance uid
+    StructField("branch_id", StringType(), True),
+    StructField("workspace_id", StringType(), True),
+    StructField("comment", StringType(), True),
+    StructField("discovered_at", TimestampType(), False),
+])
+
+
+def _discover_lakebase_uc_catalogs():
+    """Rows for every Lakebase-backed catalog the run-as identity can list, or None on failure."""
+    try:
+        out = []
+        for c in w.catalogs.list(include_browse=True):
+            ctype = getattr(c.catalog_type, "value", c.catalog_type)
+            if ctype != "MANAGED_ONLINE_CATALOG":
+                continue
+            props, opts = c.properties or {}, c.options or {}
+            out.append({
+                "catalog_name": c.name,
+                "owner": c.owner,
+                "database_name": opts.get("database"),
+                "project_id": props.get("database_project_id") or props.get("database_instance_id"),
+                "branch_id": props.get("database_branch_id"),
+                "workspace_id": props.get("workspace_id"),
+                "comment": c.comment,
+            })
+        return out
+    except Exception as exc:
+        print(f"  ⚠️  Lakebase UC catalog discovery failed: {str(exc)[:300]}")
+        return None
+
+
+_lb_uc = _discover_lakebase_uc_catalogs()
+_n_lb_uc = _write_snapshot(_lb_uc, LB_UC_CATALOGS_SCHEMA, LB_UC_CATALOGS_TABLE, lambda r: (
+    r["catalog_name"], _s(r["owner"]), _s(r["database_name"]), _s(r["project_id"]),
+    _s(r["branch_id"]), _s(r["workspace_id"]), _s(r["comment"]), now))
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Summary
 
 # COMMAND ----------
@@ -851,6 +904,7 @@ result = {
     "lakebase_health_rows": _n_lb_health,
     "lakebase_wait_event_rows": _n_lb_wait,
     "lakebase_cost_by_project_rows": _n_lb_cost,
+    "lakebase_uc_catalog_rows": _n_lb_uc,
     "kept_previous": _KEPT_PREVIOUS,
     "discovered_at": now.isoformat(),
 }

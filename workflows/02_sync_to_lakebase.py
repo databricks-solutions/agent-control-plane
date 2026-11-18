@@ -2381,6 +2381,23 @@ gw_services_count = _mirror(
      "inference_table_enabled", "create_time", "update_time", "updated_by", "discovered_at"],
 )
 
+# Lakebase databases registered in Unity Catalog, metastore-wide — workflow 03.
+lb_uc_catalogs_count = _mirror(
+    f"{CATALOG}.{SCHEMA}.lakebase_uc_catalogs", "lakebase_uc_catalogs",
+    """CREATE TABLE IF NOT EXISTS lakebase_uc_catalogs (
+        catalog_name   TEXT PRIMARY KEY,
+        owner          TEXT,
+        database_name  TEXT,
+        project_id     TEXT,
+        branch_id      TEXT,
+        workspace_id   TEXT,
+        comment        TEXT,
+        discovered_at  TIMESTAMP WITH TIME ZONE,
+        last_synced    TIMESTAMP WITH TIME ZONE DEFAULT NOW())""",
+    ["catalog_name", "owner", "database_name", "project_id", "branch_id", "workspace_id",
+     "comment", "discovered_at"],
+)
+
 # Per-service usage (system.ai_gateway.usage by service_name) — workflow 11.
 uag_service_usage_count = _mirror(
     f"{CATALOG}.{SCHEMA}.uag_service_usage", "uag_service_usage",
@@ -3173,6 +3190,7 @@ result = {
     "vs_endpoints": vs_ep_count,
     "vs_indexes": vs_idx_count,
     "lakebase_instances": lb_inst_count,
+    "lakebase_uc_catalogs": lb_uc_catalogs_count,
     "kb_billing_vs": vs_billing_count,
     "kb_billing_lakebase": lb_billing_count,
     "ua_daily_rows": ua_daily_count,

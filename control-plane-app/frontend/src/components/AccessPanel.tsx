@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { X } from 'lucide-react'
+import { KeyRound, X } from 'lucide-react'
 import { useGrants, useUpdateGrants, type GrantKind } from '@/api/hooks'
 import { Badge } from '@/components/ui/badge'
 import { PrincipalAutocomplete } from '@/components/PrincipalAutocomplete'
@@ -129,5 +129,22 @@ export function AccessPanel({ kind, name }: { kind: GrantKind; name: string }) {
         </div>
       )}
     </div>
+  )
+}
+
+/** The per-row "Access" toggle used in tables — one style everywhere. */
+export function AccessToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      onClick={(e) => { e.stopPropagation(); onToggle() }}
+      className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-md transition-colors focus-visible:outline focus-visible:outline-1 ${
+        open ? 'bg-db-red text-white hover:bg-db-red/90' : 'bg-db-red/10 text-db-red hover:bg-db-red/20'
+      }`}
+    >
+      <KeyRound className="w-3 h-3" />
+      Access
+    </button>
   )
 }

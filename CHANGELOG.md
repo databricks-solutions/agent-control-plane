@@ -19,10 +19,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are shown for context. Agent services and skills are read-only for now: they
   have no SQL grant syntax yet. Workspace objects can only be managed in the app's
   own workspace.
+- **Lakebase across workspaces.** The Lakebase Instances table now also lists
+  databases in other workspaces that are registered in Unity Catalog (discovered
+  metastore-wide as `MANAGED_ONLINE_CATALOG` catalogs, new `lakebase_uc_catalogs`
+  table), with a Workspace column and the database's UC catalogs. Each row's Access
+  panel shows the catalog's UC grants (any workspace) and the project's own
+  permissions (this workspace only). Unregistered databases in other workspaces
+  still appear only in the cost views — the table says so.
 
 ### Fixed
 - Picking a service principal in a principal search now fills in its application
   id, which grants and permission lists require, instead of its display name.
+- The Lakebase Instances table showed "—" for every name (it read `name`; the
+  synced column is `instance_name`).
 
 ## [0.1.4] - 2026-10-29
 

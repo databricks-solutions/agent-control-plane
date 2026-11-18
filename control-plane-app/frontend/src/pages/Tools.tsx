@@ -10,7 +10,7 @@ import {
   type SkillUsageRow,
 } from '@/api/hooks'
 import { RefreshButton } from '@/components/RefreshButton'
-import { AccessPanel } from '@/components/AccessPanel'
+import { AccessPanel, AccessToggle } from '@/components/AccessPanel'
 import { SortableHeader, useSort, sortRows } from '@/components/SortableTable'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -428,14 +428,7 @@ export default function ToolsPage() {
                             </td>
                             <td className="py-2.5 text-xs text-gray-500 dark:text-gray-400 max-w-xs truncate">{fn.description || '—'}</td>
                             <td className="py-2.5 text-right">
-                              <button
-                                type="button"
-                                aria-expanded={open}
-                                onClick={() => setFnAccess(open ? null : fullName)}
-                                className="text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400"
-                              >
-                                {open ? 'Hide access' : 'Access'}
-                              </button>
+                              <AccessToggle open={open} onToggle={() => setFnAccess(open ? null : fullName)} />
                             </td>
                           </tr>
                           {open && (
