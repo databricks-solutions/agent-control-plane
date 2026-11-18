@@ -1619,7 +1619,7 @@ function LakebaseTab({ days, setDays, selectedWsIds }: { days: number; setDays: 
                         <td className="py-2 pr-4">
                           {state
                             ? <Badge variant={isAvailable ? 'success' : 'error'} className="text-[10px]">{state}</Badge>
-                            : <span className="text-xs text-gray-400" title="Only the Unity Catalog registration is visible from this workspace">\u2014</span>}
+                            : <span className="text-xs text-gray-400" title="Only the Unity Catalog registration is visible from this workspace">{"\u2014"}</span>}
                         </td>
                         <td className="py-2 pr-4 text-gray-700 dark:text-gray-300">{inst.capacity || inst.size || '\u2014'}</td>
                         <td className="py-2 pr-4 text-gray-700 dark:text-gray-300">{inst.pg_version || inst.engine_version || '\u2014'}</td>
